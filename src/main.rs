@@ -1,7 +1,8 @@
 mod config;
 mod lyrics;
 mod position;
-mod search;
+mod api;
+mod spike;
 mod ui;
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -23,8 +24,8 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use rspotify::AuthCodeSpotify;
-use search::TrackResult;
-use ui::{AppState, LyricsState, Mode, SearchState};
+use api::search::TrackResult;
+use ui::{AppState, Focus, LyricsState, Nav, Screen, SearchState, SIDEBAR_ENTRIES};
 
 const TICK: Duration = Duration::from_millis(100);
 const DEBOUNCE: Duration = Duration::from_millis(250);
@@ -196,6 +197,20 @@ fn to_lyrics_state(cached: CachedLyrics) -> LyricsState {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    // Phase 0 design-scope spike: verify spirc.transfer/device-transfer and
+    // the playlist-reorder endpoint before any UI gets built around them.
+    // No TUI involved -- runs and exits.
+    if std::env::args().any(|a| a == "--spike-phase0") {
+        let token = api::load_or_refresh_token()
+            .await
+            .map_err(std::io::Error::other)?;
+        let client = api::client_from_token(token).await;
+        if let Err(e) = spike::run_phase0(&client).await {
+            eprintln!("spike failed: {e}");
+        }
+        return Ok(());
+    }
+
     install_panic_hook();
     // env_logger defaults to stderr -- wrong assumption made earlier that
     // this "doesn't collide with the TUI since it only writes to stdout":
@@ -221,9 +236,9 @@ async fn main() -> std::io::Result<()> {
     // and lyrics don't depend on this at all.
     let (client_tx, client_rx) = mpsc::channel::<Option<AuthCodeSpotify>>();
     tokio::spawn(async move {
-        match search::load_or_refresh_token().await {
+        match api::load_or_refresh_token().await {
             Ok(token) => {
-                let _ = client_tx.send(Some(search::client_from_token(token).await));
+                let _ = client_tx.send(Some(api::client_from_token(token).await));
             }
             Err(e) => {
                 log::warn!("search unavailable: failed to load/refresh Spotify token: {e}");
@@ -253,7 +268,8 @@ async fn main() -> std::io::Result<()> {
         position: Duration::ZERO,
         duration: Duration::ZERO,
         volume: u16::MAX, // matches the initial_volume set on connect_config above
-        mode: Mode::NowPlaying,
+        nav: Nav::new(),
+        sidebar_sel: 0,
         search: SearchState::new(),
     };
 
@@ -388,78 +404,24 @@ async fn main() -> std::io::Result<()> {
 
         if event::poll(TICK)? {
             if let Event::Key(key) = event::read()? {
-                match app.mode {
-                    Mode::Searching => match key.code {
-                        KeyCode::Esc => {
-                            app.mode = Mode::NowPlaying;
-                        }
-                        KeyCode::Backspace => {
-                            app.search.query.pop();
-                            app.search.results.clear();
-                            app.search.error = None;
-                        }
-                        KeyCode::Up => {
-                            app.search.selected = app.search.selected.saturating_sub(1);
-                        }
-                        KeyCode::Down => {
-                            if !app.search.results.is_empty() {
-                                app.search.selected =
-                                    (app.search.selected + 1).min(app.search.results.len() - 1);
-                            }
-                        }
-                        KeyCode::Enter => {
-                            if app.search.results.is_empty() {
-                                if let Some(client) = spotify_client.clone() {
-                                    if !app.search.query.trim().is_empty() {
-                                        let query = app.search.query.clone();
-                                        let tx = search_tx.clone();
-                                        app.search.searching = true;
-                                        app.search.error = None;
-                                        tokio::spawn(async move {
-                                            // Dev Mode apps cap search at 10 results (down
-                                            // from 50 as of Spotify's Feb 2026 migration) --
-                                            // confirmed live, anything higher is a 400
-                                            // "Invalid limit".
-                                            let result = search::search_tracks(&client, &query, 10)
-                                                .await
-                                                .map_err(|e| e.to_string());
-                                            let _ = tx.send(result);
-                                        });
-                                    }
-                                }
-                            } else if let Some(track) =
-                                app.search.results.get(app.search.selected).cloned()
-                            {
-                                // activate() must precede load(): Spirc
-                                // ignores Load while not the active
-                                // device (confirmed live, logged plainly).
-                                let _ = spirc.activate();
-                                let _ = spirc.load(LoadRequest::from_context_uri(
-                                    track.uri,
-                                    Default::default(),
-                                ));
-                                let _ = spirc.play();
-                                app.mode = Mode::NowPlaying;
-                            }
-                        }
-                        KeyCode::Char(c) => {
-                            app.search.query.push(c);
-                            app.search.results.clear();
-                            app.search.error = None;
-                        }
-                        _ => {}
-                    },
-                    Mode::NowPlaying => match key.code {
+                // Tab is a distinct KeyCode, never a `Char(_)` -- safe to
+                // intercept before anything else without ever eating a
+                // literal keystroke a text field might want.
+                if key.code == KeyCode::Tab {
+                    app.nav.toggle_focus();
+                } else if app.nav.focus == Focus::Sidebar {
+                    match key.code {
                         KeyCode::Char('q') => break 'inner LoopExit::Quit,
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             break 'inner LoopExit::Quit
                         }
-                        KeyCode::Char('f') => {
+                        KeyCode::Char('f') if *app.nav.top() == Screen::NowPlaying => {
                             app.fullscreen = !app.fullscreen;
                             tmux_toggle_zoom();
                         }
                         KeyCode::Char('/') => {
-                            app.mode = Mode::Searching;
+                            app.nav.goto(Screen::Search);
+                            app.nav.focus = Focus::Main;
                             app.search.query.clear();
                             app.search.results.clear();
                             app.search.error = None;
@@ -473,6 +435,12 @@ async fn main() -> std::io::Result<()> {
                         KeyCode::Char('p') => {
                             let _ = spirc.prev();
                         }
+                        KeyCode::Char('+') => {
+                            let _ = spirc.volume_up();
+                        }
+                        KeyCode::Char('-') => {
+                            let _ = spirc.volume_down();
+                        }
                         KeyCode::Left => {
                             let target =
                                 (tracker.progress_ms(Instant::now()) as i64 - SEEK_STEP_MS).max(0);
@@ -483,13 +451,133 @@ async fn main() -> std::io::Result<()> {
                             let _ = spirc.set_position_ms(target as u32);
                         }
                         KeyCode::Up => {
-                            let _ = spirc.volume_up();
+                            app.sidebar_sel = app.sidebar_sel.saturating_sub(1);
                         }
                         KeyCode::Down => {
-                            let _ = spirc.volume_down();
+                            app.sidebar_sel = (app.sidebar_sel + 1).min(SIDEBAR_ENTRIES.len() - 1);
+                        }
+                        KeyCode::Enter => {
+                            let (_, screen) = SIDEBAR_ENTRIES[app.sidebar_sel];
+                            app.nav.goto(screen);
+                            app.nav.focus = Focus::Main;
+                            if screen == Screen::Search {
+                                app.search.query.clear();
+                                app.search.results.clear();
+                                app.search.error = None;
+                            }
                         }
                         _ => {}
-                    },
+                    }
+                } else {
+                    // focus == Main
+                    match *app.nav.top() {
+                        Screen::Search => match key.code {
+                            KeyCode::Esc => {
+                                app.nav.escape();
+                            }
+                            KeyCode::Backspace => {
+                                app.search.query.pop();
+                                app.search.results.clear();
+                                app.search.error = None;
+                            }
+                            KeyCode::Up => {
+                                app.search.selected = app.search.selected.saturating_sub(1);
+                            }
+                            KeyCode::Down => {
+                                if !app.search.results.is_empty() {
+                                    app.search.selected =
+                                        (app.search.selected + 1).min(app.search.results.len() - 1);
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if app.search.results.is_empty() {
+                                    if let Some(client) = spotify_client.clone() {
+                                        if !app.search.query.trim().is_empty() {
+                                            let query = app.search.query.clone();
+                                            let tx = search_tx.clone();
+                                            app.search.searching = true;
+                                            app.search.error = None;
+                                            tokio::spawn(async move {
+                                                // Dev Mode apps cap search at 10 results (down
+                                                // from 50 as of Spotify's Feb 2026 migration) --
+                                                // confirmed live, anything higher is a 400
+                                                // "Invalid limit".
+                                                let result = api::search::search_tracks(&client, &query, 10)
+                                                    .await
+                                                    .map_err(|e| e.to_string());
+                                                let _ = tx.send(result);
+                                            });
+                                        }
+                                    }
+                                } else if let Some(track) =
+                                    app.search.results.get(app.search.selected).cloned()
+                                {
+                                    // activate() must precede load(): Spirc
+                                    // ignores Load while not the active
+                                    // device (confirmed live, logged plainly).
+                                    let _ = spirc.activate();
+                                    let _ = spirc.load(LoadRequest::from_context_uri(
+                                        track.uri,
+                                        Default::default(),
+                                    ));
+                                    let _ = spirc.play();
+                                    app.nav.goto(Screen::NowPlaying);
+                                }
+                            }
+                            KeyCode::Char(c) => {
+                                app.search.query.push(c);
+                                app.search.results.clear();
+                                app.search.error = None;
+                            }
+                            _ => {}
+                        },
+                        Screen::NowPlaying => match key.code {
+                            KeyCode::Esc => {
+                                app.nav.escape();
+                            }
+                            KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                break 'inner LoopExit::Quit
+                            }
+                            KeyCode::Char('f') => {
+                                app.fullscreen = !app.fullscreen;
+                                tmux_toggle_zoom();
+                            }
+                            KeyCode::Char('/') => {
+                                app.nav.push(Screen::Search);
+                                app.search.query.clear();
+                                app.search.results.clear();
+                                app.search.error = None;
+                            }
+                            KeyCode::Char(' ') => {
+                                let _ = spirc.play_pause();
+                            }
+                            KeyCode::Char('n') => {
+                                let _ = spirc.next();
+                            }
+                            KeyCode::Char('p') => {
+                                let _ = spirc.prev();
+                            }
+                            KeyCode::Char('+') | KeyCode::Up => {
+                                let _ = spirc.volume_up();
+                            }
+                            KeyCode::Char('-') | KeyCode::Down => {
+                                let _ = spirc.volume_down();
+                            }
+                            KeyCode::Left => {
+                                let target = (tracker.progress_ms(Instant::now()) as i64
+                                    - SEEK_STEP_MS)
+                                    .max(0);
+                                let _ = spirc.set_position_ms(target as u32);
+                            }
+                            KeyCode::Right => {
+                                let target =
+                                    tracker.progress_ms(Instant::now()) as i64 + SEEK_STEP_MS;
+                                let _ = spirc.set_position_ms(target as u32);
+                            }
+                            _ => {}
+                        },
+                    }
                 }
             }
         }

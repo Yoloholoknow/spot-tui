@@ -1,18 +1,238 @@
 //! ratatui rendering: compact side-pane layout and fullscreen layout.
 
 use crate::lyrics::LyricLine;
-use crate::search::TrackResult;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout};
+use crate::api::search::TrackResult;
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 use std::time::Duration;
 
-#[derive(PartialEq, Eq)]
-pub enum Mode {
+/// A screen in the main-pane stack. Only the two screens that exist today
+/// -- more variants land alongside the phase that actually builds them
+/// (Library in Phase 2, Queue in Phase 7, Devices in Phase 8, Help in
+/// Phase 9), rather than stubbing out destinations nothing can reach yet.
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub enum Screen {
     NowPlaying,
-    Searching,
+    Search,
+}
+
+/// Which persistent pane currently receives arrow keys / `Enter`, toggled
+/// by `Tab`. See the design-scope plan's Navigation model.
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub enum Focus {
+    Sidebar,
+    Main,
+}
+
+/// The main-pane screen stack plus which persistent pane has focus.
+/// `NowPlaying` is always the stack root and can never be popped past.
+pub struct Nav {
+    stack: Vec<Screen>,
+    pub focus: Focus,
+}
+
+impl Nav {
+    pub fn new() -> Self {
+        Self {
+            stack: vec![Screen::NowPlaying],
+            focus: Focus::Sidebar,
+        }
+    }
+
+    pub fn top(&self) -> &Screen {
+        self.stack.last().expect("stack is never empty -- NowPlaying is the permanent root")
+    }
+
+    pub fn depth(&self) -> usize {
+        self.stack.len()
+    }
+
+    /// In-content drill-down: pushes a child screen, `Esc` pops one level.
+    pub fn push(&mut self, screen: Screen) {
+        self.stack.push(screen);
+    }
+
+    /// Pops one level. Does nothing at the root (`NowPlaying` can't be
+    /// popped past) -- returns whether it actually popped.
+    pub fn pop(&mut self) -> bool {
+        if self.stack.len() > 1 {
+            self.stack.pop();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Sidebar-triggered navigation: collapses any in-content drill-down
+    /// depth, like switching a tab -- but `NowPlaying` stays the
+    /// permanent root underneath, exactly as `push`/`pop` leave it. A
+    /// version of this that replaced the whole stack made `Esc` a
+    /// permanent no-op after any sidebar-triggered navigation, since
+    /// `pop` refuses to remove the last remaining screen -- there was
+    /// nothing left under it to land on.
+    pub fn goto(&mut self, screen: Screen) {
+        self.stack = if screen == Screen::NowPlaying {
+            vec![Screen::NowPlaying]
+        } else {
+            vec![Screen::NowPlaying, screen]
+        };
+    }
+
+    /// `Esc`'s full behavior in the Main pane: pop one level, and if that
+    /// pop lands back at the permanent root, hand focus to the Sidebar in
+    /// the same keystroke -- a separate second `Esc` just to reach the
+    /// Sidebar after already backing out felt like one press too many
+    /// (confirmed live). Every future main-pane screen's `Esc` handler
+    /// should call this rather than reimplementing the pop-then-check.
+    pub fn escape(&mut self) {
+        self.pop();
+        if self.depth() == 1 {
+            self.focus = Focus::Sidebar;
+        }
+    }
+
+    pub fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::Sidebar => Focus::Main,
+            Focus::Main => Focus::Sidebar,
+        };
+    }
+}
+
+impl Default for Nav {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Sidebar menu entries. Shared between rendering and key-dispatch so the
+/// two can never drift. Grows alongside the phase that builds each real
+/// destination (Library in Phase 2, Queue in Phase 7, Devices in Phase 8,
+/// Help in Phase 9) -- only the two screens that exist today are listed.
+pub const SIDEBAR_ENTRIES: &[(&str, Screen)] = &[("Now Playing", Screen::NowPlaying), ("Search", Screen::Search)];
+
+#[cfg(test)]
+mod nav_tests {
+    use super::*;
+
+    #[test]
+    fn new_starts_at_now_playing_with_sidebar_focus() {
+        let nav = Nav::new();
+        assert_eq!(nav.top(), &Screen::NowPlaying);
+        assert_eq!(nav.focus, Focus::Sidebar);
+        assert_eq!(nav.depth(), 1);
+    }
+
+    #[test]
+    fn push_adds_a_screen_on_top() {
+        let mut nav = Nav::new();
+        nav.push(Screen::Search);
+        assert_eq!(nav.top(), &Screen::Search);
+        assert_eq!(nav.depth(), 2);
+    }
+
+    #[test]
+    fn pop_returns_to_previous_screen() {
+        let mut nav = Nav::new();
+        nav.push(Screen::Search);
+        assert!(nav.pop());
+        assert_eq!(nav.top(), &Screen::NowPlaying);
+        assert_eq!(nav.depth(), 1);
+    }
+
+    #[test]
+    fn pop_at_root_is_a_noop_and_returns_false() {
+        let mut nav = Nav::new();
+        assert!(!nav.pop());
+        assert_eq!(nav.top(), &Screen::NowPlaying);
+        assert_eq!(nav.depth(), 1);
+    }
+
+    #[test]
+    fn escape_from_a_pushed_screen_pops_and_focuses_sidebar_in_one_step() {
+        // Confirmed live: requiring a *second*, separate Esc just to
+        // reach the Sidebar after already backing out to the root felt
+        // like one press too many. One Esc should do both.
+        let mut nav = Nav::new();
+        nav.push(Screen::Search);
+        nav.focus = Focus::Main;
+        nav.escape();
+        assert_eq!(nav.top(), &Screen::NowPlaying);
+        assert_eq!(nav.depth(), 1);
+        assert_eq!(nav.focus, Focus::Sidebar);
+    }
+
+    #[test]
+    fn escape_at_the_root_focuses_sidebar_even_with_nothing_to_pop() {
+        let mut nav = Nav::new();
+        nav.focus = Focus::Main;
+        nav.escape();
+        assert_eq!(nav.top(), &Screen::NowPlaying);
+        assert_eq!(nav.depth(), 1);
+        assert_eq!(nav.focus, Focus::Sidebar);
+    }
+
+    #[test]
+    fn escape_one_level_deep_of_a_taller_stack_does_not_yet_touch_focus() {
+        // Only hands control to the Sidebar once Main is fully backed
+        // out of, not on every intermediate pop.
+        let mut nav = Nav::new();
+        nav.push(Screen::Search);
+        nav.push(Screen::Search);
+        nav.focus = Focus::Main;
+        nav.escape();
+        assert_eq!(nav.depth(), 2);
+        assert_eq!(nav.focus, Focus::Main);
+    }
+
+    #[test]
+    fn goto_collapses_any_drill_down_depth_but_keeps_now_playing_at_the_root() {
+        // NowPlaying must never be evicted from the stack -- it's the
+        // permanent root Esc can always land on. A `goto` that replaced
+        // the whole stack (the original, buggy implementation) made Esc
+        // a permanent no-op after any sidebar-triggered navigation: real
+        // bug, reported live ("esc doesn't work, stuck in search").
+        let mut nav = Nav::new();
+        nav.push(Screen::Search);
+        nav.push(Screen::Search);
+        nav.goto(Screen::Search);
+        assert_eq!(nav.depth(), 2);
+        assert_eq!(nav.top(), &Screen::Search);
+    }
+
+    #[test]
+    fn goto_now_playing_collapses_all_the_way_to_the_root() {
+        let mut nav = Nav::new();
+        nav.push(Screen::Search);
+        nav.goto(Screen::NowPlaying);
+        assert_eq!(nav.depth(), 1);
+        assert_eq!(nav.top(), &Screen::NowPlaying);
+    }
+
+    #[test]
+    fn esc_after_sidebar_triggered_goto_returns_to_now_playing_not_stuck() {
+        // The exact repro: enter Search via `goto` (as the Sidebar and
+        // the global `/` shortcut both do), then Esc once -- must land on
+        // NowPlaying, not stay stuck on Search with pop() being a no-op.
+        let mut nav = Nav::new();
+        nav.goto(Screen::Search);
+        assert!(nav.pop());
+        assert_eq!(nav.top(), &Screen::NowPlaying);
+        assert_eq!(nav.depth(), 1);
+    }
+
+    #[test]
+    fn toggle_focus_flips_between_sidebar_and_main() {
+        let mut nav = Nav::new();
+        assert_eq!(nav.focus, Focus::Sidebar);
+        nav.toggle_focus();
+        assert_eq!(nav.focus, Focus::Main);
+        nav.toggle_focus();
+        assert_eq!(nav.focus, Focus::Sidebar);
+    }
 }
 
 pub struct SearchState {
@@ -164,22 +384,88 @@ pub struct AppState {
     /// events -- reflects changes from any source, not just our own
     /// up/down keys (e.g. adjusting it from the phone shows up here too).
     pub volume: u16,
-    pub mode: Mode,
+    pub nav: Nav,
+    pub sidebar_sel: usize,
     pub search: SearchState,
 }
 
 pub fn render(frame: &mut Frame, app: &AppState) {
-    if app.mode == Mode::Searching {
-        render_search(frame, app);
-    } else if app.fullscreen {
+    if app.fullscreen && *app.nav.top() == Screen::NowPlaying {
         render_fullscreen(frame, app);
-    } else {
-        render_compact(frame, app);
+        return;
     }
+
+    let area = frame.area();
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2), Constraint::Length(1)])
+        .split(area);
+    let (body_area, playbar_area, status_area) = (outer[0], outer[1], outer[2]);
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(22), Constraint::Min(1)])
+        .split(body_area);
+    let (sidebar_area, main_area) = (body[0], body[1]);
+
+    render_sidebar(frame, app, sidebar_area);
+    match app.nav.top() {
+        Screen::Search => render_search(frame, app, main_area),
+        Screen::NowPlaying => render_compact(frame, app, main_area),
+    }
+    render_playbar(frame, app, playbar_area);
+    render_status(frame, app, status_area);
 }
 
-fn render_search(frame: &mut Frame, app: &AppState) {
-    let area = frame.area();
+fn render_sidebar(frame: &mut Frame, app: &AppState, area: Rect) {
+    let items: Vec<ListItem> = SIDEBAR_ENTRIES
+        .iter()
+        .enumerate()
+        .map(|(i, (label, screen))| {
+            let is_open = app.nav.depth() == 1 && app.nav.top() == screen;
+            let is_cursor = app.nav.focus == Focus::Sidebar && i == app.sidebar_sel;
+            let mut style = Style::default();
+            if is_open {
+                style = style.fg(ACCENT).add_modifier(Modifier::BOLD);
+            }
+            if is_cursor {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            ListItem::new(*label).style(style)
+        })
+        .collect();
+    let border_style = if app.nav.focus == Focus::Sidebar {
+        Style::default().fg(ACCENT)
+    } else {
+        Style::default()
+    };
+    frame.render_widget(
+        List::new(items).block(Block::default().borders(Borders::RIGHT).border_style(border_style)),
+        area,
+    );
+}
+
+fn render_playbar(frame: &mut Frame, app: &AppState, area: Rect) {
+    let title_room = (area.width as usize).saturating_sub(28);
+    let text = format!(
+        "{} {}   {}   {}",
+        playing_icon(app),
+        header(app, title_room),
+        time_readout(app),
+        volume_readout(app),
+    );
+    frame.render_widget(
+        Paragraph::new(text).block(Block::default().borders(Borders::TOP)),
+        area,
+    );
+}
+
+fn render_status(frame: &mut Frame, app: &AppState, area: Rect) {
+    let text = format!("stack depth {} \u{2014} Tab switch pane, Esc back", app.nav.depth());
+    frame.render_widget(Paragraph::new(text).style(Style::default().fg(Color::DarkGray)), area);
+}
+
+fn render_search(frame: &mut Frame, app: &AppState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(1)])
@@ -314,8 +600,7 @@ fn body_lines(app: &AppState) -> Vec<Line<'static>> {
     }
 }
 
-fn render_compact(frame: &mut Frame, app: &AppState) {
-    let area = frame.area();
+fn render_compact(frame: &mut Frame, app: &AppState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

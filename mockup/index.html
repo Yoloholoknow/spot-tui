@@ -1,0 +1,787 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>spot-tui design preview</title>
+<style>
+  :root {
+    --bg: #10141c;
+    --panel: #161b26;
+    --border: #2a3142;
+    --text: #cdd6e0;
+    --dim: #5a6472;
+    --accent: #3ec46d;
+    --accent-dim: #2a7a45;
+    --danger: #e0645a;
+    --warn: #d9a441;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #05070a;
+    color: var(--text);
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 15px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #shell {
+    width: 1180px;
+    max-width: 97vw;
+    height: 700px;
+    max-height: 92vh;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  #titlebar {
+    background: #0a0e15;
+    padding: 6px 12px;
+    font-size: 12px;
+    color: var(--dim);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+  }
+  #titlebar .dots span {
+    display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+    margin-right: 6px; background: #333;
+  }
+  #body { flex: 1; display: flex; overflow: hidden; min-height: 0; }
+  #sidebar {
+    width: 230px; flex-shrink: 0; overflow-y: auto;
+    padding: 10px 0; border-right: 1px solid var(--border);
+    border-top: 2px solid transparent;
+  }
+  #sidebar.focused { border-top-color: var(--accent); }
+  .sb-section { padding: 10px 16px 4px; font-size: 10px; letter-spacing: 1px; color: var(--dim); }
+  .sb-divider { height: 1px; background: var(--border); margin: 8px 14px; }
+  .sb-item {
+    padding: 5px 16px; cursor: pointer; display: flex; gap: 8px; align-items: center;
+    border-left: 2px solid transparent; color: var(--text);
+  }
+  .sb-item .ic { color: var(--dim); width: 12px; display: inline-block; text-align: center; }
+  .sb-item .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sb-item.sel { background: rgba(62,196,109,0.14); }
+  .sb-item.open { border-left-color: var(--accent); color: var(--accent); }
+  #main {
+    flex: 1; min-width: 0; overflow-y: auto;
+    padding: 18px 24px; white-space: pre-wrap; line-height: 1.5;
+    border-top: 2px solid transparent;
+  }
+  #main.focused { border-top-color: var(--accent); }
+  #playbar {
+    border-top: 1px solid var(--border); background: #0a0e15;
+    padding: 8px 16px; display: flex; align-items: center; gap: 12px;
+  }
+  .pb-art {
+    width: 38px; height: 38px; border-radius: 4px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700; color: rgba(255,255,255,.85);
+  }
+  .pb-info { min-width: 0; width: 190px; flex-shrink: 0; }
+  .pb-title, .pb-artist { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pb-title { font-size: 13px; color: var(--text); }
+  .pb-artist { font-size: 11px; color: var(--dim); }
+  .pb-gauge { flex: 1; font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 8px; }
+  .pb-vol { font-size: 11px; color: var(--dim); width: 60px; text-align: right; flex-shrink: 0; }
+  .pb-controls { display: flex; align-items: center; gap: 10px; font-size: 14px; flex-shrink: 0; }
+  .pb-toggles { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 700; flex-shrink: 0; }
+  .pb-btn { cursor: pointer; color: var(--dim); }
+  .pb-btn.accent { color: var(--accent); }
+  .art-hero {
+    width: 200px; height: 200px; border-radius: 8px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; position: relative;
+    box-shadow: 0 12px 30px rgba(0,0,0,0.45);
+  }
+  .art-mono { font-size: 56px; font-weight: 700; color: rgba(255,255,255,.85); letter-spacing: 2px; }
+  .art-tag { position: absolute; bottom: 8px; right: 10px; font-size: 10px; color: rgba(255,255,255,.35); letter-spacing: 1px; }
+  .np-top { display: flex; gap: 24px; align-items: flex-start; margin-bottom: 18px; }
+  .np-meta { padding-top: 6px; }
+  .np-title { font-size: 22px; font-weight: 700; color: var(--text); }
+  .np-artist { font-size: 15px; color: var(--dim); margin-top: 2px; }
+  .np-transport { margin-top: 16px; font-size: 14px; }
+  .lyrics-box { font-size: 16px; line-height: 1.9; }
+  .lyrics-box .cur { font-size: 19px; font-weight: 700; }
+  #shell.fullscreen #sidebar, #shell.fullscreen #playbar { display: none; }
+  #shell.fullscreen #main { display: flex; flex-direction: column; justify-content: center; padding: 40px 60px; }
+  #shell.fullscreen .art-hero { width: 320px; height: 320px; }
+  #shell.fullscreen .art-mono { font-size: 88px; }
+  #shell.fullscreen .np-title { font-size: 30px; }
+  #shell.fullscreen .np-artist { font-size: 18px; }
+  #shell.fullscreen .lyrics-box { font-size: 19px; }
+  #shell.fullscreen .lyrics-box .cur { font-size: 23px; }
+  #statusbar {
+    border-top: 1px solid var(--border);
+    padding: 6px 14px;
+    font-size: 12px;
+    color: var(--dim);
+    background: #0a0e15;
+  }
+  #statusbar b { color: var(--text); }
+  .header { font-weight: 700; color: var(--text); }
+  .dim { color: var(--dim); }
+  .accent { color: var(--accent); font-weight: 700; }
+  .danger { color: var(--danger); }
+  .warn { color: var(--warn); }
+  .sel { background: rgba(62,196,109,0.14); }
+  .rule { color: var(--border); }
+  .cursor { background: var(--text); color: var(--bg); }
+  .gauge-fill { color: var(--accent); }
+  .gauge-empty { color: #2a3142; }
+  .pill {
+    display: inline-block; border: 1px solid var(--border); border-radius: 3px;
+    padding: 0 6px; font-size: 11px; color: var(--dim); margin-left: 6px;
+  }
+  .modal-overlay {
+    position: absolute; inset: 0; background: rgba(5,7,10,0.72);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .modal-box {
+    background: var(--panel); border: 1px solid var(--accent-dim);
+    border-radius: 6px; padding: 18px 24px; min-width: 340px;
+  }
+  #shell { position: relative; }
+  .banner {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    background: #161b26; border: 1px solid var(--border); color: var(--dim);
+    font-size: 12px; padding: 6px 14px; border-radius: 4px; font-family: monospace;
+  }
+</style>
+</head>
+<body>
+
+<div class="banner">design preview -- not the real app -- keyboard AND mouse both work here for preview convenience</div>
+
+<div id="shell">
+  <div id="titlebar">
+    <span class="dots"><span></span><span></span><span></span>spot-tui</span>
+    <span id="breadcrumb">now playing</span>
+  </div>
+  <div id="body">
+    <div id="sidebar"></div>
+    <div id="main"></div>
+  </div>
+  <div id="playbar"></div>
+  <div id="statusbar"></div>
+</div>
+
+<script>
+window.onerror = function(msg, src, line, col, err) {
+  const box = document.getElementById("main");
+  if (box) {
+    box.style.whiteSpace = "pre-wrap";
+    box.innerHTML = "<div style=\"color:#e0645a\">JS ERROR: " + msg +
+      "<br>at line " + line + ":" + col +
+      (err && err.stack ? "<br><br>" + String(err.stack).replace(/</g,"&lt;") : "") + "</div>";
+  }
+  return false;
+};
+
+/* ---------- sample data (real artists/tracks from this project's own history) ---------- */
+
+const T = (title, artist, album, dur) => ({title, artist, album, dur});
+
+const TRACKS = {
+  loveMeNot:  T("Love Me Not", "Ravyn Lenae", "Bird's Eye", "3:33"),
+  listenDown: T("listen to this when you're down <3", "yung kai", "listen to this when you're down <3", "1:53"),
+  besideYou:  T("beside you", "keshi", "GABRIEL", "2:46"),
+  mindPrison: T("Mind Is A Prison", "Alec Benjamin", "(Un)Commentary", "2:44"),
+  blue:       T("blue", "yung kai", "stay with the ocean, i'll find you", "3:34"),
+  skeletons:  T("skeletons", "keshi", "skeletons", "2:32"),
+  ithinkofyou:T("i think of you the most", "yung kai", "i think of you the most", "2:10"),
+  sailorSong: T("Sailor Song", "Gigi Perez", "At The Beach, In Every Life", "3:31"),
+  creep:      T("Creep", "Radiohead", "Pablo Honey", "3:59"),
+  retour:     T("Nuit", "Tony Anderson", "Retour", "7:05"),
+};
+
+const LIKED_SONGS = [TRACKS.loveMeNot, TRACKS.listenDown, TRACKS.besideYou, TRACKS.mindPrison,
+                      TRACKS.blue, TRACKS.skeletons, TRACKS.sailorSong, TRACKS.creep];
+
+const ALBUMS = [
+  {name: "Bird's Eye", artist: "Ravyn Lenae", tracks: [TRACKS.loveMeNot, TRACKS.mindPrison]},
+  {name: "GABRIEL", artist: "keshi", tracks: [TRACKS.besideYou, TRACKS.skeletons]},
+  {name: "Pablo Honey", artist: "Radiohead", tracks: [TRACKS.creep]},
+  {name: "Retour", artist: "Tony Anderson", tracks: [TRACKS.retour]},
+];
+
+const ARTISTS = [
+  {name: "yung kai", following: true, topTracks: [TRACKS.listenDown, TRACKS.blue, TRACKS.ithinkofyou],
+   albums: ["listen to this when you're down <3", "stay with the ocean, i'll find you"]},
+  {name: "keshi", following: true, topTracks: [TRACKS.besideYou, TRACKS.skeletons],
+   albums: ["GABRIEL"]},
+  {name: "Ravyn Lenae", following: false, topTracks: [TRACKS.loveMeNot],
+   albums: ["Bird's Eye"]},
+  {name: "Radiohead", following: true, topTracks: [TRACKS.creep],
+   albums: ["Pablo Honey"]},
+];
+
+let PLAYLISTS = [
+  {name: "late night drive", tracks: [TRACKS.besideYou, TRACKS.blue, TRACKS.retour]},
+  {name: "sad girl hours", tracks: [TRACKS.listenDown, TRACKS.mindPrison]},
+  {name: "focus", tracks: [TRACKS.retour]},
+];
+
+const QUEUE = [TRACKS.blue, TRACKS.skeletons, TRACKS.sailorSong, TRACKS.creep];
+
+const DEVICES = [
+  {name: "This computer (spot-tui)", active: true},
+  {name: "iPhone", active: false},
+  {name: "Living Room speaker", active: false},
+];
+
+const LYRICS = [
+  "you're the one that got away, and i'm not okay",
+  "see, right now, I need you, I'll meet you somewhere now",
+  "you up now, I see you, I get you, take care now",
+  "slow down, be cool, I miss you, come here now",
+  "for you, for you, for you",
+];
+
+/* ---------- state ---------- */
+
+let stack = [{screen: "nowplaying"}];
+let sel = {};              // selected index per screen key
+let mode = null;           // null | "input" | "confirm" | "move"
+let inputTarget = null;    // "search" | "create" | "rename"
+let inputBuf = "";
+let confirmMsg = "";
+let confirmAction = null;
+let moveList = null;       // array being reordered live
+let moveIndex = null;
+let nowPlaying = { track: TRACKS.loveMeNot, playing: true, pos: 43, dur: 213, vol: 100 };
+let searchResults = [];
+let focus = "sidebar";     // "sidebar" | "main"
+let sidebarSel = 0;
+let fullscreen = false;
+let queueIndex = 0;        // index into QUEUE of the currently-playing track
+let shuffle = false;
+let repeat = false;
+
+function curScreen() { return stack[stack.length - 1]; }
+function push(screen, ctx) { stack.push(Object.assign({screen}, ctx || {})); }
+function pop() { if (stack.length > 1) stack.pop(); }
+function goto(screen, ctx) {
+  const target = Object.assign({screen}, ctx || {});
+  // nowplaying always stays at the bottom of the stack, or Esc has
+  // nowhere left to pop to -- a version of this that replaced the whole
+  // stack made Esc a permanent no-op after any sidebar-triggered nav.
+  stack = screen === "nowplaying" ? [target] : [{screen: "nowplaying"}, target];
+  setSel(0);
+}
+function selKey() { return curScreen().screen + JSON.stringify(curScreen().name || curScreen().playlist || ""); }
+function getSel() { return sel[selKey()] || 0; }
+function setSel(v) { sel[selKey()] = v; }
+
+/* ---------- rendering ---------- */
+
+function esc(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
+function line(text, cls) { return `<div class="${cls||''}">${text}</div>`; }
+function ruleLine() { return `<div class="rule">${"─".repeat(78)}</div>`; }
+
+function renderList(items, labelFn, selected) {
+  return items.map((it, i) =>
+    `<div class="${i === selected ? "sel accent" : ""}" data-i="${i}">${(i === selected ? "&gt; " : "  ")}${esc(labelFn(it))}</div>`
+  ).join("");
+}
+
+function hashHue(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h % 360;
+}
+function artStyle(track) {
+  const h1 = hashHue(track.album + track.artist);
+  const h2 = (h1 + 40) % 360;
+  return `background: linear-gradient(135deg, hsl(${h1},55%,32%), hsl(${h2},60%,20%));`;
+}
+function monogram(track) {
+  return ((track.artist[0] || "") + (track.album[0] || track.title[0] || "")).toUpperCase();
+}
+
+function nowPlayingHero() {
+  const tr = nowPlaying.track;
+  const icon = nowPlaying.playing ? "▶" : "⏸";
+  const filled = Math.round((nowPlaying.pos / nowPlaying.dur) * 40);
+  const gauge = `<span class="gauge-fill">${"█".repeat(filled)}</span><span class="gauge-empty">${"░".repeat(40-filled)}</span>`;
+  const mm = s => `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;
+  let html = `<div class="np-top">
+    <div class="art-hero" style="${artStyle(tr)}"><span class="art-mono">${esc(monogram(tr))}</span><span class="art-tag">ART</span></div>
+    <div class="np-meta">
+      <div class="np-title">${esc(tr.title)}</div>
+      <div class="np-artist">${esc(tr.artist)} — ${esc(tr.album)}</div>
+      <div class="np-transport">${icon} ${mm(nowPlaying.pos)} / ${mm(nowPlaying.dur)}&nbsp;&nbsp;&nbsp;vol ${nowPlaying.vol}%<br>${gauge}</div>
+    </div>
+  </div>`;
+  html += ruleLine();
+  const curLine = 2;
+  html += `<div class="lyrics-box">` + LYRICS.map((l, i) =>
+    `<div class="${i === curLine ? "cur accent" : "dim"}">${esc(l)}</div>`
+  ).join("") + `</div>`;
+  return html;
+}
+
+function renderScreen() {
+  const t = curScreen();
+  let html = "";
+  let crumb = "now playing";
+
+  if (mode === "input") {
+    html = renderInputScreen();
+  } else if (t.screen === "nowplaying") {
+    crumb = "now playing";
+    html = nowPlayingHero();
+  } else if (t.screen === "search") {
+    crumb = "search";
+    html = line(`<span class="header">/ ${esc(inputBuf)}<span class="cursor">&nbsp;</span></span>`) + ruleLine();
+    if (searchResults.length === 0) {
+      html += line("type a query, Enter to search, Esc to cancel", "dim");
+    } else {
+      html += renderList(searchResults, r => `${r.artist} — ${r.title} [${r.album}]`, getSel());
+    }
+  } else if (t.screen === "library") {
+    crumb = "library";
+    const entries = ["Liked Songs", "Saved Albums", "Followed Artists", "Your Playlists"];
+    html = line("<span class=\"header\">Library</span>") + ruleLine() +
+           renderList(entries, e => e, getSel());
+  } else if (t.screen === "likedSongs") {
+    crumb = "library / liked songs";
+    html = line("<span class=\"header\">Liked Songs</span>") + ruleLine() +
+           renderList(LIKED_SONGS, tr => `${tr.artist} — ${tr.title}`, getSel());
+  } else if (t.screen === "savedAlbums") {
+    crumb = "library / saved albums";
+    html = line("<span class=\"header\">Saved Albums</span>") + ruleLine() +
+           renderList(ALBUMS, a => `${a.name} — ${a.artist}`, getSel());
+  } else if (t.screen === "followedArtists") {
+    crumb = "library / followed artists";
+    html = line("<span class=\"header\">Followed Artists</span>") + ruleLine() +
+           renderList(ARTISTS, a => a.name + (a.following ? "" : "  (not following)"), getSel());
+  } else if (t.screen === "yourPlaylists") {
+    crumb = "library / your playlists";
+    html = line("<span class=\"header\">Your Playlists</span>&nbsp;&nbsp;<span class=\"pill\">c: create</span>") + ruleLine() +
+           renderList(PLAYLISTS, p => `${p.name}  (${p.tracks.length} tracks)`, getSel());
+  } else if (t.screen === "artistDetail") {
+    crumb = "artist / " + t.name.name;
+    const a = t.name;
+    html = line(`<span class="header">${esc(a.name)}</span>&nbsp;&nbsp;<span class="pill">${a.following ? "following" : "not following"} (f to toggle)</span>`) + ruleLine();
+    html += line("top tracks", "dim");
+    html += renderList(a.topTracks, tr => `${tr.title}`, getSel());
+    html += line("");
+    html += line("albums: " + a.albums.join(", "), "dim");
+  } else if (t.screen === "albumDetail") {
+    crumb = "album / " + t.album.name;
+    const al = t.album;
+    html = line(`<span class="header">${esc(al.name)} — ${esc(al.artist)}</span>&nbsp;&nbsp;<span class="pill">Enter: play album</span>`) + ruleLine() +
+           renderList(al.tracks, tr => `${tr.title}  (${tr.dur})`, getSel());
+  } else if (t.screen === "playlistDetail") {
+    crumb = "playlist / " + t.playlist.name;
+    const p = t.playlist;
+    html = line(`<span class="header">${esc(p.name)}</span>&nbsp;&nbsp;<span class="pill">a: add</span><span class="pill">d: remove</span><span class="pill">r: rename</span><span class="pill">m: move</span>`) + ruleLine();
+    if (p.tracks.length === 0) {
+      html += line("(empty -- press / from search or a track screen, then 'a' to add here)", "dim");
+    } else {
+      html += p.tracks.map((tr, i) => {
+        const marker = (mode === "move" && i === moveIndex) ? "<span class=\"warn\">[moving] </span>" : "";
+        return `<div class="${i === getSel() ? "sel accent" : ""}" data-i="${i}">${marker}${(i === getSel() ? "&gt; " : "  ")}${esc(`${tr.artist} — ${tr.title}`)}</div>`;
+      }).join("");
+    }
+  } else if (t.screen === "addToPlaylistPicker") {
+    crumb = "add to playlist";
+    html = line(`<span class="header">Add "${esc(t.track.title)}" to...</span>&nbsp;&nbsp;<span class="pill">c: new playlist</span>`) + ruleLine() +
+           renderList(PLAYLISTS, p => p.name, getSel());
+  } else if (t.screen === "queue") {
+    crumb = "queue";
+    html = line("<span class=\"header\">Queue</span>&nbsp;&nbsp;<span class=\"pill\">Enter: play</span><span class=\"pill\">d: remove</span>") + ruleLine();
+    html += QUEUE.map((tr, i) => {
+      const playing = i === queueIndex ? "<span class=\"accent\">▶ </span>" : "  ";
+      return `<div class="${i === getSel() ? "sel accent" : ""}" data-i="${i}">${(i === getSel() ? "&gt;" : " ")}${playing}${esc(`${tr.artist} — ${tr.title}`)}</div>`;
+    }).join("");
+  } else if (t.screen === "devices") {
+    crumb = "devices";
+    html = line("<span class=\"header\">Devices</span>&nbsp;&nbsp;<span class=\"pill\">Enter: transfer playback</span>") + ruleLine() +
+           renderList(DEVICES, d => d.name + (d.active ? "  (active)" : ""), getSel());
+  } else if (t.screen === "help") {
+    crumb = "help";
+    const rows = [
+      ["Tab","switch sidebar / main pane"],
+      ["Space","play / pause"], ["n / p","next / previous track"],
+      ["← / →","seek ±5s"], ["+ / -","volume"], ["s","shuffle"], ["R","repeat"],
+      ["/","search"], ["l","library"], ["f","fullscreen now playing"],
+      ["a","add to playlist"], ["c","create playlist"], ["r","rename"],
+      ["d","delete / remove (confirms)"], ["m","move / reorder"],
+      ["D","devices"], ["Esc","back"], ["?","this screen"], ["q","quit"],
+    ];
+    html = line("<span class=\"header\">Keybinds</span>") + ruleLine() +
+           rows.map(r => line(`  ${r[0].padEnd(10)} ${r[1]}`)).join("");
+  }
+
+  document.getElementById("breadcrumb").textContent = crumb;
+  document.getElementById("main").innerHTML = html;
+  document.getElementById("main").classList.toggle("focused", focus === "main");
+  document.getElementById("sidebar").classList.toggle("focused", focus === "sidebar");
+  document.getElementById("shell").classList.toggle("fullscreen", fullscreen);
+
+  let status = mode === "move"
+    ? "MOVE MODE — ↑/↓ relocate, Enter confirm, Esc cancel"
+    : fullscreen ? "FULLSCREEN — <b>f</b> or <b>Esc</b> to exit"
+    : `stack depth ${stack.length} — <b>Tab</b> switch pane, <b>Esc</b> back, <b>?</b> help`;
+  document.getElementById("statusbar").innerHTML = status;
+
+  renderSidebar();
+  renderPlaybar();
+  renderOverlay();
+}
+
+function sidebarEntries() {
+  const entries = [
+    {type:"menu", label:"Now Playing", icon:"▶", screen:"nowplaying"},
+    {type:"menu", label:"Search", icon:"/", action:() => { mode="input"; inputTarget="search"; inputBuf=""; }},
+    {type:"menu", label:"Library", icon:"☰", screen:"library"},
+    {type:"menu", label:"Queue", icon:"≡", screen:"queue"},
+    {type:"menu", label:"Devices", icon:"◧", screen:"devices"},
+    {type:"menu", label:"Help", icon:"?", screen:"help"},
+    {type:"divider"},
+    {type:"section", label:"PLAYLISTS"},
+  ];
+  PLAYLISTS.forEach(p => entries.push({type:"playlist", label:p.name, playlist:p}));
+  entries.push({type:"new", label:"+ new playlist", icon:"+"});
+  return entries;
+}
+
+function activateSidebarEntry(e) {
+  if (!e) return;
+  if (e.type === "menu") {
+    if (e.action) e.action(); else goto(e.screen);
+  } else if (e.type === "playlist") {
+    goto("playlistDetail", {playlist: e.playlist});
+  } else if (e.type === "new") {
+    mode = "input"; inputTarget = "create"; inputBuf = "";
+  }
+  // Always -- even while mode is "input" (e.g. the Search shortcut opens
+  // straight into typing). Input mode intercepts keys before any focus
+  // check runs, so this is harmless while typing, and it's the ONLY
+  // place focus was getting set for this path -- skipping it here meant
+  // focus silently stayed "sidebar" even after search results appeared,
+  // and Escape (which only acts when focus === "main") looked broken.
+  focus = "main";
+  render();
+}
+
+function renderSidebar() {
+  const entries = sidebarEntries();
+  const rootScreen = stack.length === 1 ? stack[0] : null;
+  let html = "";
+  let selIdx = 0;
+  entries.forEach(e => {
+    if (e.type === "divider") { html += `<div class="sb-divider"></div>`; return; }
+    if (e.type === "section") { html += `<div class="sb-section">${esc(e.label)}</div>`; return; }
+    const isSel = focus === "sidebar" && selIdx === sidebarSel;
+    let isOpen = false;
+    if (rootScreen) {
+      if (e.type === "menu" && e.screen && rootScreen.screen === e.screen) isOpen = true;
+      if (e.type === "playlist" && rootScreen.screen === "playlistDetail" && rootScreen.playlist === e.playlist) isOpen = true;
+    }
+    html += `<div class="sb-item${isSel ? " sel" : ""}${isOpen ? " open" : ""}" data-i="${selIdx}">` +
+            `<span class="ic">${e.icon || ""}</span><span class="name">${esc(e.label)}</span></div>`;
+    selIdx++;
+  });
+  document.getElementById("sidebar").innerHTML = html;
+}
+
+function renderPlaybar() {
+  const tr = nowPlaying.track;
+  const icon = nowPlaying.playing ? "▶" : "⏸";
+  const mm = s => `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;
+  const filled = Math.round((nowPlaying.pos / nowPlaying.dur) * 24);
+  const gauge = `<span class="gauge-fill">${"█".repeat(filled)}</span><span class="gauge-empty">${"░".repeat(24-filled)}</span>`;
+  document.getElementById("playbar").innerHTML = `
+    <div class="pb-art" style="${artStyle(tr)}">${esc(monogram(tr))}</div>
+    <div class="pb-info">
+      <div class="pb-title">${esc(tr.title)}</div>
+      <div class="pb-artist">${esc(tr.artist)}</div>
+    </div>
+    <div class="pb-controls">
+      <span class="pb-btn" data-act="prev">⏮</span>
+      <span class="pb-btn" data-act="playpause">${icon}</span>
+      <span class="pb-btn" data-act="next">⏭</span>
+    </div>
+    <div class="pb-gauge">${mm(nowPlaying.pos)} ${gauge} ${mm(nowPlaying.dur)}</div>
+    <div class="pb-toggles">
+      <span class="pb-btn${shuffle ? " accent" : ""}" data-act="shuffle" title="shuffle (s)">S</span>
+      <span class="pb-btn${repeat ? " accent" : ""}" data-act="repeat" title="repeat (R)">R</span>
+    </div>
+    <div class="pb-vol">vol ${nowPlaying.vol}%</div>
+  `;
+}
+
+function doNext() {
+  if (!QUEUE.length) return;
+  queueIndex = Math.min(QUEUE.length - 1, queueIndex + 1);
+  nowPlaying.track = QUEUE[queueIndex]; nowPlaying.pos = 0; nowPlaying.playing = true; render();
+}
+function doPrev() {
+  if (!QUEUE.length) return;
+  queueIndex = Math.max(0, queueIndex - 1);
+  nowPlaying.track = QUEUE[queueIndex]; nowPlaying.pos = 0; nowPlaying.playing = true; render();
+}
+function togglePlay() { nowPlaying.playing = !nowPlaying.playing; render(); }
+function toggleShuffle() { shuffle = !shuffle; render(); }
+function toggleRepeat() { repeat = !repeat; render(); }
+
+function renderInputScreen() {
+  const titles = {search: "search", create: "new playlist name", rename: "rename playlist"};
+  return line(`<span class="header">${titles[inputTarget]}</span>`) + ruleLine() +
+         line(`&gt; ${esc(inputBuf)}<span class="cursor">&nbsp;</span>`);
+}
+
+function renderOverlay() {
+  let existing = document.getElementById("overlay");
+  if (existing) existing.remove();
+  if (mode !== "confirm") return;
+  const div = document.createElement("div");
+  div.id = "overlay";
+  div.className = "modal-overlay";
+  div.innerHTML = `<div class="modal-box">
+    <div class="danger" style="margin-bottom:10px;">${esc(confirmMsg)}</div>
+    <div class="dim">y = confirm&nbsp;&nbsp;&nbsp;n / Esc = cancel</div>
+  </div>`;
+  document.getElementById("shell").appendChild(div);
+}
+
+/* ---------- input handling ---------- */
+
+function doSearch(q) {
+  const words = q.toLowerCase();
+  searchResults = Object.values(TRACKS).filter(t =>
+    (t.title + " " + t.artist).toLowerCase().includes(words.split(" ")[0])
+  );
+  if (searchResults.length === 0) searchResults = [TRACKS.listenDown, TRACKS.blue]; // never show truly empty in a preview
+}
+
+document.addEventListener("keydown", (e) => {
+  const key = e.key;
+  const t = curScreen();
+
+  // ---- text input mode ----
+  if (mode === "input") {
+    if (key === "Escape") { mode = null; inputBuf = ""; render(); e.preventDefault(); return; }
+    if (key === "Enter") {
+      if (inputTarget === "search") { doSearch(inputBuf); goto("search"); }
+      if (inputTarget === "create") { PLAYLISTS.push({name: inputBuf || "untitled", tracks: []}); }
+      if (inputTarget === "rename") { t.playlist.name = inputBuf || t.playlist.name; }
+      mode = null; inputBuf = "";
+      render(); e.preventDefault(); return;
+    }
+    if (key === "Backspace") { inputBuf = inputBuf.slice(0,-1); render(); e.preventDefault(); return; }
+    if (key.length === 1) { inputBuf += key; render(); e.preventDefault(); return; }
+    return;
+  }
+
+  // ---- confirm mode ----
+  if (mode === "confirm") {
+    if (key === "y") { confirmAction(); mode = null; render(); }
+    if (key === "n" || key === "Escape") { mode = null; render(); }
+    e.preventDefault();
+    return;
+  }
+
+  // ---- move mode ----
+  if (mode === "move") {
+    if (key === "ArrowUp" && moveIndex > 0) {
+      [moveList[moveIndex-1], moveList[moveIndex]] = [moveList[moveIndex], moveList[moveIndex-1]];
+      moveIndex--; setSel(moveIndex);
+    }
+    if (key === "ArrowDown" && moveIndex < moveList.length-1) {
+      [moveList[moveIndex+1], moveList[moveIndex]] = [moveList[moveIndex], moveList[moveIndex+1]];
+      moveIndex++; setSel(moveIndex);
+    }
+    if (key === "Enter" || key === "Escape") { mode = null; moveList = null; moveIndex = null; }
+    render(); e.preventDefault(); return;
+  }
+
+  // ---- global keys (work regardless of focus) ----
+  if (key === "Tab") { focus = focus === "sidebar" ? "main" : "sidebar"; render(); e.preventDefault(); return; }
+  if (key === "q") { document.getElementById("main").innerHTML = line("bye.", "dim"); return; }
+  if (key === " ") { togglePlay(); e.preventDefault(); return; }
+  if (key === "n") { doNext(); return; }
+  if (key === "p") { doPrev(); return; }
+  if (key === "s") { toggleShuffle(); return; }
+  if (key === "R") { toggleRepeat(); return; }
+  if (key === "+" ) { nowPlaying.vol = Math.min(100, nowPlaying.vol+10); render(); return; }
+  if (key === "-") { nowPlaying.vol = Math.max(0, nowPlaying.vol-10); render(); return; }
+  if (key === "ArrowLeft") { nowPlaying.pos = Math.max(0, nowPlaying.pos-5); render(); return; }
+  if (key === "ArrowRight") { nowPlaying.pos = Math.min(nowPlaying.dur, nowPlaying.pos+5); render(); return; }
+  if (key === "f" && t.screen === "nowplaying") { fullscreen = !fullscreen; render(); return; }
+  if (key === "?") { goto("help"); focus = "main"; render(); return; }
+  if (key === "D") { goto("devices"); focus = "main"; render(); return; }
+  if (key === "l") { goto("library"); focus = "main"; render(); return; }
+  if (key === "/" && t.screen !== "search") { mode = "input"; inputTarget = "search"; inputBuf = ""; render(); return; }
+  if (key === "Escape") {
+    if (fullscreen) { fullscreen = false; render(); return; }
+    if (focus === "main") {
+      // Pop one level, and if that lands back at the root, hand focus
+      // to the sidebar in the same keystroke -- a separate second Esc
+      // just to reach the sidebar felt like one press too many.
+      if (stack.length > 1) pop();
+      if (stack.length === 1) focus = "sidebar";
+      render(); return;
+    }
+    return;
+  }
+
+  // ---- sidebar-focused navigation ----
+  if (focus === "sidebar") {
+    const selectable = sidebarEntries().filter(x => x.type !== "divider" && x.type !== "section");
+    if (key === "ArrowUp") { sidebarSel = Math.max(0, sidebarSel-1); render(); return; }
+    if (key === "ArrowDown") { sidebarSel = Math.min(selectable.length-1, sidebarSel+1); render(); return; }
+    if (key === "Enter") { activateSidebarEntry(selectable[sidebarSel]); return; }
+    if (key === "c") { mode = "input"; inputTarget = "create"; inputBuf = ""; render(); return; }
+    return;
+  }
+
+  // ---- contextual: list navigation (main pane only, focus === "main" from here down) ----
+  const listOf = {
+    library: 4,
+    likedSongs: LIKED_SONGS.length, savedAlbums: ALBUMS.length,
+    followedArtists: ARTISTS.length, yourPlaylists: PLAYLISTS.length,
+    search: searchResults.length, queue: QUEUE.length, devices: DEVICES.length,
+    artistDetail: t.name ? t.name.topTracks.length : 0,
+    albumDetail: t.album ? t.album.tracks.length : 0,
+    playlistDetail: t.playlist ? t.playlist.tracks.length : 0,
+    addToPlaylistPicker: PLAYLISTS.length,
+  };
+  const count = listOf[t.screen] || 0;
+  if (key === "ArrowUp" && count) { setSel(Math.max(0, getSel()-1)); render(); return; }
+  if (key === "ArrowDown" && count) { setSel(Math.min(count-1, getSel()+1)); render(); return; }
+
+  // ---- contextual: Enter ----
+  if (key === "Enter") {
+    if (t.screen === "library") {
+      const dest = ["likedSongs","savedAlbums","followedArtists","yourPlaylists"][getSel()];
+      push(dest); setSel(0);
+    } else if (t.screen === "likedSongs" || t.screen === "search" || t.screen === "queue") {
+      const list = t.screen === "likedSongs" ? LIKED_SONGS : t.screen === "search" ? searchResults : QUEUE;
+      nowPlaying.track = list[getSel()]; nowPlaying.playing = true; nowPlaying.pos = 0;
+      goto("nowplaying");
+    } else if (t.screen === "savedAlbums") {
+      push("albumDetail", {album: ALBUMS[getSel()]}); setSel(0);
+    } else if (t.screen === "followedArtists") {
+      push("artistDetail", {name: ARTISTS[getSel()]}); setSel(0);
+    } else if (t.screen === "yourPlaylists") {
+      push("playlistDetail", {playlist: PLAYLISTS[getSel()]}); setSel(0);
+    } else if (t.screen === "artistDetail") {
+      nowPlaying.track = t.name.topTracks[getSel()]; nowPlaying.playing = true; nowPlaying.pos = 0;
+      goto("nowplaying");
+    } else if (t.screen === "albumDetail") {
+      nowPlaying.track = t.album.tracks[getSel()]; nowPlaying.playing = true; nowPlaying.pos = 0;
+      goto("nowplaying");
+    } else if (t.screen === "playlistDetail") {
+      if (t.playlist.tracks.length) {
+        nowPlaying.track = t.playlist.tracks[getSel()]; nowPlaying.playing = true; nowPlaying.pos = 0;
+        goto("nowplaying");
+      }
+    } else if (t.screen === "addToPlaylistPicker") {
+      PLAYLISTS[getSel()].tracks.push(t.track);
+      pop();
+    } else if (t.screen === "devices") {
+      DEVICES.forEach((d,i) => d.active = (i === getSel()));
+    }
+    render(); return;
+  }
+
+  // ---- contextual: a (add to playlist) ----
+  if (key === "a") {
+    let track = null;
+    if (t.screen === "nowplaying") track = nowPlaying.track;
+    else if (t.screen === "search" && searchResults.length) track = searchResults[getSel()];
+    else if (t.screen === "likedSongs") track = LIKED_SONGS[getSel()];
+    else if (t.screen === "albumDetail") track = t.album.tracks[getSel()];
+    else if (t.screen === "artistDetail") track = t.name.topTracks[getSel()];
+    else if (t.screen === "queue") track = QUEUE[getSel()];
+    if (track) { push("addToPlaylistPicker", {track}); setSel(0); render(); }
+    return;
+  }
+
+  // ---- contextual: c (create playlist) ----
+  if (key === "c" && (t.screen === "yourPlaylists" || t.screen === "addToPlaylistPicker")) {
+    mode = "input"; inputTarget = "create"; inputBuf = ""; render(); return;
+  }
+
+  // ---- contextual: r (rename) ----
+  if (key === "r" && t.screen === "playlistDetail") {
+    mode = "input"; inputTarget = "rename"; inputBuf = t.playlist.name; render(); return;
+  }
+  if (key === "r" && t.screen === "yourPlaylists" && PLAYLISTS.length) {
+    push("playlistDetail", {playlist: PLAYLISTS[getSel()]});
+    mode = "input"; inputTarget = "rename"; inputBuf = PLAYLISTS[getSel()].name; render(); return;
+  }
+
+  // ---- contextual: d (delete/remove, confirms) ----
+  if (key === "d" && t.screen === "playlistDetail" && t.playlist.tracks.length) {
+    const idx = getSel();
+    confirmMsg = `Remove "${t.playlist.tracks[idx].title}" from ${t.playlist.name}?`;
+    confirmAction = () => { t.playlist.tracks.splice(idx,1); setSel(Math.max(0,getSel()-1)); };
+    mode = "confirm"; render(); return;
+  }
+  if (key === "d" && t.screen === "yourPlaylists" && PLAYLISTS.length) {
+    const idx = getSel();
+    confirmMsg = `Delete playlist "${PLAYLISTS[idx].name}"? This cannot be undone.`;
+    confirmAction = () => { PLAYLISTS.splice(idx,1); setSel(Math.max(0,getSel()-1)); };
+    mode = "confirm"; render(); return;
+  }
+  if (key === "d" && t.screen === "queue" && QUEUE.length) {
+    const idx = getSel();
+    QUEUE.splice(idx,1); setSel(Math.max(0,getSel()-1)); render(); return;
+  }
+
+  // ---- contextual: m (move/reorder) ----
+  if (key === "m" && t.screen === "playlistDetail" && t.playlist.tracks.length > 1) {
+    mode = "move"; moveList = t.playlist.tracks; moveIndex = getSel(); render(); return;
+  }
+
+  // ---- contextual: f (follow toggle) ----
+  if (key === "f" && t.screen === "artistDetail") {
+    t.name.following = !t.name.following; render(); return;
+  }
+});
+
+/* ---------- mouse support (bonus on top of keys) ---------- */
+
+document.getElementById("sidebar").addEventListener("click", (e) => {
+  const row = e.target.closest("[data-i]");
+  if (!row) return;
+  focus = "sidebar";
+  sidebarSel = parseInt(row.dataset.i, 10);
+  const selectable = sidebarEntries().filter(x => x.type !== "divider" && x.type !== "section");
+  activateSidebarEntry(selectable[sidebarSel]);
+});
+
+document.getElementById("main").addEventListener("click", (e) => {
+  const row = e.target.closest("[data-i]");
+  if (!row || mode) return;
+  focus = "main";
+  setSel(parseInt(row.dataset.i, 10));
+  render();
+});
+
+document.getElementById("playbar").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-act]");
+  if (!btn) return;
+  const act = btn.dataset.act;
+  if (act === "prev") doPrev();
+  else if (act === "next") doNext();
+  else if (act === "playpause") togglePlay();
+  else if (act === "shuffle") toggleShuffle();
+  else if (act === "repeat") toggleRepeat();
+});
+
+function render() { renderScreen(); }
+render();
+</script>
+</body>
+</html>

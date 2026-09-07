@@ -106,6 +106,72 @@ fn tmux_toggle_zoom() {
     }
 }
 
+enum LoopExit {
+    Quit,
+    Disconnected,
+}
+
+/// Full librespot/Connect bootstrap, extracted so it can be retried:
+/// Tier 4 resilience -- a session drop (laptop sleep, wifi blip) used to
+/// leave the app permanently in `SessionEnded` with nothing to recover
+/// it. Returns `Err` instead of panicking on any failure, since a failed
+/// reconnect attempt should trigger backoff-and-retry, not crash.
+async fn connect_spirc() -> Result<
+    (
+        Spirc,
+        tokio::task::JoinHandle<()>,
+        librespot_playback::player::PlayerEventChannel,
+    ),
+    String,
+> {
+    // credentials_path stays pointed at ncspot's cache -- that's the
+    // actual auth-reuse point. volume_path/audio_path get our own
+    // directory: librespot treats volume_path as a directory and writes
+    // a file literally named `volume` inside it, which collided with
+    // ncspot's own pre-existing `volume/` subdirectory at that path
+    // (confirmed live: "Cannot save volume to cache: Is a directory").
+    let ncspot_librespot_dir = dirs_home().join(".cache/ncspot/librespot");
+    let own_librespot_cache_dir = cache_dir().join("librespot");
+    let cache = Cache::new(
+        Some(&ncspot_librespot_dir),
+        Some(&own_librespot_cache_dir),
+        Some(&own_librespot_cache_dir),
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+    let credentials = cache
+        .credentials()
+        .ok_or("no cached credentials found in ncspot's cache")?;
+
+    let session = Session::new(SessionConfig::default(), Some(cache));
+    let mixer_fn = mixer::find(None).ok_or("no default mixer available")?;
+    let mixer = mixer_fn(MixerConfig::default()).map_err(|e| e.to_string())?;
+    let backend = audio_backend::find(None).ok_or("no default audio backend")?;
+    let soft_volume = mixer.get_soft_volume();
+    let player = Player::new(PlayerConfig::default(), session.clone(), soft_volume, move || {
+        backend(None, AudioFormat::default())
+    });
+    let player_events = player.get_player_event_channel();
+
+    let connect_config = ConnectConfig {
+        name: "spot-tui".to_string(),
+        device_type: DeviceType::Computer,
+        // ConnectConfig::default() sets this to u16::MAX / 2 (50%), which
+        // feeds the mixer's actual soft-volume attenuation -- a real
+        // loudness drop on every fresh launch, not just a displayed
+        // number. Start at max instead; loudness is controlled via the
+        // system/global volume, matching how it's normally used.
+        initial_volume: u16::MAX,
+        ..ConnectConfig::default()
+    };
+    let (spirc, spirc_task) = Spirc::new(connect_config, session, credentials, player, mixer)
+        .await
+        .map_err(|e| e.to_string())?;
+    let spirc_handle = tokio::spawn(spirc_task);
+
+    Ok((spirc, spirc_handle, player_events))
+}
+
 fn to_lyrics_state(cached: CachedLyrics) -> LyricsState {
     match cached {
         CachedLyrics::Synced { lines } => LyricsState::Synced(
@@ -135,45 +201,6 @@ async fn main() -> std::io::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("librespot=debug"))
         .init();
 
-    // -- librespot bootstrap: auth reuse + Spotify Connect advertisement --
-    let ncspot_librespot_dir = dirs_home().join(".cache/ncspot/librespot");
-    let cache = Cache::new(
-        Some(&ncspot_librespot_dir),
-        Some(&ncspot_librespot_dir),
-        Some(&ncspot_librespot_dir),
-        None,
-    )
-    .expect("failed to open cache");
-    let credentials = cache
-        .credentials()
-        .expect("no cached credentials found in ncspot's cache");
-
-    let session = Session::new(SessionConfig::default(), Some(cache));
-    let mixer_fn = mixer::find(None).expect("no default mixer available");
-    let mixer = mixer_fn(MixerConfig::default()).expect("failed to open mixer");
-    let backend = audio_backend::find(None).expect("no default audio backend");
-    let soft_volume = mixer.get_soft_volume();
-    let player = Player::new(PlayerConfig::default(), session.clone(), soft_volume, move || {
-        backend(None, AudioFormat::default())
-    });
-    let mut player_events = player.get_player_event_channel();
-
-    let connect_config = ConnectConfig {
-        name: "spot-tui".to_string(),
-        device_type: DeviceType::Computer,
-        // ConnectConfig::default() sets this to u16::MAX / 2 (50%), which
-        // feeds the mixer's actual soft-volume attenuation -- a real
-        // loudness drop on every fresh launch, not just a displayed
-        // number. Start at max instead; loudness is controlled via the
-        // system/global volume, matching how it's normally used.
-        initial_volume: u16::MAX,
-        ..ConnectConfig::default()
-    };
-    let (spirc, spirc_task) = Spirc::new(connect_config, session, credentials, player, mixer)
-        .await
-        .expect("failed to start Spirc (Connect advertisement)");
-    let spirc_handle = tokio::spawn(spirc_task);
-
     // -- Web API client for search (Tier 1): bootstrapped eagerly so it's
     // ready by the time the user presses `/`, not fetched on first use.
     // A failure here (e.g. no refresh_token cached, or the shared
@@ -201,7 +228,7 @@ async fn main() -> std::io::Result<()> {
 
     let (fetch_tx, fetch_rx) = spawn_fetch_thread();
     let cfg = config::load();
-    let mut tracker = PositionTracker::new();
+    let mut tracker: PositionTracker;
     let mut app = AppState {
         track_title: None,
         track_artist: None,
@@ -221,13 +248,40 @@ async fn main() -> std::io::Result<()> {
     let mut pending_fetch: Option<(u64, TrackMeta, Instant)> = None;
     let mut synced_lines: Vec<LyricLine> = Vec::new();
 
-    loop {
-        if spirc_handle.is_finished() && !matches!(app.lyrics, LyricsState::SessionEnded) {
-            log::warn!("Spirc task ended -- Connect session dropped");
-            app.track_title = None;
-            app.track_artist = None;
-            app.playing = None;
-            app.lyrics = LyricsState::SessionEnded;
+    // Tier 4 resilience: reconnect with capped exponential backoff instead
+    // of leaving the app permanently dead after a session drop. Mirrors
+    // the same backoff pattern ncspot-lyrics's socket reader already
+    // proved out.
+    let mut backoff = Duration::from_millis(500);
+    const MAX_BACKOFF: Duration = Duration::from_secs(10);
+
+    'outer: loop {
+        let (spirc, spirc_handle, mut player_events) = match connect_spirc().await {
+            Ok(v) => {
+                backoff = Duration::from_millis(500);
+                v
+            }
+            Err(e) => {
+                log::warn!("connect failed, retrying in {backoff:?}: {e}");
+                app.track_title = None;
+                app.track_artist = None;
+                app.playing = None;
+                app.lyrics = LyricsState::SessionEnded;
+                terminal.draw(|f| ui::render(f, &app))?;
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue 'outer;
+            }
+        };
+        // Fresh session: don't keep showing a frozen position/track from
+        // whatever the last one was.
+        app.lyrics = LyricsState::NotConnected;
+        tracker = PositionTracker::new();
+
+    let exit: LoopExit = 'inner: loop {
+        if spirc_handle.is_finished() {
+            log::warn!("Spirc task ended -- Connect session dropped, reconnecting");
+            break 'inner LoopExit::Disconnected;
         }
 
         while let Ok(event) = player_events.try_recv() {
@@ -383,8 +437,10 @@ async fn main() -> std::io::Result<()> {
                         _ => {}
                     },
                     Mode::NowPlaying => match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                        KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            break 'inner LoopExit::Quit
+                        }
                         KeyCode::Char('f') => {
                             app.fullscreen = !app.fullscreen;
                             tmux_toggle_zoom();
@@ -424,8 +480,23 @@ async fn main() -> std::io::Result<()> {
                 }
             }
         }
+    };
+
+        let _ = spirc.shutdown();
+
+        match exit {
+            LoopExit::Quit => break 'outer,
+            LoopExit::Disconnected => {
+                app.track_title = None;
+                app.track_artist = None;
+                app.playing = None;
+                app.lyrics = LyricsState::SessionEnded;
+                terminal.draw(|f| ui::render(f, &app))?;
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+            }
+        }
     }
 
-    let _ = spirc.shutdown();
     Ok(())
 }

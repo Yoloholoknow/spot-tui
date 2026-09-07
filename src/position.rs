@@ -70,6 +70,35 @@ impl PositionTracker {
             PlayerEvent::EndOfTrack { .. } => {
                 self.state = PlaybackState::Paused(0);
             }
+            PlayerEvent::Seeked {
+                track_id,
+                position_ms,
+                ..
+            }
+            | PlayerEvent::PositionCorrection {
+                track_id,
+                position_ms,
+                ..
+            }
+            | PlayerEvent::PositionChanged {
+                track_id,
+                position_ms,
+                ..
+            } => {
+                // A seek within the same track (Connect's own "prev
+                // restarts the track if you're a few seconds in"
+                // behavior included) doesn't fire `Playing`/`Paused` --
+                // resync the anchor to the new position without forcing
+                // a playing/paused transition that didn't happen.
+                self.current_track_id = Some(track_id.to_string());
+                self.state = match self.state {
+                    PlaybackState::Playing { .. } => PlaybackState::Playing {
+                        position_ms: *position_ms,
+                        since: now,
+                    },
+                    PlaybackState::Paused(_) => PlaybackState::Paused(*position_ms),
+                };
+            }
             _ => {}
         }
     }
@@ -109,6 +138,22 @@ mod tests {
 
     fn paused(track: &str, position_ms: u32) -> PlayerEvent {
         PlayerEvent::Paused {
+            play_request_id: 0,
+            track_id: track_id(track),
+            position_ms,
+        }
+    }
+
+    fn seeked(track: &str, position_ms: u32) -> PlayerEvent {
+        PlayerEvent::Seeked {
+            play_request_id: 0,
+            track_id: track_id(track),
+            position_ms,
+        }
+    }
+
+    fn position_correction(track: &str, position_ms: u32) -> PlayerEvent {
+        PlayerEvent::PositionCorrection {
             play_request_id: 0,
             track_id: track_id(track),
             position_ms,
@@ -194,6 +239,53 @@ mod tests {
 
         assert_eq!(tracker.current_track_id(), Some(TRACK_B));
         assert_eq!(tracker.progress_ms(t_next), 0);
+    }
+
+    #[test]
+    fn seek_while_playing_resets_the_position_anchor_without_stopping_playback() {
+        // Real bug, reported live: pressing `p` mid-track restarts the
+        // current track (Spotify Connect's own "prev restarts the track
+        // if you're a few seconds in" behavior) via a seek to 0, not a
+        // fresh `Playing` event -- librespot emits `Seeked`, which this
+        // tracker previously ignored entirely (fell into `_ => {}`),
+        // leaving the stale wall-clock anchor ticking forward as if
+        // nothing happened. Only fixed itself on pause, which *is* a
+        // handled event and forcibly resyncs.
+        let t0 = Instant::now();
+        let mut tracker = PositionTracker::new();
+        tracker.on_event(&playing(TRACK_A, 150_000), t0);
+        let t_seek = t0 + std::time::Duration::from_secs(1);
+        tracker.on_event(&seeked(TRACK_A, 0), t_seek);
+
+        assert!(tracker.is_playing());
+        assert_eq!(tracker.progress_ms(t_seek), 0);
+        assert_eq!(
+            tracker.progress_ms(t_seek + std::time::Duration::from_millis(500)),
+            500
+        );
+    }
+
+    #[test]
+    fn seek_while_paused_updates_position_without_starting_playback() {
+        let t0 = Instant::now();
+        let mut tracker = PositionTracker::new();
+        tracker.on_event(&paused(TRACK_A, 50_000), t0);
+        tracker.on_event(&seeked(TRACK_A, 10_000), t0);
+
+        assert!(!tracker.is_playing());
+        assert_eq!(tracker.progress_ms(t0), 10_000);
+    }
+
+    #[test]
+    fn position_correction_resyncs_the_same_way_as_seeked() {
+        let t0 = Instant::now();
+        let mut tracker = PositionTracker::new();
+        tracker.on_event(&playing(TRACK_A, 150_000), t0);
+        let t_corr = t0 + std::time::Duration::from_secs(1);
+        tracker.on_event(&position_correction(TRACK_A, 90_000), t_corr);
+
+        assert!(tracker.is_playing());
+        assert_eq!(tracker.progress_ms(t_corr), 90_000);
     }
 
     #[test]

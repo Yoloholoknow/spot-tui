@@ -131,8 +131,8 @@ mod helper_tests {
 }
 
 pub enum LyricsState {
-    NotConnected,
-    /// Distinct from `NotConnected`: the Spotify Connect session ended
+    Idle,
+    /// Distinct from `Idle`: the Spotify Connect session ended
     /// unexpectedly (network drop, laptop sleep, etc.) after having been
     /// alive. There's no auto-reconnect yet, so this is a dead end --
     /// restart the process. Shown separately so a real drop is never
@@ -152,7 +152,8 @@ pub struct AppState {
     pub current_line: Option<usize>,
     pub fullscreen: bool,
     pub context_lines: usize,
-    /// `None` = no track loaded / ncspot not connected yet. `Some(true)`
+    /// `None` = no track loaded yet (device is connected regardless --
+    /// this doesn't mean the Connect session is down). `Some(true)`
     /// = playing, `Some(false)` = paused. Distinguishing these explicitly
     /// (icon + frozen-vs-advancing gauge) is what closes the "is this
     /// broken or just paused" gap a real report ran into.
@@ -229,7 +230,7 @@ fn render_search(frame: &mut Frame, app: &AppState) {
 fn header(app: &AppState, max_chars: usize) -> String {
     match (&app.track_artist, &app.track_title) {
         (Some(a), Some(t)) => truncate_ellipsis(&format!("{a} \u{2014} {t}"), max_chars),
-        _ => "not connected\u{2026}".to_string(),
+        _ => "ready \u{2014} press / to search\u{2026}".to_string(),
     }
 }
 
@@ -237,7 +238,7 @@ fn playing_icon(app: &AppState) -> &'static str {
     match app.playing {
         Some(true) => "\u{25b6}",  // ▶
         Some(false) => "\u{23f8}", // ⏸
-        None => "\u{22ef}",        // ⋯ (no track / not connected)
+        None => "\u{22ef}",        // ⋯ (no track loaded yet)
     }
 }
 
@@ -274,7 +275,7 @@ fn progress_gauge(app: &AppState) -> Gauge<'static> {
 
 fn body_lines(app: &AppState) -> Vec<Line<'static>> {
     match &app.lyrics {
-        LyricsState::NotConnected => vec![Line::from("not connected\u{2026}")],
+        LyricsState::Idle => vec![Line::from("ready \u{2014} press / to search\u{2026}")],
         LyricsState::SessionEnded => vec![
             Line::from("session disconnected"),
             Line::from("restart spot-tui to reconnect"),

@@ -43,6 +43,11 @@ fn dirs_home() -> PathBuf {
     std::env::var("HOME").map(PathBuf::from).expect("HOME not set")
 }
 
+fn log_file_path() -> PathBuf {
+    // macOS convention for app logs, distinct from the cache dir.
+    dirs_home().join("Library/Logs/spot-tui/spot-tui.log")
+}
+
 fn cache_dir() -> PathBuf {
     directories::ProjectDirs::from("", "", "spot-tui")
         .map(|d| d.cache_dir().to_path_buf())
@@ -192,14 +197,22 @@ fn to_lyrics_state(cached: CachedLyrics) -> LyricsState {
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     install_panic_hook();
-    // env_logger defaults to stderr, so this doesn't collide with the TUI
-    // (which only ever writes to stdout via crossterm/ratatui) -- run with
-    // `2>spot-tui.log` to actually see it. Without this, librespot's own
-    // warnings/errors about session or connection drops are silently
-    // discarded, which is exactly what happened the first time this
-    // disconnected with zero evidence of why.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("librespot=debug"))
-        .init();
+    // env_logger defaults to stderr -- wrong assumption made earlier that
+    // this "doesn't collide with the TUI since it only writes to stdout":
+    // a real terminal interleaves both streams onto the same screen
+    // regardless of which fd wrote what, confirmed live (raw log lines
+    // spilling across the TUI when run as a bare command, no redirect).
+    // Logging to a file instead avoids needing the user to know to
+    // redirect stderr manually -- a real command should just work.
+    let log_path = log_file_path();
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(log_file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("librespot=debug"))
+            .target(env_logger::Target::Pipe(Box::new(log_file)))
+            .init();
+    }
 
     // -- Web API client for search (Tier 1): bootstrapped eagerly so it's
     // ready by the time the user presses `/`, not fetched on first use.
@@ -232,7 +245,7 @@ async fn main() -> std::io::Result<()> {
     let mut app = AppState {
         track_title: None,
         track_artist: None,
-        lyrics: LyricsState::NotConnected,
+        lyrics: LyricsState::Idle,
         current_line: None,
         fullscreen: false,
         context_lines: cfg.context_lines,
@@ -275,7 +288,7 @@ async fn main() -> std::io::Result<()> {
         };
         // Fresh session: don't keep showing a frozen position/track from
         // whatever the last one was.
-        app.lyrics = LyricsState::NotConnected;
+        app.lyrics = LyricsState::Idle;
         tracker = PositionTracker::new();
 
     let exit: LoopExit = 'inner: loop {

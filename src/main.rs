@@ -1,5 +1,6 @@
 mod config;
 mod lyrics;
+mod pins;
 mod position;
 mod api;
 mod spike;
@@ -8,7 +9,7 @@ mod ui;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, ExecutableCommand};
-use librespot_connect::{ConnectConfig, LoadRequest, Spirc};
+use librespot_connect::{ConnectConfig, LoadRequest, LoadRequestOptions, PlayingTrack, Spirc};
 use librespot_core::cache::Cache;
 use librespot_core::config::{DeviceType, SessionConfig};
 use librespot_core::session::Session;
@@ -24,8 +25,23 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use rspotify::AuthCodeSpotify;
+use api::library::{FollowedArtist, PlaylistSummary, SavedAlbumSummary};
 use api::search::TrackResult;
-use ui::{AppState, Focus, LyricsState, Nav, Screen, SearchState, SIDEBAR_ENTRIES};
+use ui::{
+    filtered_sorted, pinned_first, AppState, Fetch, Focus, LibraryState, ListFilter, LyricsState, Nav,
+    PlaylistDetailState, Screen, SearchState, LIBRARY_ENTRIES, SIDEBAR_ENTRIES,
+};
+
+enum LibraryFetchResult {
+    LikedSongs(Result<Vec<TrackResult>, String>),
+    SavedAlbums(Result<Vec<SavedAlbumSummary>, String>),
+    FollowedArtists(Result<Vec<FollowedArtist>, String>),
+    Playlists(Result<Vec<PlaylistSummary>, String>),
+    PlaylistTracks {
+        playlist_uri: String,
+        result: Result<Vec<TrackResult>, String>,
+    },
+}
 
 const TICK: Duration = Duration::from_millis(100);
 const DEBOUNCE: Duration = Duration::from_millis(250);
@@ -109,6 +125,27 @@ fn tmux_toggle_zoom() {
         let _ = std::process::Command::new("tmux")
             .args(["resize-pane", "-Z"])
             .status();
+    }
+}
+
+/// Text-input handling shared by every list screen's filter box: typing
+/// narrows the (already-fetched) list live, no re-fetch, matching Search's
+/// own "typing edits state directly" convention. Resets `selected` on
+/// every keystroke since the filtered view's length/order shifts each time.
+fn edit_filter(filter: &mut ListFilter, selected: &mut usize, key: KeyCode) {
+    match key {
+        KeyCode::Enter | KeyCode::Esc => {
+            filter.editing = false;
+        }
+        KeyCode::Backspace => {
+            filter.query.pop();
+            *selected = 0;
+        }
+        KeyCode::Char(c) => {
+            filter.query.push(c);
+            *selected = 0;
+        }
+        _ => {}
     }
 }
 
@@ -249,6 +286,7 @@ async fn main() -> std::io::Result<()> {
     let mut spotify_client: Option<AuthCodeSpotify> = None;
     let mut client_checked = false;
     let (search_tx, search_rx) = mpsc::channel::<Result<Vec<TrackResult>, String>>();
+    let (library_tx, library_rx) = mpsc::channel::<LibraryFetchResult>();
 
     // -- terminal UI setup (same pattern as ncspot-lyrics) --
     let _guard = TerminalGuard::new()?;
@@ -270,8 +308,16 @@ async fn main() -> std::io::Result<()> {
         volume: u16::MAX, // matches the initial_volume set on connect_config above
         nav: Nav::new(),
         sidebar_sel: 0,
+        library: LibraryState::new(),
+        playlist_detail: None,
+        pinned_playlists: pins::load(),
         search: SearchState::new(),
     };
+
+    // Scroll offsets, one per list, persisted across frames and threaded
+    // separately from `app` -- see `ui::ScrollState`'s own doc comment
+    // for why this isn't just more fields on `AppState`.
+    let mut scroll = ui::ScrollState::default();
 
     let mut generation: u64 = 0;
     let mut pending_fetch: Option<(u64, TrackMeta, Instant)> = None;
@@ -296,12 +342,26 @@ async fn main() -> std::io::Result<()> {
                 app.track_artist = None;
                 app.playing = None;
                 app.lyrics = LyricsState::SessionEnded;
-                terminal.draw(|f| ui::render(f, &app))?;
+                terminal.draw(|f| ui::render(f, &app, &mut scroll))?;
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
                 continue 'outer;
             }
         };
+
+        // Reclaim whatever was last active, matching the official app's
+        // "continue where you left off" on launch -- Spirc::transfer with
+        // the same device on both ends of the underlying spclient call
+        // (see spike.rs's finding) is a no-op if we're already active,
+        // so this is safe to call on every (re)connect, not just the
+        // first. Untested until run live: this is the first time this
+        // codebase has called Spirc::transfer at all, as opposed to
+        // Spirc::activate (which explicitly does NOT resume playback).
+        match spirc.transfer(None) {
+            Ok(()) => log::info!("spirc.transfer(None) sent -- attempting to reclaim last active session"),
+            Err(e) => log::warn!("spirc.transfer(None) failed: {e}"),
+        }
+
         // Fresh session: don't keep showing a frozen position/track from
         // whatever the last one was.
         app.lyrics = LyricsState::Idle;
@@ -378,6 +438,33 @@ async fn main() -> std::io::Result<()> {
             }
         }
 
+        while let Ok(result) = library_rx.try_recv() {
+            match result {
+                LibraryFetchResult::LikedSongs(r) => {
+                    app.library.liked_songs = r.map_or_else(Fetch::Failed, Fetch::Ready);
+                }
+                LibraryFetchResult::SavedAlbums(r) => {
+                    app.library.saved_albums = r.map_or_else(Fetch::Failed, Fetch::Ready);
+                }
+                LibraryFetchResult::FollowedArtists(r) => {
+                    app.library.followed_artists = r.map_or_else(Fetch::Failed, Fetch::Ready);
+                }
+                LibraryFetchResult::Playlists(r) => {
+                    app.library.playlists = r.map_or_else(Fetch::Failed, Fetch::Ready);
+                }
+                LibraryFetchResult::PlaylistTracks { playlist_uri, result } => {
+                    // Guard against a stale fetch for a playlist the user
+                    // has since backed out of overwriting whichever one
+                    // is actually showing now.
+                    if let Some(pd) = &mut app.playlist_detail {
+                        if pd.playlist.uri == playlist_uri {
+                            pd.tracks = result.map_or_else(Fetch::Failed, Fetch::Ready);
+                        }
+                    }
+                }
+            }
+        }
+
         while let Ok((fetch_gen, result)) = fetch_rx.try_recv() {
             if fetch_gen == generation {
                 app.lyrics = to_lyrics_state(result);
@@ -400,7 +487,7 @@ async fn main() -> std::io::Result<()> {
             None
         };
 
-        terminal.draw(|f| ui::render(f, &app))?;
+        terminal.draw(|f| ui::render(f, &app, &mut scroll))?;
 
         if event::poll(TICK)? {
             if let Event::Key(key) = event::read()? {
@@ -425,6 +512,10 @@ async fn main() -> std::io::Result<()> {
                             app.search.query.clear();
                             app.search.results.clear();
                             app.search.error = None;
+                        }
+                        KeyCode::Char('l') => {
+                            app.nav.goto(Screen::Library);
+                            app.nav.focus = Focus::Main;
                         }
                         KeyCode::Char(' ') => {
                             let _ = spirc.play_pause();
@@ -549,6 +640,9 @@ async fn main() -> std::io::Result<()> {
                                 app.search.results.clear();
                                 app.search.error = None;
                             }
+                            KeyCode::Char('l') => {
+                                app.nav.push(Screen::Library);
+                            }
                             KeyCode::Char(' ') => {
                                 let _ = spirc.play_pause();
                             }
@@ -577,6 +671,413 @@ async fn main() -> std::io::Result<()> {
                             }
                             _ => {}
                         },
+                        Screen::Library => match key.code {
+                            KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                break 'inner LoopExit::Quit
+                            }
+                            KeyCode::Esc => {
+                                app.nav.escape();
+                            }
+                            KeyCode::Up => {
+                                app.library.home_selected = app.library.home_selected.saturating_sub(1);
+                            }
+                            KeyCode::Down => {
+                                app.library.home_selected =
+                                    (app.library.home_selected + 1).min(LIBRARY_ENTRIES.len() - 1);
+                            }
+                            KeyCode::Enter => {
+                                let (_, screen) = LIBRARY_ENTRIES[app.library.home_selected];
+                                app.nav.push(screen);
+                                match screen {
+                                    Screen::LikedSongs
+                                        if matches!(app.library.liked_songs, Fetch::NotStarted) =>
+                                    {
+                                        app.library.liked_songs = Fetch::Loading;
+                                        match spotify_client.clone() {
+                                            Some(client) => {
+                                                let tx = library_tx.clone();
+                                                tokio::spawn(async move {
+                                                    let result = api::library::liked_songs(&client)
+                                                        .await
+                                                        .map_err(|e| e.to_string());
+                                                    let _ = tx.send(LibraryFetchResult::LikedSongs(result));
+                                                });
+                                            }
+                                            None => {
+                                                app.library.liked_songs =
+                                                    Fetch::Failed("Spotify client not ready yet".into());
+                                            }
+                                        }
+                                    }
+                                    Screen::SavedAlbums
+                                        if matches!(app.library.saved_albums, Fetch::NotStarted) =>
+                                    {
+                                        app.library.saved_albums = Fetch::Loading;
+                                        match spotify_client.clone() {
+                                            Some(client) => {
+                                                let tx = library_tx.clone();
+                                                tokio::spawn(async move {
+                                                    let result = api::library::saved_albums(&client)
+                                                        .await
+                                                        .map_err(|e| e.to_string());
+                                                    let _ = tx.send(LibraryFetchResult::SavedAlbums(result));
+                                                });
+                                            }
+                                            None => {
+                                                app.library.saved_albums =
+                                                    Fetch::Failed("Spotify client not ready yet".into());
+                                            }
+                                        }
+                                    }
+                                    Screen::FollowedArtists
+                                        if matches!(app.library.followed_artists, Fetch::NotStarted) =>
+                                    {
+                                        app.library.followed_artists = Fetch::Loading;
+                                        match spotify_client.clone() {
+                                            Some(client) => {
+                                                let tx = library_tx.clone();
+                                                tokio::spawn(async move {
+                                                    let result = api::library::followed_artists(&client)
+                                                        .await
+                                                        .map_err(|e| e.to_string());
+                                                    let _ =
+                                                        tx.send(LibraryFetchResult::FollowedArtists(result));
+                                                });
+                                            }
+                                            None => {
+                                                app.library.followed_artists =
+                                                    Fetch::Failed("Spotify client not ready yet".into());
+                                            }
+                                        }
+                                    }
+                                    Screen::YourPlaylists
+                                        if matches!(app.library.playlists, Fetch::NotStarted) =>
+                                    {
+                                        app.library.playlists = Fetch::Loading;
+                                        match spotify_client.clone() {
+                                            Some(client) => {
+                                                let tx = library_tx.clone();
+                                                tokio::spawn(async move {
+                                                    let result = api::library::your_playlists(&client)
+                                                        .await
+                                                        .map_err(|e| e.to_string());
+                                                    let _ = tx.send(LibraryFetchResult::Playlists(result));
+                                                });
+                                            }
+                                            None => {
+                                                app.library.playlists =
+                                                    Fetch::Failed("Spotify client not ready yet".into());
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            _ => {}
+                        },
+                        Screen::LikedSongs if app.library.liked_songs_filter.editing => {
+                            edit_filter(&mut app.library.liked_songs_filter, &mut app.library.liked_songs_selected, key.code);
+                        }
+                        Screen::LikedSongs => {
+                            let label = |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title);
+                            match key.code {
+                                KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    break 'inner LoopExit::Quit
+                                }
+                                KeyCode::Esc => {
+                                    app.nav.escape();
+                                }
+                                KeyCode::Char('/') => {
+                                    app.library.liked_songs_filter.editing = true;
+                                }
+                                KeyCode::Char('o') => {
+                                    app.library.liked_songs_filter.sort_alpha =
+                                        !app.library.liked_songs_filter.sort_alpha;
+                                }
+                                KeyCode::Up => {
+                                    app.library.liked_songs_selected =
+                                        app.library.liked_songs_selected.saturating_sub(1);
+                                }
+                                KeyCode::Down => {
+                                    if let Fetch::Ready(items) = &app.library.liked_songs {
+                                        let display = filtered_sorted(items, &app.library.liked_songs_filter, &label);
+                                        if !display.is_empty() {
+                                            app.library.liked_songs_selected =
+                                                (app.library.liked_songs_selected + 1).min(display.len() - 1);
+                                        }
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    if let Fetch::Ready(items) = &app.library.liked_songs {
+                                        let display = filtered_sorted(items, &app.library.liked_songs_filter, &label);
+                                        if let Some(track) =
+                                            display.get(app.library.liked_songs_selected).map(|&(_, t)| t.clone())
+                                        {
+                                            let _ = spirc.activate();
+                                            let _ = spirc.load(LoadRequest::from_context_uri(
+                                                track.uri,
+                                                Default::default(),
+                                            ));
+                                            let _ = spirc.play();
+                                            app.nav.goto(Screen::NowPlaying);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        Screen::SavedAlbums if app.library.saved_albums_filter.editing => {
+                            edit_filter(&mut app.library.saved_albums_filter, &mut app.library.saved_albums_selected, key.code);
+                        }
+                        Screen::SavedAlbums => {
+                            let label = |a: &SavedAlbumSummary| format!("{} \u{2014} {}", a.name, a.artist);
+                            match key.code {
+                                KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    break 'inner LoopExit::Quit
+                                }
+                                KeyCode::Esc => {
+                                    app.nav.escape();
+                                }
+                                KeyCode::Char('/') => {
+                                    app.library.saved_albums_filter.editing = true;
+                                }
+                                KeyCode::Char('o') => {
+                                    app.library.saved_albums_filter.sort_alpha =
+                                        !app.library.saved_albums_filter.sort_alpha;
+                                }
+                                KeyCode::Up => {
+                                    app.library.saved_albums_selected =
+                                        app.library.saved_albums_selected.saturating_sub(1);
+                                }
+                                KeyCode::Down => {
+                                    if let Fetch::Ready(items) = &app.library.saved_albums {
+                                        let display = filtered_sorted(items, &app.library.saved_albums_filter, &label);
+                                        if !display.is_empty() {
+                                            app.library.saved_albums_selected =
+                                                (app.library.saved_albums_selected + 1).min(display.len() - 1);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        Screen::FollowedArtists if app.library.followed_artists_filter.editing => {
+                            edit_filter(&mut app.library.followed_artists_filter, &mut app.library.followed_artists_selected, key.code);
+                        }
+                        Screen::FollowedArtists => {
+                            let label = |a: &FollowedArtist| a.name.clone();
+                            match key.code {
+                                KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    break 'inner LoopExit::Quit
+                                }
+                                KeyCode::Esc => {
+                                    app.nav.escape();
+                                }
+                                KeyCode::Char('/') => {
+                                    app.library.followed_artists_filter.editing = true;
+                                }
+                                KeyCode::Char('o') => {
+                                    app.library.followed_artists_filter.sort_alpha =
+                                        !app.library.followed_artists_filter.sort_alpha;
+                                }
+                                KeyCode::Up => {
+                                    app.library.followed_artists_selected =
+                                        app.library.followed_artists_selected.saturating_sub(1);
+                                }
+                                KeyCode::Down => {
+                                    if let Fetch::Ready(items) = &app.library.followed_artists {
+                                        let display = filtered_sorted(items, &app.library.followed_artists_filter, &label);
+                                        if !display.is_empty() {
+                                            app.library.followed_artists_selected =
+                                                (app.library.followed_artists_selected + 1).min(display.len() - 1);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        Screen::YourPlaylists if app.library.playlists_filter.editing => {
+                            edit_filter(&mut app.library.playlists_filter, &mut app.library.playlists_selected, key.code);
+                        }
+                        Screen::YourPlaylists => {
+                            let label =
+                                |p: &PlaylistSummary| format!("{} ({} tracks)", p.name, p.track_count);
+                            match key.code {
+                                KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    break 'inner LoopExit::Quit
+                                }
+                                KeyCode::Esc => {
+                                    app.nav.escape();
+                                }
+                                KeyCode::Char('/') => {
+                                    app.library.playlists_filter.editing = true;
+                                }
+                                KeyCode::Char('o') => {
+                                    app.library.playlists_filter.sort_alpha =
+                                        !app.library.playlists_filter.sort_alpha;
+                                }
+                                KeyCode::Char('P') => {
+                                    if let Fetch::Ready(items) = &app.library.playlists {
+                                        let display = pinned_first(
+                                            filtered_sorted(items, &app.library.playlists_filter, &label),
+                                            &app.pinned_playlists,
+                                        );
+                                        if let Some(uri) =
+                                            display.get(app.library.playlists_selected).map(|&(_, p)| p.uri.clone())
+                                        {
+                                            pins::toggle_in_place(&mut app.pinned_playlists, &uri);
+                                            pins::save(&app.pinned_playlists);
+                                        }
+                                    }
+                                }
+                                KeyCode::Up => {
+                                    app.library.playlists_selected =
+                                        app.library.playlists_selected.saturating_sub(1);
+                                }
+                                KeyCode::Down => {
+                                    if let Fetch::Ready(items) = &app.library.playlists {
+                                        let display = pinned_first(
+                                            filtered_sorted(items, &app.library.playlists_filter, &label),
+                                            &app.pinned_playlists,
+                                        );
+                                        if !display.is_empty() {
+                                            app.library.playlists_selected =
+                                                (app.library.playlists_selected + 1).min(display.len() - 1);
+                                        }
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    if let Fetch::Ready(items) = &app.library.playlists {
+                                        let display = pinned_first(
+                                            filtered_sorted(items, &app.library.playlists_filter, &label),
+                                            &app.pinned_playlists,
+                                        );
+                                        if let Some(playlist) =
+                                            display.get(app.library.playlists_selected).map(|&(_, p)| p.clone())
+                                        {
+                                            app.nav.push(Screen::PlaylistDetail);
+                                            let playlist_uri = playlist.uri.clone();
+                                            app.playlist_detail = Some(PlaylistDetailState {
+                                                playlist,
+                                                tracks: Fetch::Loading,
+                                                selected: 0,
+                                                filter: ListFilter::default(),
+                                            });
+                                            match spotify_client.clone() {
+                                                Some(client) => {
+                                                    let tx = library_tx.clone();
+                                                    let uri_for_task = playlist_uri.clone();
+                                                    tokio::spawn(async move {
+                                                        let result = api::library::playlist_tracks(
+                                                            &client,
+                                                            &uri_for_task,
+                                                        )
+                                                        .await;
+                                                        let _ = tx.send(LibraryFetchResult::PlaylistTracks {
+                                                            playlist_uri: uri_for_task,
+                                                            result,
+                                                        });
+                                                    });
+                                                }
+                                                None => {
+                                                    if let Some(pd) = &mut app.playlist_detail {
+                                                        pd.tracks = Fetch::Failed(
+                                                            "Spotify client not ready yet".into(),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        Screen::PlaylistDetail
+                            if app.playlist_detail.as_ref().is_some_and(|pd| pd.filter.editing) =>
+                        {
+                            if let Some(pd) = &mut app.playlist_detail {
+                                edit_filter(&mut pd.filter, &mut pd.selected, key.code);
+                            }
+                        }
+                        Screen::PlaylistDetail => {
+                            let label = |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title);
+                            match key.code {
+                                KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    break 'inner LoopExit::Quit
+                                }
+                                KeyCode::Esc => {
+                                    app.nav.escape();
+                                }
+                                KeyCode::Char('/') => {
+                                    if let Some(pd) = &mut app.playlist_detail {
+                                        pd.filter.editing = true;
+                                    }
+                                }
+                                KeyCode::Char('o') => {
+                                    if let Some(pd) = &mut app.playlist_detail {
+                                        pd.filter.sort_alpha = !pd.filter.sort_alpha;
+                                    }
+                                }
+                                KeyCode::Up => {
+                                    if let Some(pd) = &mut app.playlist_detail {
+                                        pd.selected = pd.selected.saturating_sub(1);
+                                    }
+                                }
+                                KeyCode::Down => {
+                                    if let Some(pd) = &mut app.playlist_detail {
+                                        if let Fetch::Ready(items) = &pd.tracks {
+                                            let display = filtered_sorted(items, &pd.filter, &label);
+                                            if !display.is_empty() {
+                                                pd.selected = (pd.selected + 1).min(display.len() - 1);
+                                            }
+                                        }
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    if let Some(pd) = &app.playlist_detail {
+                                        if let Fetch::Ready(items) = &pd.tracks {
+                                            let display = filtered_sorted(items, &pd.filter, &label);
+                                            if let Some(&(original_index, _)) = display.get(pd.selected) {
+                                                // Loads the whole playlist as
+                                                // context starting at the
+                                                // selected track, not just
+                                                // that one track in isolation
+                                                // -- n/p then walk the real
+                                                // playlist, matching "play
+                                                // playlist as context" in the
+                                                // plan. original_index (not
+                                                // pd.selected) since the real
+                                                // context is indexed against
+                                                // the unfiltered playlist --
+                                                // filtered_sorted carries the
+                                                // original position precisely
+                                                // so this stays correct even
+                                                // with a filter/sort active.
+                                                let opts = LoadRequestOptions {
+                                                    playing_track: Some(PlayingTrack::Index(original_index as u32)),
+                                                    ..Default::default()
+                                                };
+                                                let _ = spirc.activate();
+                                                let _ = spirc.load(LoadRequest::from_context_uri(
+                                                    pd.playlist.uri.clone(),
+                                                    opts,
+                                                ));
+                                                let _ = spirc.play();
+                                                app.nav.goto(Screen::NowPlaying);
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
             }
@@ -592,7 +1093,7 @@ async fn main() -> std::io::Result<()> {
                 app.track_artist = None;
                 app.playing = None;
                 app.lyrics = LyricsState::SessionEnded;
-                terminal.draw(|f| ui::render(f, &app))?;
+                terminal.draw(|f| ui::render(f, &app, &mut scroll))?;
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
             }

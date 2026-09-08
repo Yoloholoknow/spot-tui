@@ -29,7 +29,7 @@ use api::library::{FollowedArtist, PlaylistSummary, SavedAlbumSummary};
 use api::search::TrackResult;
 use ui::{
     filtered_sorted, pinned_first, AppState, Fetch, Focus, LibraryState, ListFilter, LyricsState, Nav,
-    PlaylistDetailState, Screen, SearchState, LIBRARY_ENTRIES, SIDEBAR_ENTRIES,
+    PlaylistDetailState, Screen, SearchState, LIBRARY_ENTRIES,
 };
 
 enum LibraryFetchResult {
@@ -41,6 +41,17 @@ enum LibraryFetchResult {
         playlist_uri: String,
         result: Result<Vec<TrackResult>, String>,
     },
+}
+
+/// Owned result of resolving a Sidebar row into an action -- computed in
+/// its own statement so the borrow of `app` inside `ui::sidebar_rows(&app)`
+/// ends there, before the action actually mutates `app`. A `match`'s
+/// scrutinee temporary lives for the whole arm body it's matched into,
+/// not just until a binding's last use, so doing the borrow and the
+/// mutation in the same match arm does not compile.
+enum SidebarAction {
+    Goto(Screen),
+    OpenPlaylist(PlaylistSummary),
 }
 
 const TICK: Duration = Duration::from_millis(100);
@@ -147,6 +158,50 @@ fn edit_filter(filter: &mut ListFilter, selected: &mut usize, key: KeyCode) {
         }
         _ => {}
     }
+}
+
+/// Opens Playlist Detail on `playlist` and kicks off its track fetch.
+/// Shared by two real call sites now (Sidebar's own playlist rows, and
+/// the Your Playlists screen's Enter) -- the second concrete case that
+/// justifies pulling this out rather than duplicating it.
+fn open_playlist_detail(
+    app: &mut AppState,
+    library_tx: &mpsc::Sender<LibraryFetchResult>,
+    spotify_client: &Option<AuthCodeSpotify>,
+    playlist: PlaylistSummary,
+) {
+    app.nav.push(Screen::PlaylistDetail);
+    let playlist_uri = playlist.uri.clone();
+    app.playlist_detail = Some(PlaylistDetailState {
+        playlist,
+        tracks: Fetch::Loading,
+        selected: 0,
+        filter: ListFilter::default(),
+    });
+    match spotify_client.clone() {
+        Some(client) => {
+            let tx = library_tx.clone();
+            let uri_for_task = playlist_uri.clone();
+            tokio::spawn(async move {
+                let result = api::library::playlist_tracks(&client, &uri_for_task).await;
+                let _ = tx.send(LibraryFetchResult::PlaylistTracks { playlist_uri: uri_for_task, result });
+            });
+        }
+        None => {
+            if let Some(pd) = &mut app.playlist_detail {
+                pd.tracks = Fetch::Failed("Spotify client not ready yet".into());
+            }
+        }
+    }
+}
+
+/// A physical Shift+P: matches the literal uppercase char (how most
+/// terminals report it) as well as lowercase-plus-SHIFT-modifier (how
+/// some terminals/configurations report it instead) -- reported live as
+/// "pinning does not do anything," most likely this exact platform
+/// encoding gap rather than the pin logic itself being wrong.
+fn is_pin_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    code == KeyCode::Char('P') || (code == KeyCode::Char('p') && modifiers.contains(KeyModifiers::SHIFT))
 }
 
 enum LoopExit {
@@ -261,7 +316,14 @@ async fn main() -> std::io::Result<()> {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(log_file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("librespot=debug"))
+        // "librespot=debug" alone (the original filter) sets everything
+        // NOT explicitly named to "off" -- every log::info!/warn! call in
+        // this crate's own code (main.rs, api/*.rs) has been silently
+        // dropped this whole session as a result, independent of whatever
+        // it was trying to report. "info" as the global default keeps
+        // librespot's own verbosity at debug while actually letting the
+        // app's own logging through.
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,librespot=debug"))
             .target(env_logger::Target::Pipe(Box::new(log_file)))
             .init();
     }
@@ -310,7 +372,8 @@ async fn main() -> std::io::Result<()> {
         sidebar_sel: 0,
         library: LibraryState::new(),
         playlist_detail: None,
-        pinned_playlists: pins::load(),
+        pinned_playlists: pins::load("playlists"),
+        pinned_tracks: pins::load("tracks"),
         search: SearchState::new(),
     };
 
@@ -421,6 +484,24 @@ async fn main() -> std::io::Result<()> {
                 app.search.client_ready = result.is_some();
                 spotify_client = result;
                 client_checked = true;
+
+                // Fetch playlists as soon as the client's ready, not
+                // lazily on first Library visit -- the Sidebar shows
+                // them directly (see ui::sidebar_rows) and shouldn't sit
+                // empty until the user happens to drill into Library
+                // first. Guarded the same way the lazy trigger elsewhere
+                // is, so whichever fires first wins and the other is a
+                // harmless no-op.
+                if let (Some(client), true) =
+                    (spotify_client.clone(), matches!(app.library.playlists, Fetch::NotStarted))
+                {
+                    app.library.playlists = Fetch::Loading;
+                    let tx = library_tx.clone();
+                    tokio::spawn(async move {
+                        let result = api::library::your_playlists(&client).await.map_err(|e| e.to_string());
+                        let _ = tx.send(LibraryFetchResult::Playlists(result));
+                    });
+                }
             }
         }
 
@@ -517,6 +598,16 @@ async fn main() -> std::io::Result<()> {
                             app.nav.goto(Screen::Library);
                             app.nav.focus = Focus::Main;
                         }
+                        KeyCode::Char(c) if is_pin_key(KeyCode::Char(c), key.modifiers) => {
+                            let playlist_uri = match ui::sidebar_rows(&app).get(app.sidebar_sel) {
+                                Some(ui::SidebarRow::Playlist(p)) => Some(p.uri.clone()),
+                                _ => None,
+                            };
+                            if let Some(uri) = playlist_uri {
+                                pins::toggle_in_place(&mut app.pinned_playlists, &uri);
+                                pins::save("playlists", &app.pinned_playlists);
+                            }
+                        }
                         KeyCode::Char(' ') => {
                             let _ = spirc.play_pause();
                         }
@@ -532,29 +623,43 @@ async fn main() -> std::io::Result<()> {
                         KeyCode::Char('-') => {
                             let _ = spirc.volume_down();
                         }
-                        KeyCode::Left => {
-                            let target =
-                                (tracker.progress_ms(Instant::now()) as i64 - SEEK_STEP_MS).max(0);
-                            let _ = spirc.set_position_ms(target as u32);
-                        }
-                        KeyCode::Right => {
-                            let target = tracker.progress_ms(Instant::now()) as i64 + SEEK_STEP_MS;
-                            let _ = spirc.set_position_ms(target as u32);
-                        }
+                        // Seek narrowed to just Now Playing (Main-focus) --
+                        // it's the one screen seeking is actually about.
+                        // Left/Right here instead mirror yazi/ranger-style
+                        // pane navigation: Right activates the selected
+                        // Sidebar row (same as Enter), matching "drill
+                        // into the right pane." Left has nothing further
+                        // left to go to from the Sidebar, so stays unbound.
                         KeyCode::Up => {
                             app.sidebar_sel = app.sidebar_sel.saturating_sub(1);
                         }
                         KeyCode::Down => {
-                            app.sidebar_sel = (app.sidebar_sel + 1).min(SIDEBAR_ENTRIES.len() - 1);
+                            let row_count = ui::sidebar_rows(&app).len();
+                            app.sidebar_sel = (app.sidebar_sel + 1).min(row_count.saturating_sub(1));
                         }
-                        KeyCode::Enter => {
-                            let (_, screen) = SIDEBAR_ENTRIES[app.sidebar_sel];
-                            app.nav.goto(screen);
-                            app.nav.focus = Focus::Main;
-                            if screen == Screen::Search {
-                                app.search.query.clear();
-                                app.search.results.clear();
-                                app.search.error = None;
+                        KeyCode::Enter | KeyCode::Right => {
+                            let action = match ui::sidebar_rows(&app).get(app.sidebar_sel) {
+                                Some(ui::SidebarRow::Menu(_, screen)) => Some(SidebarAction::Goto(*screen)),
+                                Some(ui::SidebarRow::Playlist(p)) => {
+                                    Some(SidebarAction::OpenPlaylist((*p).clone()))
+                                }
+                                None => None,
+                            };
+                            match action {
+                                Some(SidebarAction::Goto(screen)) => {
+                                    app.nav.goto(screen);
+                                    app.nav.focus = Focus::Main;
+                                    if screen == Screen::Search {
+                                        app.search.query.clear();
+                                        app.search.results.clear();
+                                        app.search.error = None;
+                                    }
+                                }
+                                Some(SidebarAction::OpenPlaylist(playlist)) => {
+                                    open_playlist_detail(&mut app, &library_tx, &spotify_client, playlist);
+                                    app.nav.focus = Focus::Main;
+                                }
+                                None => {}
                             }
                         }
                         _ => {}
@@ -563,7 +668,7 @@ async fn main() -> std::io::Result<()> {
                     // focus == Main
                     match *app.nav.top() {
                         Screen::Search => match key.code {
-                            KeyCode::Esc => {
+                            KeyCode::Esc | KeyCode::Left => {
                                 app.nav.escape();
                             }
                             KeyCode::Backspace => {
@@ -580,7 +685,7 @@ async fn main() -> std::io::Result<()> {
                                         (app.search.selected + 1).min(app.search.results.len() - 1);
                                 }
                             }
-                            KeyCode::Enter => {
+                            KeyCode::Enter | KeyCode::Right => {
                                 if app.search.results.is_empty() {
                                     if let Some(client) = spotify_client.clone() {
                                         if !app.search.query.trim().is_empty() {
@@ -676,7 +781,7 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 break 'inner LoopExit::Quit
                             }
-                            KeyCode::Esc => {
+                            KeyCode::Esc | KeyCode::Left => {
                                 app.nav.escape();
                             }
                             KeyCode::Up => {
@@ -686,7 +791,7 @@ async fn main() -> std::io::Result<()> {
                                 app.library.home_selected =
                                     (app.library.home_selected + 1).min(LIBRARY_ENTRIES.len() - 1);
                             }
-                            KeyCode::Enter => {
+                            KeyCode::Enter | KeyCode::Right => {
                                 let (_, screen) = LIBRARY_ENTRIES[app.library.home_selected];
                                 app.nav.push(screen);
                                 match screen {
@@ -786,7 +891,7 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
                                 }
-                                KeyCode::Esc => {
+                                KeyCode::Esc | KeyCode::Left => {
                                     app.nav.escape();
                                 }
                                 KeyCode::Char('/') => {
@@ -809,7 +914,7 @@ async fn main() -> std::io::Result<()> {
                                         }
                                     }
                                 }
-                                KeyCode::Enter => {
+                                KeyCode::Enter | KeyCode::Right => {
                                     if let Fetch::Ready(items) = &app.library.liked_songs {
                                         let display = filtered_sorted(items, &app.library.liked_songs_filter, &label);
                                         if let Some(track) =
@@ -838,7 +943,7 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
                                 }
-                                KeyCode::Esc => {
+                                KeyCode::Esc | KeyCode::Left => {
                                     app.nav.escape();
                                 }
                                 KeyCode::Char('/') => {
@@ -874,7 +979,7 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
                                 }
-                                KeyCode::Esc => {
+                                KeyCode::Esc | KeyCode::Left => {
                                     app.nav.escape();
                                 }
                                 KeyCode::Char('/') => {
@@ -911,7 +1016,7 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
                                 }
-                                KeyCode::Esc => {
+                                KeyCode::Esc | KeyCode::Left => {
                                     app.nav.escape();
                                 }
                                 KeyCode::Char('/') => {
@@ -921,17 +1026,18 @@ async fn main() -> std::io::Result<()> {
                                     app.library.playlists_filter.sort_alpha =
                                         !app.library.playlists_filter.sort_alpha;
                                 }
-                                KeyCode::Char('P') => {
+                                KeyCode::Char(c) if is_pin_key(KeyCode::Char(c), key.modifiers) => {
                                     if let Fetch::Ready(items) = &app.library.playlists {
                                         let display = pinned_first(
                                             filtered_sorted(items, &app.library.playlists_filter, &label),
                                             &app.pinned_playlists,
+                                            |p| p.uri.as_str(),
                                         );
                                         if let Some(uri) =
                                             display.get(app.library.playlists_selected).map(|&(_, p)| p.uri.clone())
                                         {
                                             pins::toggle_in_place(&mut app.pinned_playlists, &uri);
-                                            pins::save(&app.pinned_playlists);
+                                            pins::save("playlists", &app.pinned_playlists);
                                         }
                                     }
                                 }
@@ -944,6 +1050,7 @@ async fn main() -> std::io::Result<()> {
                                         let display = pinned_first(
                                             filtered_sorted(items, &app.library.playlists_filter, &label),
                                             &app.pinned_playlists,
+                                            |p| p.uri.as_str(),
                                         );
                                         if !display.is_empty() {
                                             app.library.playlists_selected =
@@ -951,48 +1058,22 @@ async fn main() -> std::io::Result<()> {
                                         }
                                     }
                                 }
-                                KeyCode::Enter => {
-                                    if let Fetch::Ready(items) = &app.library.playlists {
-                                        let display = pinned_first(
-                                            filtered_sorted(items, &app.library.playlists_filter, &label),
-                                            &app.pinned_playlists,
-                                        );
-                                        if let Some(playlist) =
-                                            display.get(app.library.playlists_selected).map(|&(_, p)| p.clone())
-                                        {
-                                            app.nav.push(Screen::PlaylistDetail);
-                                            let playlist_uri = playlist.uri.clone();
-                                            app.playlist_detail = Some(PlaylistDetailState {
-                                                playlist,
-                                                tracks: Fetch::Loading,
-                                                selected: 0,
-                                                filter: ListFilter::default(),
-                                            });
-                                            match spotify_client.clone() {
-                                                Some(client) => {
-                                                    let tx = library_tx.clone();
-                                                    let uri_for_task = playlist_uri.clone();
-                                                    tokio::spawn(async move {
-                                                        let result = api::library::playlist_tracks(
-                                                            &client,
-                                                            &uri_for_task,
-                                                        )
-                                                        .await;
-                                                        let _ = tx.send(LibraryFetchResult::PlaylistTracks {
-                                                            playlist_uri: uri_for_task,
-                                                            result,
-                                                        });
-                                                    });
-                                                }
-                                                None => {
-                                                    if let Some(pd) = &mut app.playlist_detail {
-                                                        pd.tracks = Fetch::Failed(
-                                                            "Spotify client not ready yet".into(),
-                                                        );
-                                                    }
-                                                }
-                                            }
+                                KeyCode::Enter | KeyCode::Right => {
+                                    let playlist = match &app.library.playlists {
+                                        Fetch::Ready(items) => {
+                                            let display = pinned_first(
+                                                filtered_sorted(items, &app.library.playlists_filter, &label),
+                                                &app.pinned_playlists,
+                                                |p| p.uri.as_str(),
+                                            );
+                                            display
+                                                .get(app.library.playlists_selected)
+                                                .map(|&(_, p)| p.clone())
                                         }
+                                        _ => None,
+                                    };
+                                    if let Some(playlist) = playlist {
+                                        open_playlist_detail(&mut app, &library_tx, &spotify_client, playlist);
                                     }
                                 }
                                 _ => {}
@@ -1012,7 +1093,7 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
                                 }
-                                KeyCode::Esc => {
+                                KeyCode::Esc | KeyCode::Left => {
                                     app.nav.escape();
                                 }
                                 KeyCode::Char('/') => {
@@ -1025,6 +1106,23 @@ async fn main() -> std::io::Result<()> {
                                         pd.filter.sort_alpha = !pd.filter.sort_alpha;
                                     }
                                 }
+                                KeyCode::Char(c) if is_pin_key(KeyCode::Char(c), key.modifiers) => {
+                                    if let Some(pd) = &app.playlist_detail {
+                                        if let Fetch::Ready(items) = &pd.tracks {
+                                            let display = pinned_first(
+                                                filtered_sorted(items, &pd.filter, &label),
+                                                &app.pinned_tracks,
+                                                |t| t.uri.as_str(),
+                                            );
+                                            if let Some(uri) =
+                                                display.get(pd.selected).map(|&(_, t)| t.uri.clone())
+                                            {
+                                                pins::toggle_in_place(&mut app.pinned_tracks, &uri);
+                                                pins::save("tracks", &app.pinned_tracks);
+                                            }
+                                        }
+                                    }
+                                }
                                 KeyCode::Up => {
                                     if let Some(pd) = &mut app.playlist_detail {
                                         pd.selected = pd.selected.saturating_sub(1);
@@ -1033,17 +1131,25 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Down => {
                                     if let Some(pd) = &mut app.playlist_detail {
                                         if let Fetch::Ready(items) = &pd.tracks {
-                                            let display = filtered_sorted(items, &pd.filter, &label);
+                                            let display = pinned_first(
+                                                filtered_sorted(items, &pd.filter, &label),
+                                                &app.pinned_tracks,
+                                                |t| t.uri.as_str(),
+                                            );
                                             if !display.is_empty() {
                                                 pd.selected = (pd.selected + 1).min(display.len() - 1);
                                             }
                                         }
                                     }
                                 }
-                                KeyCode::Enter => {
+                                KeyCode::Enter | KeyCode::Right => {
                                     if let Some(pd) = &app.playlist_detail {
                                         if let Fetch::Ready(items) = &pd.tracks {
-                                            let display = filtered_sorted(items, &pd.filter, &label);
+                                            let display = pinned_first(
+                                                filtered_sorted(items, &pd.filter, &label),
+                                                &app.pinned_tracks,
+                                                |t| t.uri.as_str(),
+                                            );
                                             if let Some(&(original_index, _)) = display.get(pd.selected) {
                                                 // Loads the whole playlist as
                                                 // context starting at the

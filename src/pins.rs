@@ -1,27 +1,32 @@
-//! Locally-pinned playlists. Spotify's public Web API exposes no pinned
-//! state at all (`GET /me/playlists` has no such field) -- pinning is a
-//! client-side-only concept in the official app, not something a
-//! third-party client can read or write against the real account. This
-//! is spot-tui's own substitute: pins live only in a local JSON file and
-//! never sync with the official app's pins.
+//! Locally-pinned playlists and tracks. Spotify's public Web API exposes
+//! no pinned state at all (`GET /me/playlists` has no such field) --
+//! pinning is a client-side-only concept in the official app, not
+//! something a third-party client can read or write against the real
+//! account. This is spot-tui's own substitute: pins live only in local
+//! JSON files and never sync with the official app's pins.
+//!
+//! Playlists and tracks get separate files (`kind` picks which) rather
+//! than one shared set -- a playlist and a track could theoretically
+//! share a URI namespace collision in principle, and keeping them
+//! separate means never having to reason about that.
 
 use std::collections::HashSet;
 
-fn pins_path() -> std::path::PathBuf {
+fn pins_path(kind: &str) -> std::path::PathBuf {
     directories::ProjectDirs::from("", "", "spot-tui")
-        .map(|d| d.cache_dir().join("pinned_playlists.json"))
-        .unwrap_or_else(|| std::env::temp_dir().join("spot-tui-pinned-playlists.json"))
+        .map(|d| d.cache_dir().join(format!("pinned_{kind}.json")))
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("spot-tui-pinned-{kind}.json")))
 }
 
-pub fn load() -> HashSet<String> {
-    let Ok(raw) = std::fs::read_to_string(pins_path()) else {
+pub fn load(kind: &str) -> HashSet<String> {
+    let Ok(raw) = std::fs::read_to_string(pins_path(kind)) else {
         return HashSet::new();
     };
     serde_json::from_str(&raw).unwrap_or_default()
 }
 
-pub fn save(pinned: &HashSet<String>) {
-    let path = pins_path();
+pub fn save(kind: &str, pinned: &HashSet<String>) {
+    let path = pins_path(kind);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

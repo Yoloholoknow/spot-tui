@@ -124,6 +124,34 @@ pub const SIDEBAR_ENTRIES: &[(&str, Screen)] = &[
     ("Library", Screen::Library),
 ];
 
+/// One row of the sidebar -- either a static menu entry or one of the
+/// user's own playlists. The sidebar was always meant to list playlists
+/// directly (see the design-scope plan's Navigation model diagram) so
+/// they're reachable in one step, not menu -> Library -> Your Playlists;
+/// that part just hadn't been built yet.
+pub enum SidebarRow<'a> {
+    Menu(&'static str, Screen),
+    Playlist(&'a crate::api::library::PlaylistSummary),
+}
+
+/// Combines the static menu entries with the user's playlists, pinned
+/// ones first (same `pinned_first`/`filtered_sorted` used by the Your
+/// Playlists screen -- one shared notion of pin order, not two). Used by
+/// both rendering and key-handling so they can never disagree on what
+/// row N actually is.
+pub fn sidebar_rows(app: &AppState) -> Vec<SidebarRow<'_>> {
+    let mut rows: Vec<SidebarRow> =
+        SIDEBAR_ENTRIES.iter().map(|(label, screen)| SidebarRow::Menu(label, *screen)).collect();
+    if let Fetch::Ready(items) = &app.library.playlists {
+        let label = |p: &crate::api::library::PlaylistSummary| p.name.clone();
+        let ordered = pinned_first(filtered_sorted(items, &ListFilter::default(), &label), &app.pinned_playlists, |p| {
+            p.uri.as_str()
+        });
+        rows.extend(ordered.into_iter().map(|(_, p)| SidebarRow::Playlist(p)));
+    }
+    rows
+}
+
 /// The Library home screen's 4 entries. Not part of `SIDEBAR_ENTRIES` --
 /// this is a menu one level into the main-pane stack, not a persistent
 /// destination.
@@ -280,13 +308,16 @@ mod filter_tests {
 
 /// Pins bubble to the top, stable otherwise -- preserves whatever order
 /// `filtered_sorted` already produced within the pinned and unpinned
-/// groups. Playlist-specific (not part of `filtered_sorted` itself)
-/// since pinning is a concept only playlists have.
-pub fn pinned_first<'a>(
-    mut items: Vec<(usize, &'a crate::api::library::PlaylistSummary)>,
+/// groups. Generic over anything with a URI to check against `pinned`
+/// (playlists via `sidebar_rows`/Your Playlists, and tracks within
+/// Playlist Detail -- the second real caller that justified genericizing
+/// this rather than hardcoding it to `PlaylistSummary`).
+pub fn pinned_first<'a, T>(
+    mut items: Vec<(usize, &'a T)>,
     pinned: &std::collections::HashSet<String>,
-) -> Vec<(usize, &'a crate::api::library::PlaylistSummary)> {
-    items.sort_by_key(|(_, p)| !pinned.contains(&p.uri));
+    uri_of: impl Fn(&T) -> &str,
+) -> Vec<(usize, &'a T)> {
+    items.sort_by_key(|(_, it)| !pinned.contains(uri_of(it)));
     items
 }
 
@@ -621,6 +652,7 @@ pub struct AppState {
     pub library: LibraryState,
     pub playlist_detail: Option<PlaylistDetailState>,
     pub pinned_playlists: std::collections::HashSet<String>,
+    pub pinned_tracks: std::collections::HashSet<String>,
 }
 
 /// Persisted scroll offsets, one per list, threaded through `render`
@@ -742,21 +774,55 @@ fn render_library_home(frame: &mut Frame, app: &AppState, area: Rect) {
     frame.render_stateful_widget(List::new(items), chunks[1], &mut state);
 }
 
+/// Not the shared `render_list_screen`, for the same reason Your
+/// Playlists isn't: pinned tracks (spot-tui's own local-only substitute,
+/// separate from pinned playlists -- see `pins.rs`) bubble to the top and
+/// get a marker glyph, a concept the generic 4-screen renderer doesn't
+/// know about. Reuses `pinned_first`/`filtered_sorted` exactly as Your
+/// Playlists does, just keyed on `app.pinned_tracks` instead.
 fn render_playlist_detail(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
     let Some(pd) = &app.playlist_detail else {
         frame.render_widget(Paragraph::new("no playlist selected"), area);
         return;
     };
-    render_list_screen(
-        frame,
-        area,
-        &pd.playlist.name,
-        &pd.tracks,
-        &pd.filter,
-        pd.selected,
-        list_state,
-        |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title),
+    let label = |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new(filter_header(&pd.playlist.name, &pd.filter))
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+        chunks[0],
     );
+    match &pd.tracks {
+        Fetch::NotStarted | Fetch::Loading => {
+            frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
+        }
+        Fetch::Failed(e) => {
+            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), chunks[1]);
+        }
+        Fetch::Ready(items) => {
+            let display = pinned_first(
+                filtered_sorted(items, &pd.filter, &label),
+                &app.pinned_tracks,
+                |t| t.uri.as_str(),
+            );
+            let pin_label = |t: &TrackResult| {
+                let marker = if app.pinned_tracks.contains(&t.uri) { "* " } else { "  " };
+                format!("{marker}{}", label(t))
+            };
+            render_display_list(
+                frame,
+                chunks[1],
+                &display,
+                pd.selected,
+                &pin_label,
+                pd.filter.query.is_empty(),
+                list_state,
+            );
+        }
+    }
 }
 
 /// Your Playlists' own renderer, not the shared `render_list_screen`:
@@ -787,9 +853,10 @@ fn render_your_playlists(frame: &mut Frame, app: &AppState, list_state: &mut Lis
             let display = pinned_first(
                 filtered_sorted(items, &app.library.playlists_filter, &label),
                 &app.pinned_playlists,
+                |p| p.uri.as_str(),
             );
             let pin_label = |p: &crate::api::library::PlaylistSummary| {
-                let marker = if app.pinned_playlists.contains(&p.uri) { "\u{1f4cc} " } else { "  " };
+                let marker = if app.pinned_playlists.contains(&p.uri) { "* " } else { "  " };
                 format!("{marker}{}", label(p))
             };
             render_display_list(
@@ -905,23 +972,48 @@ fn render_display_list<T>(
 }
 
 fn render_sidebar(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
-    let items: Vec<ListItem> = SIDEBAR_ENTRIES
-        .iter()
-        .enumerate()
-        .map(|(i, (label, screen))| {
-            let is_open = app.nav.depth() == 1 && app.nav.top() == screen;
-            let is_cursor = app.nav.focus == Focus::Sidebar && i == app.sidebar_sel;
-            let mut style = Style::default();
-            if is_open {
-                style = style.fg(ACCENT).add_modifier(Modifier::BOLD);
+    let rows = sidebar_rows(app);
+    let mut items: Vec<ListItem> = Vec::with_capacity(rows.len() + 1);
+    let mut saw_playlists_header = false;
+    for (i, row) in rows.iter().enumerate() {
+        if matches!(row, SidebarRow::Playlist(_)) && !saw_playlists_header {
+            items.push(ListItem::new("PLAYLISTS").style(Style::default().fg(Color::DarkGray)));
+            saw_playlists_header = true;
+        }
+        // "Is this what's currently showing in Main" -- checked against
+        // `top()` alone, not stack depth. `goto()` always keeps NowPlaying
+        // at the bottom of the stack (see Nav::goto), so anything reached
+        // via the Sidebar sits at depth 2, never depth 1 -- a lingering
+        // `depth() == 1` check here (from before that invariant existed)
+        // meant this could only ever light up for Now Playing itself,
+        // reported live as no visible "which item am I in" indicator at
+        // all once you'd navigated anywhere else.
+        let (text, is_open) = match row {
+            SidebarRow::Menu(label, screen) => (label.to_string(), app.nav.top() == screen),
+            SidebarRow::Playlist(p) => {
+                let marker = if app.pinned_playlists.contains(&p.uri) { "* " } else { "  " };
+                let is_open = *app.nav.top() == Screen::PlaylistDetail
+                    && app.playlist_detail.as_ref().is_some_and(|pd| pd.playlist.uri == p.uri);
+                (format!("{marker}{}", p.name), is_open)
             }
-            if is_cursor {
-                style = style.add_modifier(Modifier::REVERSED);
-            }
-            ListItem::new(*label).style(style)
-        })
-        .collect();
-    list_state.select(Some(app.sidebar_sel));
+        };
+        let is_cursor = app.nav.focus == Focus::Sidebar && i == app.sidebar_sel;
+        let mut style = Style::default();
+        if is_open {
+            style = style.fg(ACCENT).add_modifier(Modifier::BOLD);
+        }
+        if is_cursor {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
+        items.push(ListItem::new(text).style(style));
+    }
+    // The "PLAYLISTS" header takes up one visual row that `sidebar_sel`
+    // (an index into logical rows: menu entries + playlists, no header)
+    // doesn't know about -- shift the on-screen selection down by one
+    // once the cursor is actually on a playlist row, past where the
+    // header was inserted.
+    let header_offset = if saw_playlists_header && app.sidebar_sel >= SIDEBAR_ENTRIES.len() { 1 } else { 0 };
+    list_state.select(Some(app.sidebar_sel + header_offset));
     frame.render_stateful_widget(
         List::new(items).block(
             Block::default()

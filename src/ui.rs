@@ -630,6 +630,7 @@ pub enum LyricsState {
 pub struct AppState {
     pub track_title: Option<String>,
     pub track_artist: Option<String>,
+    pub track_album: Option<String>,
     pub lyrics: LyricsState,
     pub current_line: Option<usize>,
     pub fullscreen: bool,
@@ -1076,10 +1077,18 @@ fn render_search(frame: &mut Frame, app: &AppState, list_state: &mut ListState, 
     } else if let Some(err) = &app.search.error {
         vec![Line::from(format!("search failed: {err}"))]
     } else if app.search.results.is_empty() {
-        vec![Line::from(if app.search.client_ready {
-            "type a query, Enter to search, Esc to cancel".to_string()
-        } else {
+        vec![Line::from(if !app.search.client_ready {
             "search not ready yet (loading Spotify auth\u{2026})".to_string()
+        } else if app.search.query.is_empty() {
+            "type a query, then Enter to search, Esc to cancel".to_string()
+        } else {
+            // Distinct from the empty-query message on purpose: this is
+            // the state reported live as "have to click enter first and
+            // then scroll" -- clarifying *why* up/down do nothing yet
+            // (there's a real Web API call to make, not a local list to
+            // narrow) rather than leaving it looking broken or identical
+            // to having typed nothing at all.
+            "press Enter to search \u{2014} this hits Spotify directly, not a live filter like Library's /".to_string()
         })]
     } else {
         vec![]
@@ -1195,49 +1204,163 @@ fn body_lines(app: &AppState) -> Vec<Line<'static>> {
     }
 }
 
+const ART_MIN_WIDTH: u16 = 14;
+const ART_MAX_WIDTH: u16 = 26;
+
+fn hash_bytes(s: &str) -> u32 {
+    let mut h: u32 = 5381;
+    for b in s.bytes() {
+        h = h.wrapping_mul(33).wrapping_add(b as u32);
+    }
+    h
+}
+
+/// A deterministic placeholder for real album art (the design-scope
+/// plan's own Non-goal: real bitmap art needs the `ratatui-image` crate
+/// plus a terminal graphics protocol, tracked but not scheduled).
+/// `Color::Indexed`, not `Rgb`, matching `ACCENT`'s own choice above --
+/// renders correctly on plain 256-color terminals, not just truecolor
+/// ones. Kept to the middle of the 6-step color cube's range (1..=4 per
+/// channel, out of 0..=5) so it reads as "colorful art," not a
+/// near-black or near-white cube corner that would wash out the
+/// monogram text sitting on top of it.
+fn art_color(artist: &str, album: &str) -> Color {
+    let h = hash_bytes(&format!("{artist}{album}"));
+    let r = 1 + (h % 4) as u16;
+    let g = 1 + ((h / 4) % 4) as u16;
+    let b = 1 + ((h / 16) % 4) as u16;
+    Color::Indexed((16 + 36 * r + 6 * g + b) as u8)
+}
+
+fn monogram(artist: &str, album: &str) -> String {
+    let first_upper = |s: &str| s.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+    format!("{}{}", first_upper(artist), first_upper(album))
+}
+
+fn render_art_block(frame: &mut Frame, artist: &str, album: &str, area: Rect) {
+    let bg = art_color(artist, album);
+    frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let text_style = Style::default().bg(bg).fg(Color::White).add_modifier(Modifier::BOLD);
+    let top_pad = area.height / 2;
+    let mut lines: Vec<Line> = (0..top_pad).map(|_| Line::from("")).collect();
+    lines.push(Line::from(monogram(artist, album)));
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center).style(text_style), area);
+}
+
 fn render_compact(frame: &mut Frame, app: &AppState, area: Rect) {
+    match (&app.track_artist, &app.track_title) {
+        (Some(artist), Some(title)) => render_now_playing_hero(frame, app, artist, title, area),
+        _ => render_now_playing_idle(frame, app, area),
+    }
+}
+
+/// The unglamorous state, designed on its own terms rather than as a
+/// stripped-down hero: nothing is loaded yet, so there's nothing to
+/// depict art for -- showing a colorful block anyway would be a lie
+/// about there being a track, not a placeholder for one.
+fn render_now_playing_idle(frame: &mut Frame, app: &AppState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // title/artist
-            Constraint::Length(1), // icon + time
-            Constraint::Length(1), // progress gauge
-            Constraint::Min(1),    // lyrics
-        ])
+        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new(header(app, area.width as usize)).style(Style::default().add_modifier(Modifier::BOLD)),
+        chunks[0],
+    );
+    frame.render_widget(Paragraph::new(body_lines(app)).wrap(Wrap { trim: true }), chunks[2]);
+}
+
+/// Art block + larger title/transport on one row, lyrics given real room
+/// below -- the hero treatment validated in the browser mockup, ported
+/// into the real terminal for the first time. `hero_height` scales with
+/// the pane but stays capped: this is a glance screen, not the whole
+/// app, and lyrics still need to be the dominant use of vertical space
+/// (calibrating density to what this screen is actually for, not
+/// maximizing decoration).
+fn render_now_playing_hero(frame: &mut Frame, app: &AppState, artist: &str, title: &str, area: Rect) {
+    let hero_height = (area.height / 2).clamp(6, 11).min(area.height);
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(hero_height), Constraint::Length(1), Constraint::Min(1)])
         .split(area);
 
+    // Below ART_MIN_WIDTH the block would crush the monogram illegibly --
+    // in a narrow pane, skip the art entirely rather than render
+    // something unreadable just to say there's art.
+    let art_width = (area.width / 4).clamp(ART_MIN_WIDTH, ART_MAX_WIDTH);
+    let show_art = area.width >= art_width + 24;
+
+    let hero_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(if show_art {
+            vec![Constraint::Length(art_width), Constraint::Min(1)]
+        } else {
+            vec![Constraint::Min(1)]
+        })
+        .split(outer[0]);
+
+    let album = app.track_album.as_deref().unwrap_or(title);
+    let meta_area = if show_art {
+        render_art_block(frame, artist, album, hero_cols[0]);
+        hero_cols[1]
+    } else {
+        hero_cols[0]
+    };
+
+    let meta_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // title
+            Constraint::Length(1), // artist -- album
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // icon + time + vol
+            Constraint::Length(1), // gauge
+        ])
+        .split(meta_area);
+
     frame.render_widget(
-        Paragraph::new(header(app, area.width as usize))
+        Paragraph::new(truncate_ellipsis(title, meta_area.width as usize))
             .style(Style::default().add_modifier(Modifier::BOLD)),
-        chunks[0],
+        meta_chunks[1],
+    );
+    let artist_album = match &app.track_album {
+        Some(al) => format!("{artist} \u{2014} {al}"),
+        None => artist.to_string(),
+    };
+    frame.render_widget(
+        Paragraph::new(truncate_ellipsis(&artist_album, meta_area.width as usize))
+            .style(Style::default().fg(Color::DarkGray)),
+        meta_chunks[2],
     );
     frame.render_widget(
         Paragraph::new(format!("{} {}   {}", playing_icon(app), time_readout(app), volume_readout(app))),
-        chunks[1],
+        meta_chunks[4],
     );
-    frame.render_widget(progress_gauge(app), chunks[2]);
+    frame.render_widget(progress_gauge(app), meta_chunks[5]);
 
-    frame.render_widget(
-        Paragraph::new(body_lines(app))
-            .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::TOP)),
-        chunks[3],
-    );
+    frame.render_widget(Block::default().borders(Borders::TOP), outer[1]);
+    frame.render_widget(Paragraph::new(body_lines(app)).wrap(Wrap { trim: true }), outer[2]);
 }
 
 fn render_fullscreen(frame: &mut Frame, app: &AppState) {
     let area = frame.area();
+    match (&app.track_artist, &app.track_title) {
+        (Some(artist), Some(title)) => render_fullscreen_hero(frame, app, artist, title, area),
+        _ => render_fullscreen_idle(frame, app, area),
+    }
+}
+
+/// Same reasoning as `render_now_playing_idle`: nothing loaded, nothing
+/// to depict art for.
+fn render_fullscreen_idle(frame: &mut Frame, app: &AppState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // title/artist
-            Constraint::Length(1), // icon + time
-            Constraint::Length(1), // progress gauge
-            Constraint::Length(1), // spacer
-            Constraint::Min(1),    // lyrics
-        ])
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
-
     frame.render_widget(
         Paragraph::new(header(app, area.width as usize))
             .alignment(Alignment::Center)
@@ -1245,11 +1368,55 @@ fn render_fullscreen(frame: &mut Frame, app: &AppState) {
         chunks[0],
     );
     frame.render_widget(
-        Paragraph::new(format!("{} {}   {}", playing_icon(app), time_readout(app), volume_readout(app)))
-            .alignment(Alignment::Center),
+        Paragraph::new(body_lines(app)).alignment(Alignment::Center).wrap(Wrap { trim: true }),
         chunks[1],
     );
-    frame.render_widget(progress_gauge(app), chunks[2]);
+}
+
+/// The most immersive treatment: a large, centered art block above the
+/// same bold-centered title/transport/lyrics fullscreen already had.
+fn render_fullscreen_hero(frame: &mut Frame, app: &AppState, artist: &str, title: &str, area: Rect) {
+    let art_height = (area.height / 3).clamp(8, 16);
+    let art_width = (art_height * 2).clamp(20, 44);
+    let show_art = area.height > art_height + 8 && area.width > art_width + 4;
+
+    let text_rows = [
+        Constraint::Length(1), // title
+        Constraint::Length(1), // icon + time + vol
+        Constraint::Length(1), // progress gauge
+        Constraint::Length(1), // spacer
+        Constraint::Min(1),    // lyrics
+    ];
+    let chunks = if show_art {
+        let mut c = vec![Constraint::Length(art_height), Constraint::Length(1)];
+        c.extend(text_rows);
+        Layout::default().direction(Direction::Vertical).constraints(c).split(area)
+    } else {
+        Layout::default().direction(Direction::Vertical).constraints(text_rows).split(area)
+    };
+    let base = if show_art { 2 } else { 0 };
+
+    if show_art {
+        let album = app.track_album.as_deref().unwrap_or(title);
+        let art_row = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(art_width), Constraint::Min(1)])
+            .split(chunks[0]);
+        render_art_block(frame, artist, album, art_row[1]);
+    }
+
+    frame.render_widget(
+        Paragraph::new(truncate_ellipsis(title, area.width as usize))
+            .alignment(Alignment::Center)
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+        chunks[base],
+    );
+    frame.render_widget(
+        Paragraph::new(format!("{} {}   {}", playing_icon(app), time_readout(app), volume_readout(app)))
+            .alignment(Alignment::Center),
+        chunks[base + 1],
+    );
+    frame.render_widget(progress_gauge(app), chunks[base + 2]);
 
     let lines: Vec<Line> = body_lines(app)
         .into_iter()
@@ -1264,9 +1431,7 @@ fn render_fullscreen(frame: &mut Frame, app: &AppState) {
         .collect();
 
     frame.render_widget(
-        Paragraph::new(lines)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true }),
-        chunks[4],
+        Paragraph::new(lines).alignment(Alignment::Center).wrap(Wrap { trim: true }),
+        chunks[base + 4],
     );
 }

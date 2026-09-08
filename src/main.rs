@@ -505,6 +505,21 @@ async fn main() -> std::io::Result<()> {
                         let _ = tx.send(LibraryFetchResult::Playlists(result));
                     });
                 }
+                // Same reasoning, now that Liked Songs is also a direct
+                // Sidebar entry: fetch eagerly rather than leaving it
+                // stuck on "loading..." forever, since the only other
+                // trigger is Library home's own Enter handler, which the
+                // Sidebar's direct entry bypasses entirely.
+                if let (Some(client), true) =
+                    (spotify_client.clone(), matches!(app.library.liked_songs, Fetch::NotStarted))
+                {
+                    app.library.liked_songs = Fetch::Loading;
+                    let tx = library_tx.clone();
+                    tokio::spawn(async move {
+                        let result = api::library::liked_songs(&client).await.map_err(|e| e.to_string());
+                        let _ = tx.send(LibraryFetchResult::LikedSongs(result));
+                    });
+                }
             }
         }
 
@@ -586,6 +601,15 @@ async fn main() -> std::io::Result<()> {
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             break 'inner LoopExit::Quit
                         }
+                        KeyCode::Char('?') => {
+                            app.nav.push(Screen::Help);
+                            // Every other Sidebar activation (Enter/Right)
+                            // hands focus to Main -- this one didn't,
+                            // leaving focus on Sidebar while Help showed
+                            // in Main. Sidebar-focus has no Esc binding
+                            // of its own, so Esc then did nothing at all.
+                            app.nav.focus = Focus::Main;
+                        }
                         KeyCode::Char('f') if *app.nav.top() == Screen::NowPlaying => {
                             app.fullscreen = !app.fullscreen;
                             tmux_toggle_zoom();
@@ -594,6 +618,7 @@ async fn main() -> std::io::Result<()> {
                             app.nav.goto(Screen::Search);
                             app.nav.focus = Focus::Main;
                             app.search.query.clear();
+                            app.search.cursor = 0;
                             app.search.results.clear();
                             app.search.error = None;
                         }
@@ -654,6 +679,7 @@ async fn main() -> std::io::Result<()> {
                                     app.nav.focus = Focus::Main;
                                     if screen == Screen::Search {
                                         app.search.query.clear();
+                                        app.search.cursor = 0;
                                         app.search.results.clear();
                                         app.search.error = None;
                                     }
@@ -671,13 +697,26 @@ async fn main() -> std::io::Result<()> {
                     // focus == Main
                     match *app.nav.top() {
                         Screen::Search => match key.code {
-                            KeyCode::Esc | KeyCode::Left => {
+                            // Not Left -- this is a text-input screen; a
+                            // directional key needed for moving the
+                            // cursor within the query can't also mean
+                            // "leave," or editing becomes a minefield.
+                            // Reported live: arrow-key cursor movement
+                            // didn't work at all here (always had to
+                            // backspace-and-retype for a mid-query fix).
+                            KeyCode::Esc => {
                                 app.nav.escape();
                             }
                             KeyCode::Backspace => {
-                                app.search.query.pop();
+                                app.search.backspace_at_cursor();
                                 app.search.results.clear();
                                 app.search.error = None;
+                            }
+                            KeyCode::Left => {
+                                app.search.cursor_left();
+                            }
+                            KeyCode::Right => {
+                                app.search.cursor_right();
                             }
                             KeyCode::Up => {
                                 app.search.selected = app.search.selected.saturating_sub(1);
@@ -727,7 +766,7 @@ async fn main() -> std::io::Result<()> {
                                 }
                             }
                             KeyCode::Char(c) => {
-                                app.search.query.push(c);
+                                app.search.insert_at_cursor(c);
                                 app.search.results.clear();
                                 app.search.error = None;
                             }
@@ -741,6 +780,9 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 break 'inner LoopExit::Quit
                             }
+                            KeyCode::Char('?') => {
+                                app.nav.push(Screen::Help);
+                            }
                             KeyCode::Char('f') => {
                                 app.fullscreen = !app.fullscreen;
                                 tmux_toggle_zoom();
@@ -748,6 +790,7 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Char('/') => {
                                 app.nav.push(Screen::Search);
                                 app.search.query.clear();
+                                app.search.cursor = 0;
                                 app.search.results.clear();
                                 app.search.error = None;
                             }
@@ -786,6 +829,24 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Char('q') => break 'inner LoopExit::Quit,
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 break 'inner LoopExit::Quit
+                            }
+                            KeyCode::Char('?') => {
+                                app.nav.push(Screen::Help);
+                            }
+                            KeyCode::Char(' ') => {
+                                let _ = spirc.play_pause();
+                            }
+                            KeyCode::Char('n') => {
+                                let _ = spirc.next();
+                            }
+                            KeyCode::Char('p') => {
+                                let _ = spirc.prev();
+                            }
+                            KeyCode::Char('+') => {
+                                let _ = spirc.volume_up();
+                            }
+                            KeyCode::Char('-') => {
+                                let _ = spirc.volume_down();
                             }
                             KeyCode::Esc | KeyCode::Left => {
                                 app.nav.escape();
@@ -897,6 +958,24 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
                                 }
+                                KeyCode::Char('?') => {
+                                    app.nav.push(Screen::Help);
+                                }
+                                KeyCode::Char(' ') => {
+                                    let _ = spirc.play_pause();
+                                }
+                                KeyCode::Char('n') => {
+                                    let _ = spirc.next();
+                                }
+                                KeyCode::Char('p') => {
+                                    let _ = spirc.prev();
+                                }
+                                KeyCode::Char('+') => {
+                                    let _ = spirc.volume_up();
+                                }
+                                KeyCode::Char('-') => {
+                                    let _ = spirc.volume_down();
+                                }
                                 KeyCode::Esc | KeyCode::Left => {
                                     app.nav.escape();
                                 }
@@ -952,6 +1031,24 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
                                 }
+                                KeyCode::Char('?') => {
+                                    app.nav.push(Screen::Help);
+                                }
+                                KeyCode::Char(' ') => {
+                                    let _ = spirc.play_pause();
+                                }
+                                KeyCode::Char('n') => {
+                                    let _ = spirc.next();
+                                }
+                                KeyCode::Char('p') => {
+                                    let _ = spirc.prev();
+                                }
+                                KeyCode::Char('+') => {
+                                    let _ = spirc.volume_up();
+                                }
+                                KeyCode::Char('-') => {
+                                    let _ = spirc.volume_down();
+                                }
                                 KeyCode::Esc | KeyCode::Left => {
                                     app.nav.escape();
                                 }
@@ -987,6 +1084,24 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Char('q') => break 'inner LoopExit::Quit,
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
+                                }
+                                KeyCode::Char('?') => {
+                                    app.nav.push(Screen::Help);
+                                }
+                                KeyCode::Char(' ') => {
+                                    let _ = spirc.play_pause();
+                                }
+                                KeyCode::Char('n') => {
+                                    let _ = spirc.next();
+                                }
+                                KeyCode::Char('p') => {
+                                    let _ = spirc.prev();
+                                }
+                                KeyCode::Char('+') => {
+                                    let _ = spirc.volume_up();
+                                }
+                                KeyCode::Char('-') => {
+                                    let _ = spirc.volume_down();
                                 }
                                 KeyCode::Esc | KeyCode::Left => {
                                     app.nav.escape();
@@ -1024,6 +1139,24 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Char('q') => break 'inner LoopExit::Quit,
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
+                                }
+                                KeyCode::Char('?') => {
+                                    app.nav.push(Screen::Help);
+                                }
+                                KeyCode::Char(' ') => {
+                                    let _ = spirc.play_pause();
+                                }
+                                KeyCode::Char('n') => {
+                                    let _ = spirc.next();
+                                }
+                                KeyCode::Char('p') => {
+                                    let _ = spirc.prev();
+                                }
+                                KeyCode::Char('+') => {
+                                    let _ = spirc.volume_up();
+                                }
+                                KeyCode::Char('-') => {
+                                    let _ = spirc.volume_down();
                                 }
                                 KeyCode::Esc | KeyCode::Left => {
                                     app.nav.escape();
@@ -1101,6 +1234,24 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Char('q') => break 'inner LoopExit::Quit,
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
+                                }
+                                KeyCode::Char('?') => {
+                                    app.nav.push(Screen::Help);
+                                }
+                                KeyCode::Char(' ') => {
+                                    let _ = spirc.play_pause();
+                                }
+                                KeyCode::Char('n') => {
+                                    let _ = spirc.next();
+                                }
+                                KeyCode::Char('p') => {
+                                    let _ = spirc.prev();
+                                }
+                                KeyCode::Char('+') => {
+                                    let _ = spirc.volume_up();
+                                }
+                                KeyCode::Char('-') => {
+                                    let _ = spirc.volume_down();
                                 }
                                 KeyCode::Esc | KeyCode::Left => {
                                     app.nav.escape();
@@ -1196,6 +1347,31 @@ async fn main() -> std::io::Result<()> {
                                 _ => {}
                             }
                         }
+                        Screen::Help => match key.code {
+                            KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                break 'inner LoopExit::Quit
+                            }
+                            KeyCode::Esc | KeyCode::Left => {
+                                app.nav.escape();
+                            }
+                            KeyCode::Char(' ') => {
+                                let _ = spirc.play_pause();
+                            }
+                            KeyCode::Char('n') => {
+                                let _ = spirc.next();
+                            }
+                            KeyCode::Char('p') => {
+                                let _ = spirc.prev();
+                            }
+                            KeyCode::Char('+') => {
+                                let _ = spirc.volume_up();
+                            }
+                            KeyCode::Char('-') => {
+                                let _ = spirc.volume_down();
+                            }
+                            _ => {}
+                        },
                     }
                 }
             }

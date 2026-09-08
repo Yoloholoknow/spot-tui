@@ -23,6 +23,7 @@ pub enum Screen {
     FollowedArtists,
     YourPlaylists,
     PlaylistDetail,
+    Help,
 }
 
 /// Which persistent pane currently receives arrow keys / `Enter`, toggled
@@ -122,6 +123,7 @@ pub const SIDEBAR_ENTRIES: &[(&str, Screen)] = &[
     ("Now Playing", Screen::NowPlaying),
     ("Search", Screen::Search),
     ("Library", Screen::Library),
+    ("Liked Songs", Screen::LikedSongs),
 ];
 
 /// One row of the sidebar -- either a static menu entry or one of the
@@ -499,6 +501,13 @@ mod nav_tests {
 
 pub struct SearchState {
     pub query: String,
+    /// Character position (not byte offset -- safe on multi-byte UTF-8
+    /// query text), where the next typed character is inserted. Reported
+    /// live as a real gap: query editing was always append-at-end /
+    /// remove-from-end, so fixing a typo mid-query meant backspacing
+    /// everything after it and retyping, rather than moving the cursor
+    /// there directly.
+    pub cursor: usize,
     pub results: Vec<TrackResult>,
     pub selected: usize,
     pub searching: bool,
@@ -513,12 +522,115 @@ impl SearchState {
     pub fn new() -> Self {
         Self {
             query: String::new(),
+            cursor: 0,
             results: Vec::new(),
             selected: 0,
             searching: false,
             client_ready: false,
             error: None,
         }
+    }
+
+    fn char_byte_offset(s: &str, char_idx: usize) -> usize {
+        s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
+    }
+
+    /// Inserts `c` at the cursor and advances it by one character.
+    pub fn insert_at_cursor(&mut self, c: char) {
+        let byte_pos = Self::char_byte_offset(&self.query, self.cursor);
+        self.query.insert(byte_pos, c);
+        self.cursor += 1;
+    }
+
+    /// Deletes the character immediately before the cursor, if any --
+    /// not always the last character in the query.
+    pub fn backspace_at_cursor(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let start = Self::char_byte_offset(&self.query, self.cursor - 1);
+        let end = Self::char_byte_offset(&self.query, self.cursor);
+        self.query.replace_range(start..end, "");
+        self.cursor -= 1;
+    }
+
+    pub fn cursor_left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn cursor_right(&mut self) {
+        self.cursor = (self.cursor + 1).min(self.query.chars().count());
+    }
+}
+
+#[cfg(test)]
+mod search_cursor_tests {
+    use super::*;
+
+    #[test]
+    fn insert_at_cursor_appends_when_cursor_at_end() {
+        let mut s = SearchState::new();
+        s.query = "abc".to_string();
+        s.cursor = 3;
+        s.insert_at_cursor('x');
+        assert_eq!(s.query, "abcx");
+        assert_eq!(s.cursor, 4);
+    }
+
+    #[test]
+    fn insert_at_cursor_inserts_in_the_middle() {
+        let mut s = SearchState::new();
+        s.query = "ac".to_string();
+        s.cursor = 1;
+        s.insert_at_cursor('b');
+        assert_eq!(s.query, "abc");
+        assert_eq!(s.cursor, 2);
+    }
+
+    #[test]
+    fn backspace_at_cursor_removes_char_before_cursor_not_always_the_last() {
+        let mut s = SearchState::new();
+        s.query = "abc".to_string();
+        s.cursor = 2; // between 'b' and 'c'
+        s.backspace_at_cursor();
+        assert_eq!(s.query, "ac");
+        assert_eq!(s.cursor, 1);
+    }
+
+    #[test]
+    fn backspace_at_cursor_zero_is_a_noop() {
+        let mut s = SearchState::new();
+        s.query = "abc".to_string();
+        s.cursor = 0;
+        s.backspace_at_cursor();
+        assert_eq!(s.query, "abc");
+        assert_eq!(s.cursor, 0);
+    }
+
+    #[test]
+    fn cursor_left_and_right_clamp_at_bounds() {
+        let mut s = SearchState::new();
+        s.query = "ab".to_string();
+        s.cursor = 0;
+        s.cursor_left();
+        assert_eq!(s.cursor, 0);
+        s.cursor = 2;
+        s.cursor_right();
+        assert_eq!(s.cursor, 2);
+    }
+
+    #[test]
+    fn insert_and_backspace_are_char_boundary_safe_on_multibyte_text() {
+        // Same real title this codebase's truncate_ellipsis test already
+        // uses -- must not panic by slicing mid-codepoint. Chars are
+        // 0:友 1:人 2:A 3:君, so cursor=2 sits immediately before 'A'.
+        let mut s = SearchState::new();
+        s.query = "友人A君".to_string();
+        s.cursor = 2;
+        s.insert_at_cursor('X');
+        assert_eq!(s.query, "友人XA君");
+        s.backspace_at_cursor();
+        assert_eq!(s.query, "友人A君");
     }
 }
 
@@ -746,9 +858,85 @@ pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState) {
         ),
         Screen::YourPlaylists => render_your_playlists(frame, app, &mut scroll.playlists, main_area),
         Screen::PlaylistDetail => render_playlist_detail(frame, app, &mut scroll.playlist_detail, main_area),
+        Screen::Help => render_help(frame, main_area),
     }
     render_playbar(frame, app, playbar_area);
     render_status(frame, app, status_area);
+}
+
+/// Keep this in sync as new keys get wired -- Phase 4's whole point was
+/// moving Help to right after this session's current point in the build
+/// rather than writing it once at the end from a settled keybind table,
+/// so each later phase's own "done" should include updating this.
+/// `Search` is deliberately excluded from opening Help via `?` (it's the
+/// one screen where every printable character, `?` included, has to
+/// reach the query box), which is also why the reference below doesn't
+/// claim `?` works "from literally anywhere."
+const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Global",
+        &[
+            ("Tab", "switch focus between Sidebar and Main"),
+            ("Esc", "back one level; at the root, focus moves to Sidebar"),
+            ("?", "this screen (not while typing in Search or a filter)"),
+            ("q / Ctrl+C", "quit (not while typing in Search)"),
+            ("Space / n / p / + / -", "play-pause / next / previous / volume -- works from any screen, including while browsing a list, not just Now Playing (not while typing in Search)"),
+            ("/", "jump to Search (Sidebar, Now Playing) or open a list's filter"),
+            ("l", "jump to Library"),
+        ],
+    ),
+    (
+        "Now Playing",
+        &[
+            ("\u{2190} / \u{2192}", "seek \u{00b1}5s"),
+            ("\u{2191} / \u{2193}", "volume (same as +/-)"),
+            ("f", "toggle fullscreen"),
+        ],
+    ),
+    (
+        "Sidebar (Now Playing, Search, Library, Liked Songs, then your playlists)",
+        &[
+            ("\u{2191} / \u{2193}", "move cursor"),
+            ("Enter / \u{2192}", "open the selected entry or playlist"),
+            ("Esc", "does nothing further here -- already at the root"),
+            ("Shift+P", "pin / unpin the selected playlist"),
+        ],
+    ),
+    (
+        "Library lists (Liked Songs, Saved Albums, Followed Artists, Your Playlists, Playlist Detail)",
+        &[
+            ("\u{2191} / \u{2193}", "move selection"),
+            ("Enter", "play the selected track"),
+            ("Enter / \u{2192}", "open (Your Playlists \u{2192} Playlist Detail only)"),
+            ("\u{2190}", "back to Sidebar (same as Esc)"),
+            ("/", "open this list's filter (live-narrows as you type)"),
+            ("o", "toggle alphabetical sort"),
+            ("Shift+P", "pin / unpin (Your Playlists, Playlist Detail)"),
+        ],
+    ),
+    (
+        "While typing (a filter, or Search's query)",
+        &[
+            ("\u{2190} / \u{2192}", "move the cursor within the text (Search only)"),
+            ("Backspace", "delete the character before the cursor"),
+            ("Enter", "commit (Search: run the search; filters: stop editing)"),
+            ("Esc", "stop editing (filters) or back (Search)"),
+        ],
+    ),
+];
+
+fn render_help(frame: &mut Frame, area: Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+    for (section, rows) in HELP_SECTIONS {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(*section, Style::default().add_modifier(Modifier::BOLD))));
+        for (key, desc) in *rows {
+            lines.push(Line::from(format!("  {:14} {}", key, desc)));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
 }
 
 fn render_library_home(frame: &mut Frame, app: &AppState, area: Rect) {
@@ -1066,7 +1254,17 @@ fn render_search(frame: &mut Frame, app: &AppState, list_state: &mut ListState, 
         .constraints([Constraint::Length(3), Constraint::Min(1)])
         .split(area);
 
-    let query_line = format!("/ {}\u{2588}", app.search.query); // trailing block = cursor
+    // Cursor renders at its real position, not always trailing -- Left/Right
+    // now move it mid-string (arrow-key editing, reported live as missing).
+    let byte_pos = app
+        .search
+        .query
+        .char_indices()
+        .nth(app.search.cursor)
+        .map(|(b, _)| b)
+        .unwrap_or(app.search.query.len());
+    let (before, after) = app.search.query.split_at(byte_pos);
+    let query_line = format!("/ {before}\u{2588}{after}");
     frame.render_widget(
         Paragraph::new(query_line).block(Block::default().borders(Borders::ALL).title("search")),
         chunks[0],

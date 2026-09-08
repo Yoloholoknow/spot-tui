@@ -185,10 +185,13 @@ pub enum Fetch<T> {
 #[derive(Default)]
 pub struct ListFilter {
     pub query: String,
-    /// Character position within `query` -- same convention and same
-    /// underlying char-boundary-safe helpers as `SearchState::cursor`.
-    /// Reported live: arrow-key cursor movement worked in Search but not
-    /// in any of the `/`-filter boxes, since this type never got the fix.
+    /// Character position within `query`, same convention as
+    /// `SearchState::cursor` -- Left/Right move it mid-string. Two other
+    /// designs were tried and rejected live: Left/Right as pane
+    /// navigation (nav.escape()/open) while typing felt like it silently
+    /// kicked you out of the filter; a no-op felt like the arrows were
+    /// just broken. Real in-text cursor movement, matching Search, is
+    /// the one that actually reads as "working."
     pub cursor: usize,
     pub editing: bool,
     pub sort_alpha: bool,
@@ -201,6 +204,17 @@ impl ListFilter {
     pub fn start_editing(&mut self) {
         self.editing = true;
         self.cursor = self.query.chars().count();
+    }
+
+    /// Exits edit mode AND clears the query -- distinct from just setting
+    /// `editing = false` (which keeps whatever was typed applied).
+    /// Reported live: Esc while filtering only stopped editing, leaving
+    /// the narrowed view in place with no way to actually cancel back to
+    /// the full list short of backspacing everything by hand.
+    pub fn cancel_editing(&mut self) {
+        self.editing = false;
+        self.query.clear();
+        self.cursor = 0;
     }
 
     pub fn insert_at_cursor(&mut self, c: char) {
@@ -697,8 +711,9 @@ mod filter_cursor_tests {
     // The char-boundary-safe editing itself is already covered by
     // search_cursor_tests (same shared text_* functions underneath) --
     // these cover what's actually specific to ListFilter: start_editing's
-    // cursor placement and that insert/backspace/left/right route to it
-    // at all.
+    // cursor placement, insert/backspace/left/right routing through it,
+    // and cancel_editing actually clearing the query (not just toggling
+    // `editing` off).
 
     #[test]
     fn start_editing_places_cursor_after_existing_query_not_at_the_start() {
@@ -716,7 +731,7 @@ mod filter_cursor_tests {
     }
 
     #[test]
-    fn insert_and_backspace_and_arrows_operate_at_the_cursor() {
+    fn insert_backspace_and_arrows_operate_at_the_cursor() {
         let mut f = ListFilter { query: "ac".to_string(), ..Default::default() };
         f.start_editing(); // cursor -> 2, end of "ac"
         f.cursor_left(); // cursor -> 1, between 'a' and 'c'
@@ -728,6 +743,16 @@ mod filter_cursor_tests {
         f.backspace_at_cursor();
         assert_eq!(f.query, "ab");
         assert_eq!(f.cursor, 2);
+    }
+
+    #[test]
+    fn cancel_editing_clears_the_query_not_just_the_editing_flag() {
+        let mut f = ListFilter { query: "abc".to_string(), ..Default::default() };
+        f.start_editing();
+        f.cancel_editing();
+        assert!(!f.editing);
+        assert!(f.query.is_empty());
+        assert_eq!(f.cursor, 0);
     }
 }
 
@@ -1014,10 +1039,11 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
     (
         "While typing (a filter, or Search's query)",
         &[
-            ("\u{2190} / \u{2192}", "move the cursor within the text (Search only)"),
+            ("\u{2191} / \u{2193}", "move the highlighted track (filters only -- keeps working while typing)"),
+            ("\u{2190} / \u{2192}", "move the cursor within the text"),
             ("Backspace", "delete the character before the cursor"),
-            ("Enter", "commit (Search: run the search; filters: stop editing)"),
-            ("Esc", "stop editing (filters) or back (Search)"),
+            ("Enter", "commit (Search: run the search; filters: stop editing, keep the narrowed list)"),
+            ("Esc", "Search: back. Filters: stop editing AND clear the filter back to the full list"),
         ],
     ),
 ];
@@ -1207,6 +1233,8 @@ fn render_list_screen<T>(
 /// shows whatever filter/sort is currently applied, if any.
 fn filter_header(title: &str, filter: &ListFilter) -> String {
     if filter.editing {
+        // Cursor renders at its real position, same as Search's own
+        // query line -- Left/Right move it mid-string here too.
         let byte_pos = filter
             .query
             .char_indices()

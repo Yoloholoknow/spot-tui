@@ -149,11 +149,21 @@ fn edit_filter(filter: &mut ListFilter, selected: &mut usize, key: KeyCode) {
             filter.editing = false;
         }
         KeyCode::Backspace => {
-            filter.query.pop();
+            filter.backspace_at_cursor();
             *selected = 0;
         }
+        // Reported live: arrow-key cursor movement worked in global
+        // Search but not here -- these filter boxes never got the same
+        // fix. Left/Right move the cursor; they can't also mean
+        // "leave," same reasoning as Search's own Esc-only exit.
+        KeyCode::Left => {
+            filter.cursor_left();
+        }
+        KeyCode::Right => {
+            filter.cursor_right();
+        }
         KeyCode::Char(c) => {
-            filter.query.push(c);
+            filter.insert_at_cursor(c);
             *selected = 0;
         }
         _ => {}
@@ -980,7 +990,7 @@ async fn main() -> std::io::Result<()> {
                                     app.nav.escape();
                                 }
                                 KeyCode::Char('/') => {
-                                    app.library.liked_songs_filter.editing = true;
+                                    app.library.liked_songs_filter.start_editing();
                                 }
                                 KeyCode::Char('o') => {
                                     app.library.liked_songs_filter.sort_alpha =
@@ -1053,7 +1063,7 @@ async fn main() -> std::io::Result<()> {
                                     app.nav.escape();
                                 }
                                 KeyCode::Char('/') => {
-                                    app.library.saved_albums_filter.editing = true;
+                                    app.library.saved_albums_filter.start_editing();
                                 }
                                 KeyCode::Char('o') => {
                                     app.library.saved_albums_filter.sort_alpha =
@@ -1107,7 +1117,7 @@ async fn main() -> std::io::Result<()> {
                                     app.nav.escape();
                                 }
                                 KeyCode::Char('/') => {
-                                    app.library.followed_artists_filter.editing = true;
+                                    app.library.followed_artists_filter.start_editing();
                                 }
                                 KeyCode::Char('o') => {
                                     app.library.followed_artists_filter.sort_alpha =
@@ -1162,7 +1172,7 @@ async fn main() -> std::io::Result<()> {
                                     app.nav.escape();
                                 }
                                 KeyCode::Char('/') => {
-                                    app.library.playlists_filter.editing = true;
+                                    app.library.playlists_filter.start_editing();
                                 }
                                 KeyCode::Char('o') => {
                                     app.library.playlists_filter.sort_alpha =
@@ -1258,7 +1268,7 @@ async fn main() -> std::io::Result<()> {
                                 }
                                 KeyCode::Char('/') => {
                                     if let Some(pd) = &mut app.playlist_detail {
-                                        pd.filter.editing = true;
+                                        pd.filter.start_editing();
                                     }
                                 }
                                 KeyCode::Char('o') => {

@@ -185,8 +185,39 @@ pub enum Fetch<T> {
 #[derive(Default)]
 pub struct ListFilter {
     pub query: String,
+    /// Character position within `query` -- same convention and same
+    /// underlying char-boundary-safe helpers as `SearchState::cursor`.
+    /// Reported live: arrow-key cursor movement worked in Search but not
+    /// in any of the `/`-filter boxes, since this type never got the fix.
+    pub cursor: usize,
     pub editing: bool,
     pub sort_alpha: bool,
+}
+
+impl ListFilter {
+    /// Enters edit mode with the cursor placed after whatever query text
+    /// is already there (matching a normal text field regaining focus),
+    /// not reset to the start.
+    pub fn start_editing(&mut self) {
+        self.editing = true;
+        self.cursor = self.query.chars().count();
+    }
+
+    pub fn insert_at_cursor(&mut self, c: char) {
+        text_insert_at_cursor(&mut self.query, &mut self.cursor, c);
+    }
+
+    pub fn backspace_at_cursor(&mut self) {
+        text_backspace_at_cursor(&mut self.query, &mut self.cursor);
+    }
+
+    pub fn cursor_left(&mut self) {
+        text_cursor_left(&mut self.cursor);
+    }
+
+    pub fn cursor_right(&mut self) {
+        text_cursor_right(&self.query, &mut self.cursor);
+    }
 }
 
 /// Applies `filter`'s query (case-insensitive substring match against
@@ -518,6 +549,43 @@ pub struct SearchState {
     pub error: Option<String>,
 }
 
+/// Char-boundary-safe cursor editing, shared by every text-input field in
+/// the app (Search's query, and every list screen's `/` filter box --
+/// duplicating this a second time for `ListFilter` is what justified
+/// pulling it out here instead of leaving it as a `SearchState`-only
+/// method). Cursor is a character index, not a byte offset, so this stays
+/// correct on multi-byte UTF-8 text.
+fn text_char_byte_offset(s: &str, char_idx: usize) -> usize {
+    s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
+}
+
+/// Inserts `c` at `*cursor` and advances it by one character.
+fn text_insert_at_cursor(s: &mut String, cursor: &mut usize, c: char) {
+    let byte_pos = text_char_byte_offset(s, *cursor);
+    s.insert(byte_pos, c);
+    *cursor += 1;
+}
+
+/// Deletes the character immediately before `*cursor`, if any -- not
+/// always the last character in the string.
+fn text_backspace_at_cursor(s: &mut String, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    let start = text_char_byte_offset(s, *cursor - 1);
+    let end = text_char_byte_offset(s, *cursor);
+    s.replace_range(start..end, "");
+    *cursor -= 1;
+}
+
+fn text_cursor_left(cursor: &mut usize) {
+    *cursor = cursor.saturating_sub(1);
+}
+
+fn text_cursor_right(s: &str, cursor: &mut usize) {
+    *cursor = (*cursor + 1).min(s.chars().count());
+}
+
 impl SearchState {
     pub fn new() -> Self {
         Self {
@@ -531,35 +599,23 @@ impl SearchState {
         }
     }
 
-    fn char_byte_offset(s: &str, char_idx: usize) -> usize {
-        s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
-    }
-
     /// Inserts `c` at the cursor and advances it by one character.
     pub fn insert_at_cursor(&mut self, c: char) {
-        let byte_pos = Self::char_byte_offset(&self.query, self.cursor);
-        self.query.insert(byte_pos, c);
-        self.cursor += 1;
+        text_insert_at_cursor(&mut self.query, &mut self.cursor, c);
     }
 
     /// Deletes the character immediately before the cursor, if any --
     /// not always the last character in the query.
     pub fn backspace_at_cursor(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let start = Self::char_byte_offset(&self.query, self.cursor - 1);
-        let end = Self::char_byte_offset(&self.query, self.cursor);
-        self.query.replace_range(start..end, "");
-        self.cursor -= 1;
+        text_backspace_at_cursor(&mut self.query, &mut self.cursor);
     }
 
     pub fn cursor_left(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
+        text_cursor_left(&mut self.cursor);
     }
 
     pub fn cursor_right(&mut self) {
-        self.cursor = (self.cursor + 1).min(self.query.chars().count());
+        text_cursor_right(&self.query, &mut self.cursor);
     }
 }
 
@@ -631,6 +687,47 @@ mod search_cursor_tests {
         assert_eq!(s.query, "友人XA君");
         s.backspace_at_cursor();
         assert_eq!(s.query, "友人A君");
+    }
+}
+
+#[cfg(test)]
+mod filter_cursor_tests {
+    use super::*;
+
+    // The char-boundary-safe editing itself is already covered by
+    // search_cursor_tests (same shared text_* functions underneath) --
+    // these cover what's actually specific to ListFilter: start_editing's
+    // cursor placement and that insert/backspace/left/right route to it
+    // at all.
+
+    #[test]
+    fn start_editing_places_cursor_after_existing_query_not_at_the_start() {
+        let mut f = ListFilter { query: "abc".to_string(), ..Default::default() };
+        f.start_editing();
+        assert!(f.editing);
+        assert_eq!(f.cursor, 3);
+    }
+
+    #[test]
+    fn start_editing_on_an_empty_query_leaves_cursor_at_zero() {
+        let mut f = ListFilter::default();
+        f.start_editing();
+        assert_eq!(f.cursor, 0);
+    }
+
+    #[test]
+    fn insert_and_backspace_and_arrows_operate_at_the_cursor() {
+        let mut f = ListFilter { query: "ac".to_string(), ..Default::default() };
+        f.start_editing(); // cursor -> 2, end of "ac"
+        f.cursor_left(); // cursor -> 1, between 'a' and 'c'
+        f.insert_at_cursor('b');
+        assert_eq!(f.query, "abc");
+        assert_eq!(f.cursor, 2);
+        f.cursor_right();
+        assert_eq!(f.cursor, 3); // clamped at the end
+        f.backspace_at_cursor();
+        assert_eq!(f.query, "ab");
+        assert_eq!(f.cursor, 2);
     }
 }
 
@@ -1110,7 +1207,14 @@ fn render_list_screen<T>(
 /// shows whatever filter/sort is currently applied, if any.
 fn filter_header(title: &str, filter: &ListFilter) -> String {
     if filter.editing {
-        format!("{title}  /{}\u{2588}", filter.query)
+        let byte_pos = filter
+            .query
+            .char_indices()
+            .nth(filter.cursor)
+            .map(|(b, _)| b)
+            .unwrap_or(filter.query.len());
+        let (before, after) = filter.query.split_at(byte_pos);
+        format!("{title}  /{before}\u{2588}{after}")
     } else if !filter.query.is_empty() || filter.sort_alpha {
         let mut parts = Vec::new();
         if !filter.query.is_empty() {

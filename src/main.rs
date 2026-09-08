@@ -360,6 +360,7 @@ async fn main() -> std::io::Result<()> {
     let mut app = AppState {
         track_title: None,
         track_artist: None,
+        track_album: None,
         lyrics: LyricsState::Idle,
         current_line: None,
         fullscreen: false,
@@ -403,6 +404,7 @@ async fn main() -> std::io::Result<()> {
                 log::warn!("connect failed, retrying in {backoff:?}: {e}");
                 app.track_title = None;
                 app.track_artist = None;
+                app.track_album = None;
                 app.playing = None;
                 app.lyrics = LyricsState::SessionEnded;
                 terminal.draw(|f| ui::render(f, &app, &mut scroll))?;
@@ -453,6 +455,7 @@ async fn main() -> std::io::Result<()> {
                 };
                 app.track_title = Some(audio_item.name.clone());
                 app.track_artist = if artist.is_empty() { None } else { Some(artist.clone()) };
+                app.track_album = album.clone();
                 app.duration = Duration::from_millis(audio_item.duration_ms as u64);
                 app.lyrics = LyricsState::Loading;
                 generation += 1;
@@ -685,7 +688,10 @@ async fn main() -> std::io::Result<()> {
                                         (app.search.selected + 1).min(app.search.results.len() - 1);
                                 }
                             }
-                            KeyCode::Enter | KeyCode::Right => {
+                            // Not Right -- Enter here can play a track and jump to Now Playing,
+                            // a real "leave here" side effect. Right means "go deeper," not
+                            // "commit and teleport" (reported live as feeling unnatural).
+                            KeyCode::Enter => {
                                 if app.search.results.is_empty() {
                                     if let Some(client) = spotify_client.clone() {
                                         if !app.search.query.trim().is_empty() {
@@ -914,7 +920,10 @@ async fn main() -> std::io::Result<()> {
                                         }
                                     }
                                 }
-                                KeyCode::Enter | KeyCode::Right => {
+                                // Not Right -- Enter here can play a track and jump to Now Playing,
+                                // a real "leave here" side effect. Right means "go deeper," not
+                                // "commit and teleport" (reported live as feeling unnatural).
+                                KeyCode::Enter => {
                                     if let Fetch::Ready(items) = &app.library.liked_songs {
                                         let display = filtered_sorted(items, &app.library.liked_songs_filter, &label);
                                         if let Some(track) =
@@ -1142,7 +1151,10 @@ async fn main() -> std::io::Result<()> {
                                         }
                                     }
                                 }
-                                KeyCode::Enter | KeyCode::Right => {
+                                // Not Right -- Enter here can play a track and jump to Now Playing,
+                                // a real "leave here" side effect. Right means "go deeper," not
+                                // "commit and teleport" (reported live as feeling unnatural).
+                                KeyCode::Enter => {
                                     if let Some(pd) = &app.playlist_detail {
                                         if let Fetch::Ready(items) = &pd.tracks {
                                             let display = pinned_first(
@@ -1197,6 +1209,7 @@ async fn main() -> std::io::Result<()> {
             LoopExit::Disconnected => {
                 app.track_title = None;
                 app.track_artist = None;
+                app.track_album = None;
                 app.playing = None;
                 app.lyrics = LyricsState::SessionEnded;
                 terminal.draw(|f| ui::render(f, &app, &mut scroll))?;

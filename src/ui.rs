@@ -5,18 +5,24 @@ use crate::api::search::TrackResult;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 use std::time::Duration;
 
-/// A screen in the main-pane stack. Only the two screens that exist today
-/// -- more variants land alongside the phase that actually builds them
-/// (Library in Phase 2, Queue in Phase 7, Devices in Phase 8, Help in
-/// Phase 9), rather than stubbing out destinations nothing can reach yet.
+/// A screen in the main-pane stack. More variants land alongside the
+/// phase that actually builds them (Queue in Phase 7, Devices in Phase
+/// 8, Help in Phase 9), rather than stubbing out destinations nothing
+/// can reach yet.
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum Screen {
     NowPlaying,
     Search,
+    Library,
+    LikedSongs,
+    SavedAlbums,
+    FollowedArtists,
+    YourPlaylists,
+    PlaylistDetail,
 }
 
 /// Which persistent pane currently receives arrow keys / `Enter`, toggled
@@ -112,7 +118,232 @@ impl Default for Nav {
 /// two can never drift. Grows alongside the phase that builds each real
 /// destination (Library in Phase 2, Queue in Phase 7, Devices in Phase 8,
 /// Help in Phase 9) -- only the two screens that exist today are listed.
-pub const SIDEBAR_ENTRIES: &[(&str, Screen)] = &[("Now Playing", Screen::NowPlaying), ("Search", Screen::Search)];
+pub const SIDEBAR_ENTRIES: &[(&str, Screen)] = &[
+    ("Now Playing", Screen::NowPlaying),
+    ("Search", Screen::Search),
+    ("Library", Screen::Library),
+];
+
+/// The Library home screen's 4 entries. Not part of `SIDEBAR_ENTRIES` --
+/// this is a menu one level into the main-pane stack, not a persistent
+/// destination.
+pub const LIBRARY_ENTRIES: &[(&str, Screen)] = &[
+    ("Liked Songs", Screen::LikedSongs),
+    ("Saved Albums", Screen::SavedAlbums),
+    ("Followed Artists", Screen::FollowedArtists),
+    ("Your Playlists", Screen::YourPlaylists),
+];
+
+/// State of one asynchronously-fetched list. Every Library list (Liked
+/// Songs, Saved Albums, Followed Artists, Your Playlists) needs this
+/// exact shape independently and simultaneously -- backing each with its
+/// own loading/error bookkeeping avoided a real race a single shared
+/// `loading` flag would have: navigating away from one still-loading
+/// list into another would have made the second list's own fetch
+/// wrongly believe one was already in flight.
+pub enum Fetch<T> {
+    NotStarted,
+    Loading,
+    Ready(T),
+    Failed(String),
+}
+
+/// In-list filter/sort, shared by every list screen. Filtering and
+/// sorting are presentation-only -- they never mutate the underlying
+/// fetched `Vec`, so clearing the filter or toggling sort off always
+/// returns to exactly what was originally fetched, no re-fetch needed.
+#[derive(Default)]
+pub struct ListFilter {
+    pub query: String,
+    pub editing: bool,
+    pub sort_alpha: bool,
+}
+
+/// Applies `filter`'s query (case-insensitive substring match against
+/// `label`) and, if `sort_alpha` is set, an alphabetical-by-label sort.
+/// Returns references into `items` so this never clones or reorders the
+/// canonical fetched data.
+/// Returns `(original_index, item)` pairs, not just items -- callers that
+/// need to tell Spotify "play index N of this context" (Playlist Detail)
+/// must send the index into the *real, unfiltered* playlist, never the
+/// display position. Losing the original index here was a real bug
+/// caught before shipping: filtering down to a few matches and pressing
+/// Enter would have told Spotify to play whatever sat at that position
+/// in the full, unfiltered playlist instead.
+pub fn filtered_sorted<'a, T>(
+    items: &'a [T],
+    filter: &ListFilter,
+    label: &impl Fn(&T) -> String,
+) -> Vec<(usize, &'a T)> {
+    let mut result: Vec<(usize, &T)> = if filter.query.is_empty() {
+        items.iter().enumerate().collect()
+    } else {
+        let q = filter.query.to_lowercase();
+        items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| label(it).to_lowercase().contains(&q))
+            .collect()
+    };
+    if filter.sort_alpha {
+        result.sort_by_key(|(_, a)| label(a).to_lowercase());
+    }
+    result
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    #[derive(Clone)]
+    struct Item(&'static str);
+
+    fn label(i: &Item) -> String {
+        i.0.to_string()
+    }
+
+    fn items() -> Vec<Item> {
+        vec![Item("banana"), Item("Apple"), Item("cherry")]
+    }
+
+    #[test]
+    fn no_filter_no_sort_preserves_original_order() {
+        let items = items();
+        let filter = ListFilter::default();
+        let result: Vec<&str> = filtered_sorted(&items, &filter, &label).iter().map(|(_, i)| i.0).collect();
+        assert_eq!(result, vec!["banana", "Apple", "cherry"]);
+    }
+
+    #[test]
+    fn query_matches_case_insensitively_as_substring() {
+        let items = items();
+        let filter = ListFilter {
+            query: "an".to_string(),
+            ..Default::default()
+        };
+        let result: Vec<&str> = filtered_sorted(&items, &filter, &label).iter().map(|(_, i)| i.0).collect();
+        assert_eq!(result, vec!["banana"]);
+    }
+
+    #[test]
+    fn query_matching_nothing_returns_empty() {
+        let items = items();
+        let filter = ListFilter {
+            query: "zzz".to_string(),
+            ..Default::default()
+        };
+        assert!(filtered_sorted(&items, &filter, &label).is_empty());
+    }
+
+    #[test]
+    fn sort_alpha_sorts_case_insensitively() {
+        let items = items();
+        let filter = ListFilter {
+            sort_alpha: true,
+            ..Default::default()
+        };
+        let result: Vec<&str> = filtered_sorted(&items, &filter, &label).iter().map(|(_, i)| i.0).collect();
+        assert_eq!(result, vec!["Apple", "banana", "cherry"]);
+    }
+
+    #[test]
+    fn filter_and_sort_combine() {
+        let items = vec![Item("Zebra"), Item("apricot"), Item("azalea"), Item("banana")];
+        let filter = ListFilter {
+            query: "a".to_string(),
+            sort_alpha: true,
+            ..Default::default()
+        };
+        let result: Vec<&str> = filtered_sorted(&items, &filter, &label).iter().map(|(_, i)| i.0).collect();
+        assert_eq!(result, vec!["apricot", "azalea", "banana", "Zebra"]);
+    }
+
+    #[test]
+    fn preserves_original_index_through_filter_and_sort() {
+        // The whole point of returning (index, item) pairs: a caller
+        // that needs to tell Spotify "play position N of the real
+        // playlist" must use the ORIGINAL index, not the position in
+        // this filtered/sorted display list. Real bug caught before
+        // shipping -- filtering down to a match and pressing Enter would
+        // have played whatever sat at the display position in the full,
+        // unfiltered playlist instead.
+        let items = items(); // ["banana"(0), "Apple"(1), "cherry"(2)]
+        let filter = ListFilter {
+            query: "a".to_string(), // matches banana(0) and Apple(1), not cherry
+            sort_alpha: true,       // display order becomes Apple, banana
+            ..Default::default()
+        };
+        let result = filtered_sorted(&items, &filter, &label);
+        assert_eq!(result.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![1, 0]);
+    }
+}
+
+/// Pins bubble to the top, stable otherwise -- preserves whatever order
+/// `filtered_sorted` already produced within the pinned and unpinned
+/// groups. Playlist-specific (not part of `filtered_sorted` itself)
+/// since pinning is a concept only playlists have.
+pub fn pinned_first<'a>(
+    mut items: Vec<(usize, &'a crate::api::library::PlaylistSummary)>,
+    pinned: &std::collections::HashSet<String>,
+) -> Vec<(usize, &'a crate::api::library::PlaylistSummary)> {
+    items.sort_by_key(|(_, p)| !pinned.contains(&p.uri));
+    items
+}
+
+pub struct LibraryState {
+    pub home_selected: usize,
+    pub liked_songs: Fetch<Vec<TrackResult>>,
+    pub saved_albums: Fetch<Vec<crate::api::library::SavedAlbumSummary>>,
+    pub followed_artists: Fetch<Vec<crate::api::library::FollowedArtist>>,
+    pub playlists: Fetch<Vec<crate::api::library::PlaylistSummary>>,
+    pub liked_songs_selected: usize,
+    pub saved_albums_selected: usize,
+    pub followed_artists_selected: usize,
+    pub playlists_selected: usize,
+    pub liked_songs_filter: ListFilter,
+    pub saved_albums_filter: ListFilter,
+    pub followed_artists_filter: ListFilter,
+    pub playlists_filter: ListFilter,
+}
+
+impl LibraryState {
+    pub fn new() -> Self {
+        Self {
+            home_selected: 0,
+            liked_songs: Fetch::NotStarted,
+            saved_albums: Fetch::NotStarted,
+            followed_artists: Fetch::NotStarted,
+            playlists: Fetch::NotStarted,
+            liked_songs_selected: 0,
+            saved_albums_selected: 0,
+            followed_artists_selected: 0,
+            playlists_selected: 0,
+            liked_songs_filter: ListFilter::default(),
+            saved_albums_filter: ListFilter::default(),
+            followed_artists_filter: ListFilter::default(),
+            playlists_filter: ListFilter::default(),
+        }
+    }
+}
+
+impl Default for LibraryState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Which playlist `Screen::PlaylistDetail` is currently showing, and its
+/// fetch state. A single `Option` rather than a per-playlist cache --
+/// only one can be on top of the stack at a time, matching `Nav`'s own
+/// one-at-a-time `top()`. Fetch results carry the playlist's URI so a
+/// stale in-flight fetch from a playlist the user has since backed out
+/// of can't overwrite whichever one is showing now.
+pub struct PlaylistDetailState {
+    pub playlist: crate::api::library::PlaylistSummary,
+    pub tracks: Fetch<Vec<TrackResult>>,
+    pub selected: usize,
+    pub filter: ListFilter,
+}
 
 #[cfg(test)]
 mod nav_tests {
@@ -387,9 +618,39 @@ pub struct AppState {
     pub nav: Nav,
     pub sidebar_sel: usize,
     pub search: SearchState,
+    pub library: LibraryState,
+    pub playlist_detail: Option<PlaylistDetailState>,
+    pub pinned_playlists: std::collections::HashSet<String>,
 }
 
-pub fn render(frame: &mut Frame, app: &AppState) {
+/// Persisted scroll offsets, one per list, threaded through `render`
+/// alongside `&AppState` rather than living inside it. Rebuilding a fresh
+/// `ListState` every frame (offset always 0) was the original, buggy
+/// approach: ratatui's own "keep selection visible" clamp then re-pins
+/// the highlight to the bottom edge of the viewport on *every* render
+/// once you've scrolled past one screenful, regardless of which
+/// direction you're actually moving -- reported live as "stays at the
+/// bottom even when scrolling up." Persisting `ListState.offset` across
+/// frames lets ratatui's real algorithm work as designed: the viewport
+/// only moves once the selection would leave it, not on every keystroke.
+/// A separate top-level struct (not new fields nested inside `AppState`)
+/// because rendering needs to mutate exactly one of these at a time while
+/// reading many *other* fields of `AppState` immutably in the same call --
+/// nesting them inside `AppState` itself would fight the borrow checker
+/// over a mutable borrow of one field colliding with an immutable borrow
+/// of its parent struct.
+#[derive(Default)]
+pub struct ScrollState {
+    pub sidebar: ListState,
+    pub search: ListState,
+    pub liked_songs: ListState,
+    pub saved_albums: ListState,
+    pub followed_artists: ListState,
+    pub playlists: ListState,
+    pub playlist_detail: ListState,
+}
+
+pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState) {
     if app.fullscreen && *app.nav.top() == Screen::NowPlaying {
         render_fullscreen(frame, app);
         return;
@@ -408,16 +669,242 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         .split(body_area);
     let (sidebar_area, main_area) = (body[0], body[1]);
 
-    render_sidebar(frame, app, sidebar_area);
+    render_sidebar(frame, app, &mut scroll.sidebar, sidebar_area);
+
+    let main_block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(focus_border_style(app.nav.focus == Focus::Main));
+    let main_area = main_block.inner(main_area);
+    frame.render_widget(main_block, body[1]);
+
     match app.nav.top() {
-        Screen::Search => render_search(frame, app, main_area),
+        Screen::Search => render_search(frame, app, &mut scroll.search, main_area),
         Screen::NowPlaying => render_compact(frame, app, main_area),
+        Screen::Library => render_library_home(frame, app, main_area),
+        Screen::LikedSongs => render_list_screen(
+            frame,
+            main_area,
+            "Liked Songs",
+            &app.library.liked_songs,
+            &app.library.liked_songs_filter,
+            app.library.liked_songs_selected,
+            &mut scroll.liked_songs,
+            |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title),
+        ),
+        Screen::SavedAlbums => render_list_screen(
+            frame,
+            main_area,
+            "Saved Albums",
+            &app.library.saved_albums,
+            &app.library.saved_albums_filter,
+            app.library.saved_albums_selected,
+            &mut scroll.saved_albums,
+            |a: &crate::api::library::SavedAlbumSummary| format!("{} \u{2014} {}", a.name, a.artist),
+        ),
+        Screen::FollowedArtists => render_list_screen(
+            frame,
+            main_area,
+            "Followed Artists",
+            &app.library.followed_artists,
+            &app.library.followed_artists_filter,
+            app.library.followed_artists_selected,
+            &mut scroll.followed_artists,
+            |a: &crate::api::library::FollowedArtist| a.name.clone(),
+        ),
+        Screen::YourPlaylists => render_your_playlists(frame, app, &mut scroll.playlists, main_area),
+        Screen::PlaylistDetail => render_playlist_detail(frame, app, &mut scroll.playlist_detail, main_area),
     }
     render_playbar(frame, app, playbar_area);
     render_status(frame, app, status_area);
 }
 
-fn render_sidebar(frame: &mut Frame, app: &AppState, area: Rect) {
+fn render_library_home(frame: &mut Frame, app: &AppState, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new("Library").style(Style::default().add_modifier(Modifier::BOLD)),
+        chunks[0],
+    );
+    let items: Vec<ListItem> = LIBRARY_ENTRIES
+        .iter()
+        .enumerate()
+        .map(|(i, (label, _))| {
+            if i == app.library.home_selected {
+                ListItem::new(*label).style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
+            } else {
+                ListItem::new(*label)
+            }
+        })
+        .collect();
+    let mut state = ListState::default().with_selected(Some(app.library.home_selected));
+    frame.render_stateful_widget(List::new(items), chunks[1], &mut state);
+}
+
+fn render_playlist_detail(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
+    let Some(pd) = &app.playlist_detail else {
+        frame.render_widget(Paragraph::new("no playlist selected"), area);
+        return;
+    };
+    render_list_screen(
+        frame,
+        area,
+        &pd.playlist.name,
+        &pd.tracks,
+        &pd.filter,
+        pd.selected,
+        list_state,
+        |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title),
+    );
+}
+
+/// Your Playlists' own renderer, not the shared `render_list_screen`:
+/// pinned playlists (spot-tui's own local-only substitute for Spotify's
+/// pinning, which the public Web API doesn't expose at all) bubble to
+/// the top and get a marker glyph -- a concept none of the other 4 list
+/// screens have.
+fn render_your_playlists(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
+    let label =
+        |p: &crate::api::library::PlaylistSummary| format!("{} ({} tracks)", p.name, p.track_count);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new(filter_header("Your Playlists", &app.library.playlists_filter))
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+        chunks[0],
+    );
+    match &app.library.playlists {
+        Fetch::NotStarted | Fetch::Loading => {
+            frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
+        }
+        Fetch::Failed(e) => {
+            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), chunks[1]);
+        }
+        Fetch::Ready(items) => {
+            let display = pinned_first(
+                filtered_sorted(items, &app.library.playlists_filter, &label),
+                &app.pinned_playlists,
+            );
+            let pin_label = |p: &crate::api::library::PlaylistSummary| {
+                let marker = if app.pinned_playlists.contains(&p.uri) { "\u{1f4cc} " } else { "  " };
+                format!("{marker}{}", label(p))
+            };
+            render_display_list(
+                frame,
+                chunks[1],
+                &display,
+                app.library.playlists_selected,
+                &pin_label,
+                app.library.playlists_filter.query.is_empty(),
+                list_state,
+            );
+        }
+    }
+}
+
+/// Renders one of the 4 uniform fetched-list screens (Liked Songs, Saved
+/// Albums, Followed Artists, Playlist Detail tracks). Your Playlists gets
+/// its own renderer instead -- it's the one list with an extra per-item
+/// concept (pinning) this generic version has no notion of.
+fn render_list_screen<T>(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    fetch: &Fetch<Vec<T>>,
+    filter: &ListFilter,
+    selected: usize,
+    list_state: &mut ListState,
+    label: impl Fn(&T) -> String,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new(filter_header(title, filter)).style(Style::default().add_modifier(Modifier::BOLD)),
+        chunks[0],
+    );
+    match fetch {
+        Fetch::NotStarted | Fetch::Loading => {
+            frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
+        }
+        Fetch::Failed(e) => {
+            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), chunks[1]);
+        }
+        Fetch::Ready(items) => {
+            let display = filtered_sorted(items, filter, &label);
+            render_display_list(
+                frame,
+                chunks[1],
+                &display,
+                selected,
+                &label,
+                filter.query.is_empty(),
+                list_state,
+            );
+        }
+    }
+}
+
+/// `/` (start typing a filter) shows the live query with a cursor, same
+/// convention as the global Search screen's own query line. Otherwise
+/// shows whatever filter/sort is currently applied, if any.
+fn filter_header(title: &str, filter: &ListFilter) -> String {
+    if filter.editing {
+        format!("{title}  /{}\u{2588}", filter.query)
+    } else if !filter.query.is_empty() || filter.sort_alpha {
+        let mut parts = Vec::new();
+        if !filter.query.is_empty() {
+            parts.push(format!("filter: \"{}\"", filter.query));
+        }
+        if filter.sort_alpha {
+            parts.push("A-Z".to_string());
+        }
+        format!("{title}  ({})", parts.join(", "))
+    } else {
+        title.to_string()
+    }
+}
+
+fn render_display_list<T>(
+    frame: &mut Frame,
+    area: Rect,
+    display: &[(usize, &T)],
+    selected: usize,
+    label: &impl Fn(&T) -> String,
+    filter_empty: bool,
+    list_state: &mut ListState,
+) {
+    if display.is_empty() {
+        let msg = if filter_empty { "(empty)" } else { "(no matches)" };
+        frame.render_widget(Paragraph::new(msg), area);
+        return;
+    }
+    let list_items: Vec<ListItem> = display
+        .iter()
+        .enumerate()
+        .map(|(i, (_, it))| {
+            let text = label(it);
+            if i == selected {
+                ListItem::new(text).style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
+            } else {
+                ListItem::new(text)
+            }
+        })
+        .collect();
+    // Mutates just `.selected`, keeping whatever `.offset` this list_state
+    // already had from the previous frame -- ratatui only moves the
+    // offset if `selected` would otherwise fall outside the current
+    // viewport, exactly the "only scroll at the edges" behavior a plain
+    // `ListState::default()` (offset reset to 0 every frame) broke.
+    list_state.select(Some(selected));
+    frame.render_stateful_widget(List::new(list_items), area, list_state);
+}
+
+fn render_sidebar(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
     let items: Vec<ListItem> = SIDEBAR_ENTRIES
         .iter()
         .enumerate()
@@ -434,15 +921,30 @@ fn render_sidebar(frame: &mut Frame, app: &AppState, area: Rect) {
             ListItem::new(*label).style(style)
         })
         .collect();
-    let border_style = if app.nav.focus == Focus::Sidebar {
+    list_state.select(Some(app.sidebar_sel));
+    frame.render_stateful_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::RIGHT | Borders::TOP)
+                .border_style(focus_border_style(app.nav.focus == Focus::Sidebar)),
+        ),
+        area,
+        list_state,
+    );
+}
+
+/// Accent when this pane currently has focus, dim otherwise -- always
+/// present (never fully absent) so nothing changes size or jumps when
+/// `Tab` toggles which pane it is. Only one pane is ever accented at a
+/// time: the sidebar's vertical divider previously changing color was
+/// easy to miss as the sole focus cue; this gives Main pane an equally
+/// visible signal of its own, reported live as missing entirely.
+fn focus_border_style(active: bool) -> Style {
+    if active {
         Style::default().fg(ACCENT)
     } else {
-        Style::default()
-    };
-    frame.render_widget(
-        List::new(items).block(Block::default().borders(Borders::RIGHT).border_style(border_style)),
-        area,
-    );
+        Style::default().fg(Color::DarkGray)
+    }
 }
 
 fn render_playbar(frame: &mut Frame, app: &AppState, area: Rect) {
@@ -465,7 +967,7 @@ fn render_status(frame: &mut Frame, app: &AppState, area: Rect) {
     frame.render_widget(Paragraph::new(text).style(Style::default().fg(Color::DarkGray)), area);
 }
 
-fn render_search(frame: &mut Frame, app: &AppState, area: Rect) {
+fn render_search(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(1)])
@@ -510,7 +1012,8 @@ fn render_search(frame: &mut Frame, app: &AppState, area: Rect) {
             }
         })
         .collect();
-    frame.render_widget(List::new(items), chunks[1]);
+    list_state.select(Some(app.search.selected));
+    frame.render_stateful_widget(List::new(items), chunks[1], list_state);
 }
 
 fn header(app: &AppState, max_chars: usize) -> String {

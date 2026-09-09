@@ -132,6 +132,115 @@ mod cache_tests {
     }
 }
 
+/// Spotify's own field-scope operators. A query already using one of
+/// these is a power-user query with explicit intent -- auto-adding a
+/// second `track:`-scoped variant on top would either double-wrap it
+/// into nonsense (`track:"track:x"`) or override intent the user already
+/// stated explicitly, so those queries are sent exactly as typed, single
+/// call, same as before this tier.
+const FIELD_SCOPE_PREFIXES: &[&str] = &["track:", "artist:", "album:", "year:"];
+
+fn is_field_scoped(query: &str) -> bool {
+    let lower = query.to_lowercase();
+    FIELD_SCOPE_PREFIXES.iter().any(|p| lower.contains(p))
+}
+
+/// Field-scoped hits first (deduped by URI), then plain-phrase hits not
+/// already present, capped at `limit`. Spotify's plain free-text search
+/// (even restricted to `SearchType::Track`) matches the phrase against
+/// track/artist/album text broadly, which is real recall but can rank a
+/// track whose *album* happens to share the phrase above the track whose
+/// *name* actually matches it -- reported as the original motivation for
+/// this tier. `track:"<query>"` narrows to the track-name field
+/// specifically, giving precision; merging keeps that precision up front
+/// while still backfilling with the broader (higher-recall) plain
+/// results so a query with no exact track-name hit still returns
+/// something.
+fn merge_results(field_scoped: Vec<TrackResult>, plain: Vec<TrackResult>, limit: usize) -> Vec<TrackResult> {
+    let mut seen = std::collections::HashSet::new();
+    let mut merged = Vec::with_capacity(limit);
+    for t in field_scoped.into_iter().chain(plain) {
+        if merged.len() >= limit {
+            break;
+        }
+        if seen.insert(t.uri.clone()) {
+            merged.push(t);
+        }
+    }
+    merged
+}
+
+#[cfg(test)]
+mod relevance_tests {
+    use super::*;
+
+    fn track(uri: &str) -> TrackResult {
+        TrackResult { uri: uri.to_string(), title: uri.to_string(), artist: "A".to_string(), album: "B".to_string() }
+    }
+
+    #[test]
+    fn plain_query_is_not_field_scoped() {
+        assert!(!is_field_scoped("bohemian rhapsody"));
+    }
+
+    #[test]
+    fn a_query_already_using_a_field_operator_is_left_alone() {
+        assert!(is_field_scoped("artist:Queen"));
+        assert!(is_field_scoped("track:\"Bohemian Rhapsody\""));
+        // Case-insensitive -- Spotify's own operators aren't case-sensitive either.
+        assert!(is_field_scoped("ARTIST:Queen"));
+    }
+
+    #[test]
+    fn merge_puts_field_scoped_hits_before_plain_hits() {
+        let scoped = vec![track("a"), track("b")];
+        let plain = vec![track("c"), track("d")];
+        let merged = merge_results(scoped, plain, 10);
+        assert_eq!(merged.iter().map(|t| t.uri.as_str()).collect::<Vec<_>>(), vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn merge_dedupes_by_uri_keeping_the_field_scoped_copy() {
+        let scoped = vec![track("a")];
+        let plain = vec![track("a"), track("b")];
+        let merged = merge_results(scoped, plain, 10);
+        assert_eq!(merged.iter().map(|t| t.uri.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn merge_respects_the_limit() {
+        let scoped = vec![track("a"), track("b")];
+        let plain = vec![track("c"), track("d")];
+        let merged = merge_results(scoped, plain, 3);
+        assert_eq!(merged.iter().map(|t| t.uri.as_str()).collect::<Vec<_>>(), vec!["a", "b", "c"]);
+    }
+}
+
+async fn run_query(client: &AuthCodeSpotify, query: &str, limit: u32) -> ClientResult<Vec<TrackResult>> {
+    // Dev Mode apps cap this at 10 (down from 50 as of Spotify's Feb 2026
+    // migration); confirmed live -- anything higher is a 400 "Invalid
+    // limit". Clamped here too, not just at the call site, so this can't
+    // silently regress if another caller passes a bigger number later.
+    let result = client
+        .search(query, SearchType::Track, None, None, Some(limit.min(10)), None)
+        .await?;
+
+    let rspotify::model::SearchResult::Tracks(page) = result else {
+        return Ok(vec![]);
+    };
+
+    Ok(page
+        .items
+        .into_iter()
+        .map(|t| TrackResult {
+            uri: t.id.map(|id| id.uri()).unwrap_or_default(),
+            title: t.name,
+            artist: t.artists.first().map(|a| a.name.clone()).unwrap_or_default(),
+            album: t.album.name,
+        })
+        .collect())
+}
+
 pub async fn search_tracks(
     client: &AuthCodeSpotify,
     query: &str,
@@ -147,28 +256,22 @@ pub async fn search_tracks(
         log::warn!("token refresh before search failed, trying with existing token anyway: {e}");
     }
 
-    // Dev Mode apps cap this at 10 (down from 50 as of Spotify's Feb 2026
-    // migration); confirmed live -- anything higher is a 400 "Invalid
-    // limit". Clamped here too, not just at the call site, so this can't
-    // silently regress if another caller passes a bigger number later.
-    let result = client
-        .search(query, SearchType::Track, None, None, Some(limit.min(10)), None)
-        .await?;
-
-    let rspotify::model::SearchResult::Tracks(page) = result else {
-        return Ok(vec![]);
+    let results = if is_field_scoped(query) {
+        run_query(client, query, limit).await?
+    } else {
+        let scoped_query = format!("track:\"{}\"", query.trim());
+        let (scoped, plain) = tokio::join!(run_query(client, &scoped_query, limit), run_query(client, query, limit));
+        // The plain query is the pre-existing, always-worked baseline --
+        // its failure still propagates. The scoped query is this tier's
+        // speculative addition on top; if it errors, degrade to
+        // plain-only rather than breaking a search that would otherwise
+        // have succeeded on its own.
+        let scoped = scoped.unwrap_or_else(|e| {
+            log::warn!("field-scoped search query failed, falling back to plain results only: {e}");
+            Vec::new()
+        });
+        merge_results(scoped, plain?, limit.min(10) as usize)
     };
-
-    let results: Vec<TrackResult> = page
-        .items
-        .into_iter()
-        .map(|t| TrackResult {
-            uri: t.id.map(|id| id.uri()).unwrap_or_default(),
-            title: t.name,
-            artist: t.artists.first().map(|a| a.name.clone()).unwrap_or_default(),
-            album: t.album.name,
-        })
-        .collect();
 
     write_search_cache(&cache_dir, query, &results, now);
     Ok(results)

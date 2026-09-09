@@ -139,27 +139,6 @@ fn tmux_toggle_zoom() {
     }
 }
 
-/// Text-input handling shared by every list screen's filter box: typing
-/// narrows the (already-fetched) list live, no re-fetch, matching Search's
-/// own "typing edits state directly" convention. Resets `selected` on
-/// every keystroke since the filtered view's length/order shifts each time.
-fn edit_filter(filter: &mut ListFilter, selected: &mut usize, key: KeyCode) {
-    match key {
-        KeyCode::Enter | KeyCode::Esc => {
-            filter.editing = false;
-        }
-        KeyCode::Backspace => {
-            filter.query.pop();
-            *selected = 0;
-        }
-        KeyCode::Char(c) => {
-            filter.query.push(c);
-            *selected = 0;
-        }
-        _ => {}
-    }
-}
-
 /// Opens Playlist Detail on `playlist` and kicks off its track fetch.
 /// Shared by two real call sites now (Sidebar's own playlist rows, and
 /// the Your Playlists screen's Enter) -- the second concrete case that
@@ -948,12 +927,39 @@ async fn main() -> std::io::Result<()> {
                             }
                             _ => {}
                         },
-                        Screen::LikedSongs if app.library.liked_songs_filter.editing => {
-                            edit_filter(&mut app.library.liked_songs_filter, &mut app.library.liked_songs_selected, key.code);
-                        }
                         Screen::LikedSongs => {
                             let label = |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title);
                             match key.code {
+                                // Filter editing intercepts everything typing-related --
+                                // Left/Right move the cursor mid-string (same as Search),
+                                // Up/Down fall through unguarded below so they still move
+                                // the highlighted track live while typing, reported live
+                                // as wanted.
+                                KeyCode::Char(c) if app.library.liked_songs_filter.editing => {
+                                    app.library.liked_songs_filter.insert_at_cursor(c);
+                                    app.library.liked_songs_selected = 0;
+                                }
+                                KeyCode::Backspace if app.library.liked_songs_filter.editing => {
+                                    app.library.liked_songs_filter.backspace_at_cursor();
+                                    app.library.liked_songs_selected = 0;
+                                }
+                                KeyCode::Enter if app.library.liked_songs_filter.editing => {
+                                    app.library.liked_songs_filter.editing = false;
+                                }
+                                KeyCode::Esc if app.library.liked_songs_filter.editing => {
+                                    app.library.liked_songs_filter.cancel_editing();
+                                    app.library.liked_songs_selected = 0;
+                                }
+                                // Left/Right no-op while typing -- letting them fall through
+                                // to their normal back/open meaning kicked the user out of
+                                // the screen mid-filter-edit, reported live as feeling broken
+                                // rather than like navigation.
+                                KeyCode::Left if app.library.liked_songs_filter.editing => {
+                                    app.library.liked_songs_filter.cursor_left();
+                                }
+                                KeyCode::Right if app.library.liked_songs_filter.editing => {
+                                    app.library.liked_songs_filter.cursor_right();
+                                }
                                 KeyCode::Char('q') => break 'inner LoopExit::Quit,
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
@@ -980,7 +986,7 @@ async fn main() -> std::io::Result<()> {
                                     app.nav.escape();
                                 }
                                 KeyCode::Char('/') => {
-                                    app.library.liked_songs_filter.editing = true;
+                                    app.library.liked_songs_filter.start_editing();
                                 }
                                 KeyCode::Char('o') => {
                                     app.library.liked_songs_filter.sort_alpha =
@@ -1021,12 +1027,30 @@ async fn main() -> std::io::Result<()> {
                                 _ => {}
                             }
                         }
-                        Screen::SavedAlbums if app.library.saved_albums_filter.editing => {
-                            edit_filter(&mut app.library.saved_albums_filter, &mut app.library.saved_albums_selected, key.code);
-                        }
                         Screen::SavedAlbums => {
                             let label = |a: &SavedAlbumSummary| format!("{} \u{2014} {}", a.name, a.artist);
                             match key.code {
+                                KeyCode::Char(c) if app.library.saved_albums_filter.editing => {
+                                    app.library.saved_albums_filter.insert_at_cursor(c);
+                                    app.library.saved_albums_selected = 0;
+                                }
+                                KeyCode::Backspace if app.library.saved_albums_filter.editing => {
+                                    app.library.saved_albums_filter.backspace_at_cursor();
+                                    app.library.saved_albums_selected = 0;
+                                }
+                                KeyCode::Enter if app.library.saved_albums_filter.editing => {
+                                    app.library.saved_albums_filter.editing = false;
+                                }
+                                KeyCode::Esc if app.library.saved_albums_filter.editing => {
+                                    app.library.saved_albums_filter.cancel_editing();
+                                    app.library.saved_albums_selected = 0;
+                                }
+                                KeyCode::Left if app.library.saved_albums_filter.editing => {
+                                    app.library.saved_albums_filter.cursor_left();
+                                }
+                                KeyCode::Right if app.library.saved_albums_filter.editing => {
+                                    app.library.saved_albums_filter.cursor_right();
+                                }
                                 KeyCode::Char('q') => break 'inner LoopExit::Quit,
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
@@ -1053,7 +1077,7 @@ async fn main() -> std::io::Result<()> {
                                     app.nav.escape();
                                 }
                                 KeyCode::Char('/') => {
-                                    app.library.saved_albums_filter.editing = true;
+                                    app.library.saved_albums_filter.start_editing();
                                 }
                                 KeyCode::Char('o') => {
                                     app.library.saved_albums_filter.sort_alpha =
@@ -1075,12 +1099,30 @@ async fn main() -> std::io::Result<()> {
                                 _ => {}
                             }
                         }
-                        Screen::FollowedArtists if app.library.followed_artists_filter.editing => {
-                            edit_filter(&mut app.library.followed_artists_filter, &mut app.library.followed_artists_selected, key.code);
-                        }
                         Screen::FollowedArtists => {
                             let label = |a: &FollowedArtist| a.name.clone();
                             match key.code {
+                                KeyCode::Char(c) if app.library.followed_artists_filter.editing => {
+                                    app.library.followed_artists_filter.insert_at_cursor(c);
+                                    app.library.followed_artists_selected = 0;
+                                }
+                                KeyCode::Backspace if app.library.followed_artists_filter.editing => {
+                                    app.library.followed_artists_filter.backspace_at_cursor();
+                                    app.library.followed_artists_selected = 0;
+                                }
+                                KeyCode::Enter if app.library.followed_artists_filter.editing => {
+                                    app.library.followed_artists_filter.editing = false;
+                                }
+                                KeyCode::Esc if app.library.followed_artists_filter.editing => {
+                                    app.library.followed_artists_filter.cancel_editing();
+                                    app.library.followed_artists_selected = 0;
+                                }
+                                KeyCode::Left if app.library.followed_artists_filter.editing => {
+                                    app.library.followed_artists_filter.cursor_left();
+                                }
+                                KeyCode::Right if app.library.followed_artists_filter.editing => {
+                                    app.library.followed_artists_filter.cursor_right();
+                                }
                                 KeyCode::Char('q') => break 'inner LoopExit::Quit,
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
@@ -1107,7 +1149,7 @@ async fn main() -> std::io::Result<()> {
                                     app.nav.escape();
                                 }
                                 KeyCode::Char('/') => {
-                                    app.library.followed_artists_filter.editing = true;
+                                    app.library.followed_artists_filter.start_editing();
                                 }
                                 KeyCode::Char('o') => {
                                     app.library.followed_artists_filter.sort_alpha =
@@ -1129,13 +1171,31 @@ async fn main() -> std::io::Result<()> {
                                 _ => {}
                             }
                         }
-                        Screen::YourPlaylists if app.library.playlists_filter.editing => {
-                            edit_filter(&mut app.library.playlists_filter, &mut app.library.playlists_selected, key.code);
-                        }
                         Screen::YourPlaylists => {
                             let label =
                                 |p: &PlaylistSummary| format!("{} ({} tracks)", p.name, p.track_count);
                             match key.code {
+                                KeyCode::Char(c) if app.library.playlists_filter.editing => {
+                                    app.library.playlists_filter.insert_at_cursor(c);
+                                    app.library.playlists_selected = 0;
+                                }
+                                KeyCode::Backspace if app.library.playlists_filter.editing => {
+                                    app.library.playlists_filter.backspace_at_cursor();
+                                    app.library.playlists_selected = 0;
+                                }
+                                KeyCode::Enter if app.library.playlists_filter.editing => {
+                                    app.library.playlists_filter.editing = false;
+                                }
+                                KeyCode::Esc if app.library.playlists_filter.editing => {
+                                    app.library.playlists_filter.cancel_editing();
+                                    app.library.playlists_selected = 0;
+                                }
+                                KeyCode::Left if app.library.playlists_filter.editing => {
+                                    app.library.playlists_filter.cursor_left();
+                                }
+                                KeyCode::Right if app.library.playlists_filter.editing => {
+                                    app.library.playlists_filter.cursor_right();
+                                }
                                 KeyCode::Char('q') => break 'inner LoopExit::Quit,
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
@@ -1162,7 +1222,7 @@ async fn main() -> std::io::Result<()> {
                                     app.nav.escape();
                                 }
                                 KeyCode::Char('/') => {
-                                    app.library.playlists_filter.editing = true;
+                                    app.library.playlists_filter.start_editing();
                                 }
                                 KeyCode::Char('o') => {
                                     app.library.playlists_filter.sort_alpha =
@@ -1221,16 +1281,44 @@ async fn main() -> std::io::Result<()> {
                                 _ => {}
                             }
                         }
-                        Screen::PlaylistDetail
-                            if app.playlist_detail.as_ref().is_some_and(|pd| pd.filter.editing) =>
-                        {
-                            if let Some(pd) = &mut app.playlist_detail {
-                                edit_filter(&mut pd.filter, &mut pd.selected, key.code);
-                            }
-                        }
                         Screen::PlaylistDetail => {
                             let label = |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title);
+                            let filter_editing =
+                                app.playlist_detail.as_ref().is_some_and(|pd| pd.filter.editing);
                             match key.code {
+                                KeyCode::Char(c) if filter_editing => {
+                                    if let Some(pd) = &mut app.playlist_detail {
+                                        pd.filter.insert_at_cursor(c);
+                                        pd.selected = 0;
+                                    }
+                                }
+                                KeyCode::Backspace if filter_editing => {
+                                    if let Some(pd) = &mut app.playlist_detail {
+                                        pd.filter.backspace_at_cursor();
+                                        pd.selected = 0;
+                                    }
+                                }
+                                KeyCode::Enter if filter_editing => {
+                                    if let Some(pd) = &mut app.playlist_detail {
+                                        pd.filter.editing = false;
+                                    }
+                                }
+                                KeyCode::Esc if filter_editing => {
+                                    if let Some(pd) = &mut app.playlist_detail {
+                                        pd.filter.cancel_editing();
+                                        pd.selected = 0;
+                                    }
+                                }
+                                KeyCode::Left if filter_editing => {
+                                    if let Some(pd) = &mut app.playlist_detail {
+                                        pd.filter.cursor_left();
+                                    }
+                                }
+                                KeyCode::Right if filter_editing => {
+                                    if let Some(pd) = &mut app.playlist_detail {
+                                        pd.filter.cursor_right();
+                                    }
+                                }
                                 KeyCode::Char('q') => break 'inner LoopExit::Quit,
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
@@ -1258,7 +1346,7 @@ async fn main() -> std::io::Result<()> {
                                 }
                                 KeyCode::Char('/') => {
                                     if let Some(pd) = &mut app.playlist_detail {
-                                        pd.filter.editing = true;
+                                        pd.filter.start_editing();
                                     }
                                 }
                                 KeyCode::Char('o') => {

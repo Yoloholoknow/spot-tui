@@ -26,6 +26,8 @@
 //! that issued them (confirmed earlier). First run needs a real one-time
 //! browser login; the resulting token is cached separately from ncspot's.
 
+pub mod album;
+pub mod artist;
 pub mod devices;
 pub mod library;
 pub mod playlists;
@@ -212,4 +214,31 @@ async fn ensure_fresh(client: &AuthCodeSpotify) -> Result<(), String> {
     let mut guard = token_arc.lock().await.map_err(|_| "lock error".to_string())?;
     *guard = Some(fresh);
     Ok(())
+}
+
+/// Extracts Spotify's own error response body when a call fails with an
+/// HTTP status code, instead of settling for `ClientError`'s default
+/// Display ("http error: status code 400 Bad Request") which names the
+/// failure but never *why*. Logs the raw body text directly rather than
+/// trying to parse it into `rspotify_model::ApiError` first -- an
+/// earlier version of this function did that, and its own fallback text
+/// on a parse failure ("http error: status code {status}") was
+/// indistinguishable from the pre-this-function message, which cost a
+/// whole round-trip of live reproduction to even notice: it was
+/// impossible to tell whether that meant "stale binary, never reached
+/// this code" or "reached it, and the body genuinely didn't parse as
+/// ApiError." Raw text has no such ambiguity -- it always shows
+/// something concrete once this code actually runs.
+pub async fn describe_client_error(err: rspotify::ClientError) -> String {
+    match err {
+        rspotify::ClientError::Http(http_err) => match *http_err {
+            rspotify::http::HttpError::StatusCode(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_else(|e| format!("<failed to read body: {e}>"));
+                format!("HTTP {status}: {body}")
+            }
+            other => other.to_string(),
+        },
+        other => other.to_string(),
+    }
 }

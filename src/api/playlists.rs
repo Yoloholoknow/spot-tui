@@ -104,15 +104,18 @@ pub async fn add_track(client: &AuthCodeSpotify, playlist_uri: &str, track_uri: 
 }
 
 /// Removes every occurrence of `track_uri` in the playlist, not just the
-/// selected position -- known, accepted limitation: a playlist with the
-/// same track twice loses both copies. rspotify also exposes a
-/// position-scoped variant (`playlist_remove_specific_occurrences_of_items`),
-/// but current Spotify API docs for the Feb-2026-consolidated remove
-/// endpoint don't confirm per-position removal is still honored post-
-/// consolidation -- building a real mutation on an unproven call is worse
-/// than a documented edge case. If this needs fixing, spike the
-/// position-scoped call for real first, the same way Phase 0 spiked
-/// reorder, before wiring it in.
+/// selected position -- confirmed, unfixable-as-shipped platform
+/// limitation, not an unproven corner being cut. rspotify also exposes a
+/// position-scoped variant (`playlist_remove_specific_occurrences_of_items`);
+/// spiked for real (`spike::run_spike_remove_specific_occurrence`) against a
+/// live 2x-duplicate playlist rather than trusted on faith, and it's worse
+/// than this one: without an explicit `snapshot_id` it removed both
+/// occurrences anyway (positions silently ignored), and with one it removed
+/// neither (silent no-op). Non-deterministic behavior on a destructive call
+/// is not a viable alternative. The caller (`main.rs`'s `d` handler on
+/// Playlist Detail) is responsible for warning the user when the selected
+/// track has duplicates before calling this, since this function has no way
+/// to only take one.
 pub async fn remove_track(client: &AuthCodeSpotify, playlist_uri: &str, track_uri: &str) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
         log::warn!("token refresh before remove_track failed, trying with existing token anyway: {e}");

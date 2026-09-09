@@ -53,11 +53,17 @@ pub async fn liked_songs(client: &AuthCodeSpotify) -> ClientResult<Vec<TrackResu
             .current_user_saved_tracks_manual(None, Some(PAGE_LIMIT), Some(offset))
             .await?;
         let got = page.items.len() as u32;
-        out.extend(page.items.into_iter().map(|saved| TrackResult {
-            uri: saved.track.id.map(|id| id.uri()).unwrap_or_default(),
-            title: saved.track.name,
-            artist: saved.track.artists.first().map(|a| a.name.clone()).unwrap_or_default(),
-            album: saved.track.album.name,
+        out.extend(page.items.into_iter().map(|saved| {
+            let t = saved.track;
+            let first_artist = t.artists.first();
+            TrackResult {
+                uri: t.id.map(|id| id.uri()).unwrap_or_default(),
+                title: t.name,
+                artist: first_artist.map(|a| a.name.clone()).unwrap_or_default(),
+                artist_uri: first_artist.and_then(|a| a.id.clone()).map(|id| id.uri()).unwrap_or_default(),
+                album_uri: t.album.id.clone().map(|id| id.uri()).unwrap_or_default(),
+                album: t.album.name,
+            }
         }));
         if got < PAGE_LIMIT || out.len() as u32 >= MAX_ITEMS {
             break;
@@ -167,12 +173,13 @@ pub async fn playlist_tracks(client: &AuthCodeSpotify, playlist_uri: &str) -> Re
         // was actually fetched.
         let got = page.items.len() as u32;
         out.extend(page.items.into_iter().filter_map(|item| match item.item {
-            Some(PlayableItem::Track(t)) => Some(TrackResult {
-                uri: t.id?.uri(),
-                title: t.name,
-                artist: t.artists.first().map(|a| a.name.clone()).unwrap_or_default(),
-                album: t.album.name,
-            }),
+            Some(PlayableItem::Track(t)) => {
+                let first_artist = t.artists.first();
+                let artist = first_artist.map(|a| a.name.clone()).unwrap_or_default();
+                let artist_uri = first_artist.and_then(|a| a.id.clone()).map(|id| id.uri()).unwrap_or_default();
+                let album_uri = t.album.id.clone().map(|id| id.uri()).unwrap_or_default();
+                Some(TrackResult { uri: t.id?.uri(), title: t.name, artist, artist_uri, album: t.album.name, album_uri })
+            }
             _ => None,
         }));
         offset += got;

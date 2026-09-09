@@ -16,8 +16,101 @@
 //! Spotify Web API, already covered by scopes this app already requests.
 
 use rspotify::clients::{BaseClient, OAuthClient};
-use rspotify::model::{LibraryId, PlayableId, TrackId};
+use rspotify::model::{ItemPositions, LibraryId, PlayableId, TrackId};
 use rspotify::AuthCodeSpotify;
+
+/// Phase 5's `remove_track` shipped on `playlist_remove_all_occurrences_of_items`
+/// with a named, ranked risk: a playlist holding the same track twice would
+/// lose both on one `d`, not just the selected copy. Reported live exactly
+/// that way. This spike checked the documented tripwire before switching
+/// `remove_track` over to the position-scoped call
+/// (`playlist_remove_specific_occurrences_of_items`).
+///
+/// **Result: don't use it.** Two runs against a real 2x-duplicate scratch
+/// playlist gave two different, both-wrong outcomes -- without an explicit
+/// `snapshot_id`, `positions: &[0]` removed BOTH occurrences (identical to
+/// the all-occurrences call, positions silently ignored); with the
+/// playlist's own current `snapshot_id` passed explicitly, the same call
+/// removed NEITHER (a silent no-op, no error returned). Non-deterministic
+/// behavior on a destructive endpoint is worse than the current, honestly-
+/// documented all-occurrences limitation -- confirms the Feb-2026
+/// consolidation genuinely dropped position-honoring on this endpoint
+/// rather than it being merely undocumented. `api::playlists::remove_track`
+/// stays on `playlist_remove_all_occurrences_of_items`; the real fix is
+/// warning the user before the removal happens, not switching calls.
+pub async fn run_spike_remove_specific_occurrence(client: &AuthCodeSpotify) -> Result<(), String> {
+    let user_id = client.me().await.map_err(|e| e.to_string())?.id;
+
+    let playlist = client
+        .user_playlist_create(
+            user_id,
+            "spot-tui remove-occurrence spike (safe to delete)",
+            Some(false),
+            Some(false),
+            Some("temporary playlist created by spot-tui's remove-specific-occurrence spike -- deleted automatically at the end of this run"),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    println!("created scratch playlist: {} ({})", playlist.name, playlist.id);
+
+    let seed = crate::api::search::search_tracks(client, "yung kai", 1)
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(track) = seed.into_iter().next() else {
+        cleanup_playlist(client, playlist.id.clone()).await;
+        return Err("needed 1 seed track to test removal, search returned none".to_string());
+    };
+    let track_id = TrackId::from_uri(&track.uri).map_err(|e| e.to_string())?;
+
+    // Add the same track twice -- the exact shape reported live.
+    client
+        .playlist_add_items(
+            playlist.id.clone(),
+            [PlayableId::Track(track_id.clone()), PlayableId::Track(track_id.clone())],
+            None,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let start = fetch_track_names(client, playlist.id.clone()).await?;
+    println!("start (should be 2x {}): {start:?}", track.title);
+    if start.len() != 2 {
+        cleanup_playlist(client, playlist.id.clone()).await;
+        return Err(format!("expected 2 items after adding the track twice, got {}", start.len()));
+    }
+
+    // Fetch the real snapshot_id right before removing -- ruling out
+    // "positions are only honored against a matching snapshot" before
+    // concluding this is a genuine platform limitation.
+    let snapshot_id = client
+        .playlist(playlist.id.clone(), None, None)
+        .await
+        .map_err(|e| e.to_string())?
+        .snapshot_id;
+    println!("snapshot_id right before removal: {snapshot_id}");
+
+    // Remove ONLY position 0 -- if this call is safe, position 1 (the
+    // other occurrence of the exact same track) should survive untouched.
+    client
+        .playlist_remove_specific_occurrences_of_items(
+            playlist.id.clone(),
+            [ItemPositions { id: PlayableId::Track(track_id.clone()), positions: &[0] }],
+            Some(&snapshot_id),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let after = fetch_track_names(client, playlist.id.clone()).await?;
+    println!("after removing position 0: {after:?}");
+    if after.len() == 1 {
+        println!("PASS: position-scoped removal took exactly one occurrence, the other survived.");
+    } else {
+        println!("FAIL: expected 1 remaining item, got {} -- {after:?}", after.len());
+    }
+
+    cleanup_playlist(client, playlist.id.clone()).await;
+    Ok(())
+}
 
 pub async fn run_phase0(client: &AuthCodeSpotify) -> Result<(), String> {
     println!("=== Phase 0 spike: devices + transfer ===");

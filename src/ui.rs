@@ -25,6 +25,7 @@ pub enum Screen {
     PlaylistDetail,
     Help,
     Queue,
+    Devices,
 }
 
 /// Which persistent pane currently receives arrow keys / `Enter`, toggled
@@ -126,6 +127,7 @@ pub const SIDEBAR_ENTRIES: &[(&str, Screen)] = &[
     ("Library", Screen::Library),
     ("Liked Songs", Screen::LikedSongs),
     ("Queue", Screen::Queue),
+    ("Devices", Screen::Devices),
 ];
 
 /// One row of the sidebar -- either a static menu entry or one of the
@@ -492,6 +494,27 @@ impl QueueState {
 }
 
 impl Default for QueueState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Connect devices (Phase 8). Fetched once on entry (like the Library
+/// lists), not periodically like `QueueState` -- a device coming online
+/// or offline is a discrete, comparatively rare event, not something
+/// changing every few seconds during normal use. `r` refetches manually.
+pub struct DevicesState {
+    pub fetch: Fetch<Vec<crate::api::devices::DeviceSummary>>,
+    pub selected: usize,
+}
+
+impl DevicesState {
+    pub fn new() -> Self {
+        Self { fetch: Fetch::NotStarted, selected: 0 }
+    }
+}
+
+impl Default for DevicesState {
     fn default() -> Self {
         Self::new()
     }
@@ -1146,6 +1169,7 @@ pub struct AppState {
     pub search: SearchState,
     pub library: LibraryState,
     pub queue: QueueState,
+    pub devices: DevicesState,
     pub playlist_detail: Option<PlaylistDetailState>,
     pub pinned_playlists: std::collections::HashSet<String>,
     pub pinned_tracks: std::collections::HashSet<String>,
@@ -1193,6 +1217,7 @@ pub struct ScrollState {
     pub playlist_detail: ListState,
     pub playlist_picker: ListState,
     pub queue: ListState,
+    pub devices: ListState,
 }
 
 pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState) {
@@ -1261,6 +1286,7 @@ pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState) {
         Screen::PlaylistDetail => render_playlist_detail(frame, app, &mut scroll.playlist_detail, main_area),
         Screen::Help => render_help(frame, main_area),
         Screen::Queue => render_queue(frame, app, &mut scroll.queue, main_area),
+        Screen::Devices => render_devices(frame, app, &mut scroll.devices, main_area),
     }
     render_playbar(frame, app, playbar_area);
     render_status(frame, app, status_area);
@@ -1397,7 +1423,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
-        "Sidebar (Now Playing, Search, Library, Liked Songs, Queue, then your playlists)",
+        "Sidebar (Now Playing, Search, Library, Liked Songs, Queue, Devices, then your playlists)",
         &[
             ("\u{2191} / \u{2193}", "move cursor"),
             ("Enter / \u{2192}", "open the selected entry or playlist"),
@@ -1453,6 +1479,14 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "add the selected queued track to a playlist -- the public Web API has no remove or reorder for the queue itself",
             ),
             ("refreshes", "automatically every 5s while this screen is open"),
+        ],
+    ),
+    (
+        "Devices",
+        &[
+            ("\u{2191} / \u{2193}", "move selection"),
+            ("Enter", "transfer playback here (keeps current play/pause state)"),
+            ("r", "refresh the device list"),
         ],
     ),
     (
@@ -1671,6 +1705,38 @@ fn render_queue(frame: &mut Frame, app: &AppState, list_state: &mut ListState, a
             let label = |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title);
             let display: Vec<(usize, &TrackResult)> = summary.queue.iter().enumerate().collect();
             render_display_list(frame, chunks[2], &display, app.queue.selected, &label, true, list_state);
+        }
+    }
+}
+
+/// Connect devices (Phase 8): a plain list, the active one marked. `r`
+/// refetches manually (see `DevicesState`'s own doc comment for why this
+/// doesn't poll like Queue does).
+fn render_devices(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new("Devices  (Enter: transfer playback here, r: refresh)")
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+        chunks[0],
+    );
+    match &app.devices.fetch {
+        Fetch::NotStarted | Fetch::Loading => {
+            frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
+        }
+        Fetch::Failed(e) => {
+            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), chunks[1]);
+        }
+        Fetch::Ready(items) => {
+            let label = |d: &crate::api::devices::DeviceSummary| {
+                let marker = if d.is_active { "\u{25cf} " } else { "  " };
+                let volume = d.volume_percent.map(|v| format!(", {v}%")).unwrap_or_default();
+                format!("{marker}{} ({}{volume})", d.name, d.kind)
+            };
+            let display: Vec<(usize, &crate::api::devices::DeviceSummary)> = items.iter().enumerate().collect();
+            render_display_list(frame, chunks[1], &display, app.devices.selected, &label, true, list_state);
         }
     }
 }

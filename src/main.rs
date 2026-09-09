@@ -43,6 +43,7 @@ enum LibraryFetchResult {
         result: Result<Vec<TrackResult>, String>,
     },
     Queue(Result<api::queue::QueueSummary, String>),
+    Devices(Result<Vec<api::devices::DeviceSummary>, String>),
 }
 
 /// Results of Phase 5's mutating calls, following the exact same
@@ -57,6 +58,7 @@ enum CrudResult {
     TrackAdded { playlist_uri: String, result: Result<(), String> },
     TrackRemoved { playlist_uri: String, result: Result<(), String> },
     TrackReordered { playlist_uri: String, result: Result<(), String> },
+    DeviceTransferred(Result<(), String>),
 }
 
 /// Owned result of resolving a Sidebar row into an action -- computed in
@@ -243,6 +245,22 @@ fn refetch_playlists(
         });
     } else {
         app.library.playlists = Fetch::Failed("Spotify client not ready yet".into());
+    }
+}
+
+/// Shared by entering the Devices screen and by a successful transfer
+/// (to move the active-device marker) -- the second concrete case that
+/// justifies pulling this out rather than duplicating the spawn body.
+fn refetch_devices(app: &mut AppState, library_tx: &mpsc::Sender<LibraryFetchResult>, spotify_client: &Option<AuthCodeSpotify>) {
+    app.devices.fetch = Fetch::Loading;
+    if let Some(client) = spotify_client.clone() {
+        let tx = library_tx.clone();
+        tokio::spawn(async move {
+            let result = api::devices::list_devices(&client).await;
+            let _ = tx.send(LibraryFetchResult::Devices(result));
+        });
+    } else {
+        app.devices.fetch = Fetch::Failed("Spotify client not ready yet".into());
     }
 }
 
@@ -642,6 +660,7 @@ async fn main() -> std::io::Result<()> {
         sidebar_sel: 0,
         library: LibraryState::new(),
         queue: ui::QueueState::new(),
+        devices: ui::DevicesState::new(),
         playlist_detail: None,
         pinned_playlists: pins::load("playlists"),
         pinned_tracks: pins::load("tracks"),
@@ -864,6 +883,9 @@ async fn main() -> std::io::Result<()> {
                 LibraryFetchResult::Queue(result) => {
                     app.queue.fetch = result.map_or_else(Fetch::Failed, Fetch::Ready);
                 }
+                LibraryFetchResult::Devices(result) => {
+                    app.devices.fetch = result.map_or_else(Fetch::Failed, Fetch::Ready);
+                }
             }
         }
 
@@ -954,6 +976,16 @@ async fn main() -> std::io::Result<()> {
                     if app.playlist_detail.as_ref().is_some_and(|pd| pd.playlist.uri == playlist_uri) {
                         refetch_playlist_tracks(&mut app, &library_tx, &spotify_client, playlist_uri);
                     }
+                }
+                CrudResult::DeviceTransferred(Ok(())) => {
+                    app.status = Some(("playback transferred".to_string(), false));
+                    // Refetch so the active-device marker moves to the
+                    // one just transferred to, rather than sitting stale
+                    // until the screen is manually left and reopened.
+                    refetch_devices(&mut app, &library_tx, &spotify_client);
+                }
+                CrudResult::DeviceTransferred(Err(e)) => {
+                    app.status = Some((format!("transfer failed: {e}"), true));
                 }
             }
         }
@@ -1093,6 +1125,9 @@ async fn main() -> std::io::Result<()> {
                                         app.search.cursor = 0;
                                         app.search.results.clear();
                                         app.search.error = None;
+                                    }
+                                    if screen == Screen::Devices && matches!(app.devices.fetch, Fetch::NotStarted) {
+                                        refetch_devices(&mut app, &library_tx, &spotify_client);
                                     }
                                 }
                                 Some(SidebarAction::OpenPlaylist(playlist)) => {
@@ -2292,6 +2327,72 @@ async fn main() -> std::io::Result<()> {
                                     if let Some(track) = summary.queue.get(app.queue.selected) {
                                         app.playlist_picker =
                                             Some(PlaylistPicker { track_uri: track.uri.clone(), selected: 0 });
+                                    }
+                                }
+                            }
+                            _ => {}
+                        },
+                        Screen::Devices => match key.code {
+                            KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                break 'inner LoopExit::Quit
+                            }
+                            KeyCode::Char('?') => {
+                                app.nav.push(Screen::Help);
+                            }
+                            KeyCode::Char(' ') => {
+                                let _ = spirc.play_pause();
+                            }
+                            KeyCode::Char('n') => {
+                                let _ = spirc.next();
+                            }
+                            KeyCode::Char('p') => {
+                                let _ = spirc.prev();
+                            }
+                            KeyCode::Char('+') => {
+                                let _ = spirc.volume_up();
+                            }
+                            KeyCode::Char('-') => {
+                                let _ = spirc.volume_down();
+                            }
+                            KeyCode::Char('l') => {
+                                app.nav.goto(Screen::Library);
+                            }
+                            KeyCode::Char('c') => {
+                                app.text_prompt =
+                                    Some(TextPrompt::new("New playlist name", "", TextPromptAction::CreatePlaylist));
+                            }
+                            KeyCode::Esc | KeyCode::Left => {
+                                app.nav.escape();
+                            }
+                            KeyCode::Char('r') => {
+                                refetch_devices(&mut app, &library_tx, &spotify_client);
+                            }
+                            KeyCode::Up => {
+                                app.devices.selected = app.devices.selected.saturating_sub(1);
+                            }
+                            KeyCode::Down => {
+                                if let Fetch::Ready(items) = &app.devices.fetch {
+                                    if !items.is_empty() {
+                                        app.devices.selected = (app.devices.selected + 1).min(items.len() - 1);
+                                    }
+                                }
+                            }
+                            KeyCode::Enter => {
+                                let device_id = match &app.devices.fetch {
+                                    Fetch::Ready(items) => items.get(app.devices.selected).map(|d| d.id.clone()),
+                                    _ => None,
+                                };
+                                if let Some(device_id) = device_id {
+                                    if let Some(client) = spotify_client.clone() {
+                                        app.status = Some(("transferring playback\u{2026}".to_string(), false));
+                                        let tx = crud_tx.clone();
+                                        tokio::spawn(async move {
+                                            let result = api::devices::transfer_to(&client, &device_id).await;
+                                            let _ = tx.send(CrudResult::DeviceTransferred(result));
+                                        });
+                                    } else {
+                                        app.status = Some(("Spotify client not ready yet".to_string(), true));
                                     }
                                 }
                             }

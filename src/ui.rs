@@ -5,7 +5,7 @@ use crate::api::search::TrackResult;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 use std::time::Duration;
 
@@ -421,6 +421,132 @@ pub struct PlaylistDetailState {
     pub tracks: Fetch<Vec<TrackResult>>,
     pub selected: usize,
     pub filter: ListFilter,
+}
+
+// Phase 5's transient overlays (name prompt, yes/no confirm, playlist
+// picker) live as sibling `Option<_>` fields on `AppState` rather than
+// new `Screen` stack variants -- `Screen::Help`'s own addition (the most
+// recent precedent) touched 8+ separate call sites (the exhaustive
+// `render` match, the exhaustive Main-focus `match key.code`, and a
+// `nav.push` binding hand-added to every one of 8 screens individually,
+// each re-implementing the global keys by hand since there's no shared
+// fallthrough). None of that is right for something transient anyway --
+// a yes/no confirm isn't a destination with its own `Esc`-back semantics,
+// it's a gate on top of wherever the user already was. One interception
+// point at the very top of the key loop (same place `Tab` is already
+// intercepted) and one draw call at the end of `render` covers all
+// three, and the screen underneath is untouched -- its list position,
+// filter, nav depth all just resume once the overlay closes.
+
+/// A single-line text prompt (playlist name, for now). The third caller
+/// of the shared `text_*` cursor functions, after `SearchState` and
+/// `ListFilter` -- not yet a big enough win to unify all three into one
+/// shared struct, but that stays a documented option rather than a
+/// to-do.
+pub struct TextPrompt {
+    pub title: String,
+    pub query: String,
+    pub cursor: usize,
+    pub action: TextPromptAction,
+}
+
+pub enum TextPromptAction {
+    CreatePlaylist,
+    RenamePlaylist(crate::api::library::PlaylistSummary),
+}
+
+impl TextPrompt {
+    /// `initial` pre-seeds the field (rename needs the current name) with
+    /// the cursor placed after it, matching a normal text field regaining
+    /// focus -- an empty `initial` (create) just starts at 0, same thing.
+    pub fn new(title: impl Into<String>, initial: impl Into<String>, action: TextPromptAction) -> Self {
+        let query: String = initial.into();
+        let cursor = query.chars().count();
+        Self { title: title.into(), query, cursor, action }
+    }
+
+    pub fn insert_at_cursor(&mut self, c: char) {
+        text_insert_at_cursor(&mut self.query, &mut self.cursor, c);
+    }
+
+    pub fn backspace_at_cursor(&mut self) {
+        text_backspace_at_cursor(&mut self.query, &mut self.cursor);
+    }
+
+    pub fn cursor_left(&mut self) {
+        text_cursor_left(&mut self.cursor);
+    }
+
+    pub fn cursor_right(&mut self) {
+        text_cursor_right(&self.query, &mut self.cursor);
+    }
+}
+
+/// A yes/no gate in front of a destructive action -- `d` always routes
+/// through this, no exceptions, matching the plan's own standing rule.
+pub struct PendingConfirm {
+    pub message: String,
+    pub action: ConfirmAction,
+}
+
+pub enum ConfirmAction {
+    DeletePlaylist(crate::api::library::PlaylistSummary),
+    RemoveTrack { playlist_uri: String, track_uri: String },
+}
+
+/// The add-to-playlist picker (`a`). Lists `app.library.playlists`,
+/// pinned-first -- same ordering Your Playlists and the Sidebar already
+/// use. No in-picker filter/sort in this pass; the list is short enough
+/// that it isn't missed yet (see the design-scope plan's Phase 5
+/// non-goals).
+pub struct PlaylistPicker {
+    pub track_uri: String,
+    pub selected: usize,
+}
+
+#[cfg(test)]
+mod text_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn new_with_empty_initial_starts_at_cursor_zero() {
+        let p = TextPrompt::new("New playlist name", "", TextPromptAction::CreatePlaylist);
+        assert_eq!(p.query, "");
+        assert_eq!(p.cursor, 0);
+    }
+
+    #[test]
+    fn new_with_an_initial_value_places_cursor_after_it() {
+        // Rename pre-seeds the field with the current name -- the cursor
+        // should land at the end, matching a normal text field regaining
+        // focus, not reset to the start.
+        let p = TextPrompt::new(
+            "Rename playlist",
+            "old name",
+            TextPromptAction::RenamePlaylist(crate::api::library::PlaylistSummary {
+                uri: "spotify:playlist:x".to_string(),
+                name: "old name".to_string(),
+                track_count: 3,
+            }),
+        );
+        assert_eq!(p.query, "old name");
+        assert_eq!(p.cursor, 8);
+    }
+
+    #[test]
+    fn insert_backspace_and_arrows_operate_at_the_cursor() {
+        let mut p = TextPrompt::new("New playlist name", "", TextPromptAction::CreatePlaylist);
+        p.insert_at_cursor('a');
+        p.insert_at_cursor('c');
+        p.cursor_left();
+        p.insert_at_cursor('b');
+        assert_eq!(p.query, "abc");
+        assert_eq!(p.cursor, 2);
+        p.cursor_right();
+        assert_eq!(p.cursor, 3); // clamped at the end
+        p.backspace_at_cursor();
+        assert_eq!(p.query, "ab");
+    }
 }
 
 #[cfg(test)]
@@ -888,6 +1014,21 @@ pub struct AppState {
     pub playlist_detail: Option<PlaylistDetailState>,
     pub pinned_playlists: std::collections::HashSet<String>,
     pub pinned_tracks: std::collections::HashSet<String>,
+    /// Phase 5's transient overlays -- see the doc comment above
+    /// `TextPrompt` for why these are sibling `Option`s here rather than
+    /// `Screen` stack variants. Checked in this order (confirm gates
+    /// hardest, a picker is "just" a list): only one is ever `Some` at a
+    /// time in practice, but the order matters if that invariant is ever
+    /// violated by a future bug -- confirm should always win.
+    pub pending_confirm: Option<PendingConfirm>,
+    pub text_prompt: Option<TextPrompt>,
+    pub playlist_picker: Option<PlaylistPicker>,
+    /// Transient (message, is_error) shown in the status line, cleared on
+    /// the next keypress. Every Phase 5 mutation's result -- success or
+    /// failure -- surfaces here; there was no general status/toast field
+    /// before this phase; every prior error surface was feature-specific
+    /// (`SearchState::error`, `Fetch::Failed`).
+    pub status: Option<(String, bool)>,
 }
 
 /// Persisted scroll offsets, one per list, threaded through `render`
@@ -915,11 +1056,13 @@ pub struct ScrollState {
     pub followed_artists: ListState,
     pub playlists: ListState,
     pub playlist_detail: ListState,
+    pub playlist_picker: ListState,
 }
 
 pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState) {
     if app.fullscreen && *app.nav.top() == Screen::NowPlaying {
         render_fullscreen(frame, app);
+        render_overlays(frame, app, &mut scroll.playlist_picker);
         return;
     }
 
@@ -984,6 +1127,107 @@ pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState) {
     }
     render_playbar(frame, app, playbar_area);
     render_status(frame, app, status_area);
+    render_overlays(frame, app, &mut scroll.playlist_picker);
+}
+
+/// Draws whichever Phase 5 overlay is active (at most one in practice --
+/// see the field order comment on `AppState`) centered on top of
+/// whatever's already been drawn this frame, fullscreen included. Called
+/// last specifically so it paints over everything else.
+fn render_overlays(frame: &mut Frame, app: &AppState, picker_list_state: &mut ListState) {
+    if let Some(confirm) = &app.pending_confirm {
+        render_confirm_overlay(frame, confirm);
+    } else if let Some(prompt) = &app.text_prompt {
+        render_text_prompt_overlay(frame, prompt);
+    } else if let Some(picker) = &app.playlist_picker {
+        render_playlist_picker_overlay(frame, app, picker, picker_list_state);
+    }
+}
+
+/// A `Rect` of `width` x `height` centered within `area`, clamped so it
+/// never exceeds `area` on a narrow/short terminal.
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    Rect { x, y, width, height }
+}
+
+fn render_text_prompt_overlay(frame: &mut Frame, prompt: &TextPrompt) {
+    let area = centered_rect(frame.area(), 50, 3);
+    frame.render_widget(Clear, area);
+    let byte_pos = prompt
+        .query
+        .char_indices()
+        .nth(prompt.cursor)
+        .map(|(b, _)| b)
+        .unwrap_or(prompt.query.len());
+    let (before, after) = prompt.query.split_at(byte_pos);
+    let text = format!("{before}\u{2588}{after}");
+    frame.render_widget(
+        Paragraph::new(text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(ACCENT))
+                .title(prompt.title.clone()),
+        ),
+        area,
+    );
+}
+
+fn render_confirm_overlay(frame: &mut Frame, confirm: &PendingConfirm) {
+    let width = (confirm.message.chars().count() as u16 + 4).clamp(24, 60);
+    let area = centered_rect(frame.area(), width, 3);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(confirm.message.clone())
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Red))),
+        area,
+    );
+}
+
+/// Reuses `render_display_list` (the same helper every other list in the
+/// app already uses) specifically for its `ListState`-backed scrolling --
+/// the picker's first version built its rows as a plain `Paragraph`,
+/// which never scrolls at all, so a playlist past the visible height was
+/// simply unreachable (reported live).
+fn render_playlist_picker_overlay(
+    frame: &mut Frame,
+    app: &AppState,
+    picker: &PlaylistPicker,
+    list_state: &mut ListState,
+) {
+    let area = centered_rect(frame.area(), 40, 12);
+    frame.render_widget(Clear, area);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(ACCENT)).title("Add to playlist");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let label = |p: &crate::api::library::PlaylistSummary| p.name.clone();
+    match &app.library.playlists {
+        Fetch::NotStarted | Fetch::Loading => {
+            frame.render_widget(Paragraph::new("loading\u{2026}"), inner);
+        }
+        Fetch::Failed(e) => {
+            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), inner);
+        }
+        Fetch::Ready(items) if items.is_empty() => {
+            frame.render_widget(Paragraph::new("no playlists yet -- press c to create one"), inner);
+        }
+        Fetch::Ready(items) => {
+            let ordered =
+                pinned_first(filtered_sorted(items, &ListFilter::default(), &label), &app.pinned_playlists, |p| {
+                    p.uri.as_str()
+                });
+            let pin_label = |p: &crate::api::library::PlaylistSummary| {
+                let marker = if app.pinned_playlists.contains(&p.uri) { "* " } else { "  " };
+                format!("{marker}{}", label(p))
+            };
+            render_display_list(frame, inner, &ordered, picker.selected, &pin_label, false, list_state);
+        }
+    }
 }
 
 /// Keep this in sync as new keys get wired -- Phase 4's whole point was
@@ -1034,6 +1278,35 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("/", "open this list's filter (live-narrows as you type)"),
             ("o", "toggle alphabetical sort"),
             ("Shift+P", "pin / unpin (Your Playlists, Playlist Detail)"),
+        ],
+    ),
+    (
+        "Playlist CRUD",
+        &[
+            ("c", "create a new playlist -- works from any screen except Search"),
+            ("r", "rename -- Your Playlists: the selected playlist; Playlist Detail: the open playlist"),
+            (
+                "d",
+                "remove, always confirms first -- Your Playlists: delete the playlist; Playlist Detail: remove the selected track",
+            ),
+            (
+                "Shift+D",
+                "delete the open playlist itself, always confirms first -- Playlist Detail only",
+            ),
+            (
+                "a",
+                "add a track to a playlist (opens the picker) -- Liked Songs, Playlist Detail, and Now Playing (the currently playing track)",
+            ),
+        ],
+    ),
+    (
+        "Prompt / confirm / picker overlays",
+        &[
+            ("Enter", "prompt: submit. picker: add to the selected playlist. confirm: same as y"),
+            ("y / n", "confirm: y does it, n cancels"),
+            ("Esc", "cancel and close, no exceptions"),
+            ("\u{2190} / \u{2192}", "prompt: move the cursor within the text"),
+            ("\u{2191} / \u{2193}", "picker: move the selected playlist"),
         ],
     ),
     (
@@ -1376,6 +1649,14 @@ fn render_playbar(frame: &mut Frame, app: &AppState, area: Rect) {
 }
 
 fn render_status(frame: &mut Frame, app: &AppState, area: Rect) {
+    // A Phase 5 mutation's result (success or failure) takes over this
+    // line until the next keypress, same lifetime a status line
+    // conventionally gets -- the depth readout resumes once it's gone.
+    if let Some((message, is_error)) = &app.status {
+        let color = if *is_error { Color::Red } else { ACCENT };
+        frame.render_widget(Paragraph::new(message.clone()).style(Style::default().fg(color)), area);
+        return;
+    }
     let text = format!("stack depth {} \u{2014} Tab switch pane, Esc back", app.nav.depth());
     frame.render_widget(Paragraph::new(text).style(Style::default().fg(Color::DarkGray)), area);
 }

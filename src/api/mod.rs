@@ -27,6 +27,7 @@
 //! browser login; the resulting token is cached separately from ncspot's.
 
 pub mod library;
+pub mod playlists;
 pub mod search;
 
 use chrono::Utc;

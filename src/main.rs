@@ -55,6 +55,7 @@ enum CrudResult {
     PlaylistDeleted { playlist_uri: String, result: Result<(), String> },
     TrackAdded { playlist_uri: String, result: Result<(), String> },
     TrackRemoved { playlist_uri: String, result: Result<(), String> },
+    TrackReordered { playlist_uri: String, result: Result<(), String> },
 }
 
 /// Owned result of resolving a Sidebar row into an action -- computed in
@@ -153,6 +154,37 @@ fn tmux_toggle_zoom() {
     }
 }
 
+/// While move-mode is active, `pd.selected` is a raw array index (see
+/// `render_playlist_detail`'s doc comment on why pinned-first bubbling is
+/// skipped during a move). This finds where `real_index` lands in the
+/// normal pinned-first display, so callers can convert back to a display
+/// position -- used both entering move-mode (display index -> real
+/// index) and exiting it (real index -> display index).
+fn display_index_for_real_index(pd: &PlaylistDetailState, pinned_tracks: &std::collections::HashSet<String>, real_index: usize) -> usize {
+    let label = |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title);
+    if let Fetch::Ready(items) = &pd.tracks {
+        let display = pinned_first(filtered_sorted(items, &pd.filter, &label), pinned_tracks, |t| t.uri.as_str());
+        display.iter().position(|&(i, _)| i == real_index).unwrap_or(real_index)
+    } else {
+        real_index
+    }
+}
+
+/// Move-mode just exited (confirm or cancel) -- converts `pd.selected`
+/// from a raw array index back to its position in the normal
+/// pinned-first display that resumes now, so the highlight stays on the
+/// same track rather than landing on an unrelated row whenever a pin is
+/// active. Shared by both exit paths (`Enter` confirms, `Esc` cancels).
+fn resume_normal_display_index(app: &mut AppState) {
+    let new_selected = app
+        .playlist_detail
+        .as_ref()
+        .map(|pd| display_index_for_real_index(pd, &app.pinned_tracks, pd.selected));
+    if let (Some(pd), Some(new_selected)) = (&mut app.playlist_detail, new_selected) {
+        pd.selected = new_selected;
+    }
+}
+
 /// Re-fetches one playlist's track list, setting `Fetch::Loading` first.
 /// Shared by `open_playlist_detail` (opening fresh) and Phase 5's
 /// add/remove-track success handlers (refreshing after a mutation) --
@@ -230,6 +262,7 @@ fn open_playlist_detail(
         tracks: Fetch::Loading,
         selected: 0,
         filter: ListFilter::default(),
+        move_mode: None,
     });
     refetch_playlist_tracks(app, library_tx, spotify_client, playlist_uri);
 }
@@ -867,6 +900,30 @@ async fn main() -> std::io::Result<()> {
                 CrudResult::TrackRemoved { result: Err(e), .. } => {
                     app.status = Some((format!("remove track failed: {e}"), true));
                 }
+                CrudResult::TrackReordered { playlist_uri, result: Ok(()) } => {
+                    app.status = Some(("reordered".to_string(), false));
+                    // Refetches to reconcile with the server's own
+                    // snapshot_id even though the local Vec was already
+                    // optimistically reordered during move-mode -- cheap
+                    // insurance against drift, matching every other
+                    // mutation's refetch-on-success convention.
+                    if app.playlist_detail.as_ref().is_some_and(|pd| pd.playlist.uri == playlist_uri) {
+                        refetch_playlist_tracks(&mut app, &library_tx, &spotify_client, playlist_uri);
+                    }
+                }
+                CrudResult::TrackReordered { playlist_uri, result: Err(e) } => {
+                    app.status = Some((format!("reorder failed: {e}"), true));
+                    // Unlike every other mutation here, the local list was
+                    // already optimistically reordered *before* this
+                    // result arrived (that's the whole point of move-mode
+                    // not hitting the network per keystroke) -- on
+                    // failure that local order is now wrong and has to be
+                    // refetched away, not just left showing a move that
+                    // never actually happened server-side.
+                    if app.playlist_detail.as_ref().is_some_and(|pd| pd.playlist.uri == playlist_uri) {
+                        refetch_playlist_tracks(&mut app, &library_tx, &spotify_client, playlist_uri);
+                    }
+                }
             }
         }
 
@@ -1358,6 +1415,15 @@ async fn main() -> std::io::Result<()> {
                                         TextPromptAction::CreatePlaylist,
                                     ));
                                 }
+                                // A filter that's applied but no longer being typed still
+                                // has to be dismissed with its own Esc first -- otherwise
+                                // Esc immediately leaves the screen with the filter
+                                // silently still narrowing the list next time it's opened.
+                                KeyCode::Esc if !app.library.liked_songs_filter.query.is_empty() => {
+                                    app.library.liked_songs_filter.query.clear();
+                                    app.library.liked_songs_filter.cursor = 0;
+                                    app.library.liked_songs_selected = 0;
+                                }
                                 KeyCode::Esc | KeyCode::Left => {
                                     app.nav.escape();
                                 }
@@ -1470,6 +1536,11 @@ async fn main() -> std::io::Result<()> {
                                         TextPromptAction::CreatePlaylist,
                                     ));
                                 }
+                                KeyCode::Esc if !app.library.saved_albums_filter.query.is_empty() => {
+                                    app.library.saved_albums_filter.query.clear();
+                                    app.library.saved_albums_filter.cursor = 0;
+                                    app.library.saved_albums_selected = 0;
+                                }
                                 KeyCode::Esc | KeyCode::Left => {
                                     app.nav.escape();
                                 }
@@ -1552,6 +1623,11 @@ async fn main() -> std::io::Result<()> {
                                         TextPromptAction::CreatePlaylist,
                                     ));
                                 }
+                                KeyCode::Esc if !app.library.followed_artists_filter.query.is_empty() => {
+                                    app.library.followed_artists_filter.query.clear();
+                                    app.library.followed_artists_filter.cursor = 0;
+                                    app.library.followed_artists_selected = 0;
+                                }
                                 KeyCode::Esc | KeyCode::Left => {
                                     app.nav.escape();
                                 }
@@ -1627,6 +1703,11 @@ async fn main() -> std::io::Result<()> {
                                 }
                                 KeyCode::Char('l') => {
                                     app.nav.goto(Screen::Library);
+                                }
+                                KeyCode::Esc if !app.library.playlists_filter.query.is_empty() => {
+                                    app.library.playlists_filter.query.clear();
+                                    app.library.playlists_filter.cursor = 0;
+                                    app.library.playlists_selected = 0;
                                 }
                                 KeyCode::Esc | KeyCode::Left => {
                                     app.nav.escape();
@@ -1736,6 +1817,8 @@ async fn main() -> std::io::Result<()> {
                             let label = |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title);
                             let filter_editing =
                                 app.playlist_detail.as_ref().is_some_and(|pd| pd.filter.editing);
+                            let move_mode_active =
+                                app.playlist_detail.as_ref().is_some_and(|pd| pd.move_mode.is_some());
                             match key.code {
                                 KeyCode::Char(c) if filter_editing => {
                                     if let Some(pd) = &mut app.playlist_detail {
@@ -1768,6 +1851,123 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Right if filter_editing => {
                                     if let Some(pd) = &mut app.playlist_detail {
                                         pd.filter.cursor_right();
+                                    }
+                                }
+                                // Move-mode: `Up`/`Down` relocate the track locally (no
+                                // network call per keystroke), `Enter` confirms with a
+                                // single `reorder_track` call reflecting the net
+                                // displacement, `Esc` walks it back to where it started.
+                                // Every other key is swallowed while active -- same
+                                // reasoning as `filter_editing`'s own catch-all: editing
+                                // playlist content mid-reorder (remove/add/rename/pin)
+                                // would race the pending local move.
+                                KeyCode::Up if move_mode_active => {
+                                    if let Some(pd) = &mut app.playlist_detail {
+                                        if let Fetch::Ready(items) = &mut pd.tracks {
+                                            pd.selected = ui::move_item_up(items, pd.selected);
+                                        }
+                                    }
+                                }
+                                KeyCode::Down if move_mode_active => {
+                                    if let Some(pd) = &mut app.playlist_detail {
+                                        if let Fetch::Ready(items) = &mut pd.tracks {
+                                            pd.selected = ui::move_item_down(items, pd.selected);
+                                        }
+                                    }
+                                }
+                                KeyCode::Enter if move_mode_active => {
+                                    if let Some(pd) = &mut app.playlist_detail {
+                                        if let Some(start) = pd.move_mode.take() {
+                                            let end = pd.selected;
+                                            if start != end {
+                                                if let Some(client) = spotify_client.clone() {
+                                                    app.status = Some(("reordering\u{2026}".to_string(), false));
+                                                    let tx = crud_tx.clone();
+                                                    let playlist_uri = pd.playlist.uri.clone();
+                                                    let playlist_uri_for_result = playlist_uri.clone();
+                                                    tokio::spawn(async move {
+                                                        let result = api::playlists::reorder_track(
+                                                            &client,
+                                                            &playlist_uri,
+                                                            start,
+                                                            end,
+                                                        )
+                                                        .await;
+                                                        let _ = tx.send(CrudResult::TrackReordered {
+                                                            playlist_uri: playlist_uri_for_result,
+                                                            result,
+                                                        });
+                                                    });
+                                                } else {
+                                                    app.status =
+                                                        Some(("Spotify client not ready yet".to_string(), true));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    resume_normal_display_index(&mut app);
+                                }
+                                KeyCode::Esc if move_mode_active => {
+                                    if let Some(pd) = &mut app.playlist_detail {
+                                        if let Some(start) = pd.move_mode.take() {
+                                            if let Fetch::Ready(items) = &mut pd.tracks {
+                                                pd.selected = ui::move_item_to(items, pd.selected, start);
+                                            }
+                                        }
+                                    }
+                                    resume_normal_display_index(&mut app);
+                                }
+                                KeyCode::Char(_) if move_mode_active => {}
+                                KeyCode::Char('m') => {
+                                    // Pins don't block this -- move-mode simply stops
+                                    // applying the pinned-first bubbling to the display
+                                    // while active (see render_playlist_detail), so display
+                                    // position always equals real array position
+                                    // regardless of what's pinned. Filter/sort still have
+                                    // to be off for the same reason: either one changes
+                                    // display order in a way this doesn't (yet) undo.
+                                    let ineligible_reason = match &app.playlist_detail {
+                                        Some(pd) if pd.filter.editing || !pd.filter.query.is_empty() || pd.filter.sort_alpha => {
+                                            Some("clear the filter and turn off sort to reorder")
+                                        }
+                                        Some(pd) => match &pd.tracks {
+                                            Fetch::Ready(_) => None,
+                                            _ => Some("still loading"),
+                                        },
+                                        None => Some("no playlist open"),
+                                    };
+                                    match ineligible_reason {
+                                        None => {
+                                            // `pd.selected` right now is a position in the
+                                            // normal pinned-first DISPLAY, not necessarily
+                                            // the real array -- has to be converted before
+                                            // move-mode starts treating it as a raw index,
+                                            // or entering move-mode with a pin active would
+                                            // silently start moving the wrong track.
+                                            let real_index = if let Some(pd) = &app.playlist_detail {
+                                                if let Fetch::Ready(items) = &pd.tracks {
+                                                    let display = pinned_first(
+                                                        filtered_sorted(items, &pd.filter, &label),
+                                                        &app.pinned_tracks,
+                                                        |t| t.uri.as_str(),
+                                                    );
+                                                    display.get(pd.selected).map(|&(i, _)| i)
+                                                } else {
+                                                    None
+                                                }
+                                            } else {
+                                                None
+                                            };
+                                            if let Some(real_index) = real_index {
+                                                if let Some(pd) = &mut app.playlist_detail {
+                                                    pd.selected = real_index;
+                                                    pd.move_mode = Some(real_index);
+                                                }
+                                            }
+                                        }
+                                        Some(reason) => {
+                                            app.status = Some((reason.to_string(), true));
+                                        }
                                     }
                                 }
                                 KeyCode::Char('q') => break 'inner LoopExit::Quit,
@@ -1803,6 +2003,18 @@ async fn main() -> std::io::Result<()> {
                                         "",
                                         TextPromptAction::CreatePlaylist,
                                     ));
+                                }
+                                KeyCode::Esc
+                                    if app
+                                        .playlist_detail
+                                        .as_ref()
+                                        .is_some_and(|pd| !pd.filter.query.is_empty()) =>
+                                {
+                                    if let Some(pd) = &mut app.playlist_detail {
+                                        pd.filter.query.clear();
+                                        pd.filter.cursor = 0;
+                                        pd.selected = 0;
+                                    }
                                 }
                                 KeyCode::Esc | KeyCode::Left => {
                                     app.nav.escape();

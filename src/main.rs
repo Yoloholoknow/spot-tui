@@ -42,6 +42,7 @@ enum LibraryFetchResult {
         playlist_uri: String,
         result: Result<Vec<TrackResult>, String>,
     },
+    Queue(Result<api::queue::QueueSummary, String>),
 }
 
 /// Results of Phase 5's mutating calls, following the exact same
@@ -640,6 +641,7 @@ async fn main() -> std::io::Result<()> {
         nav: Nav::new(),
         sidebar_sel: 0,
         library: LibraryState::new(),
+        queue: ui::QueueState::new(),
         playlist_detail: None,
         pinned_playlists: pins::load("playlists"),
         pinned_tracks: pins::load("tracks"),
@@ -658,6 +660,13 @@ async fn main() -> std::io::Result<()> {
     let mut generation: u64 = 0;
     let mut pending_fetch: Option<(u64, TrackMeta, Instant)> = None;
     let mut synced_lines: Vec<LyricLine> = Vec::new();
+    // Unlike every other fetched list, the queue reflects live playback
+    // state that changes on its own (the current track finishes, another
+    // device skips ahead) even when this app hasn't done anything -- so
+    // it's refetched periodically while visible rather than once and
+    // cached, gated by this timer rather than a one-shot NotStarted check.
+    let mut queue_last_fetched: Option<Instant> = None;
+    const QUEUE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
     // Tier 4 resilience: reconnect with capped exponential backoff instead
     // of leaving the app permanently dead after a session drop. Mirrors
@@ -795,6 +804,25 @@ async fn main() -> std::io::Result<()> {
             }
         }
 
+        if *app.nav.top() == Screen::Queue {
+            let due = queue_last_fetched.is_none_or(|t| t.elapsed() >= QUEUE_POLL_INTERVAL);
+            if due {
+                if let Some(client) = spotify_client.clone() {
+                    queue_last_fetched = Some(Instant::now());
+                    let tx = library_tx.clone();
+                    tokio::spawn(async move {
+                        let result = api::queue::current_queue(&client).await;
+                        let _ = tx.send(LibraryFetchResult::Queue(result));
+                    });
+                }
+            }
+        } else {
+            // Leaving the screen resets the timer so returning to it
+            // later fetches immediately instead of waiting out whatever
+            // was left of the previous interval.
+            queue_last_fetched = None;
+        }
+
         while let Ok(result) = search_rx.try_recv() {
             app.search.searching = false;
             match result {
@@ -832,6 +860,9 @@ async fn main() -> std::io::Result<()> {
                             pd.tracks = result.map_or_else(Fetch::Failed, Fetch::Ready);
                         }
                     }
+                }
+                LibraryFetchResult::Queue(result) => {
+                    app.queue.fetch = result.map_or_else(Fetch::Failed, Fetch::Ready);
                 }
             }
         }
@@ -2204,6 +2235,65 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Char('c') => {
                                 app.text_prompt =
                                     Some(TextPrompt::new("New playlist name", "", TextPromptAction::CreatePlaylist));
+                            }
+                            _ => {}
+                        },
+                        Screen::Queue => match key.code {
+                            KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                break 'inner LoopExit::Quit
+                            }
+                            KeyCode::Char('?') => {
+                                app.nav.push(Screen::Help);
+                            }
+                            KeyCode::Char(' ') => {
+                                let _ = spirc.play_pause();
+                            }
+                            KeyCode::Char('n') => {
+                                let _ = spirc.next();
+                            }
+                            KeyCode::Char('p') => {
+                                let _ = spirc.prev();
+                            }
+                            KeyCode::Char('+') => {
+                                let _ = spirc.volume_up();
+                            }
+                            KeyCode::Char('-') => {
+                                let _ = spirc.volume_down();
+                            }
+                            KeyCode::Char('l') => {
+                                app.nav.goto(Screen::Library);
+                            }
+                            KeyCode::Char('c') => {
+                                app.text_prompt =
+                                    Some(TextPrompt::new("New playlist name", "", TextPromptAction::CreatePlaylist));
+                            }
+                            KeyCode::Esc | KeyCode::Left => {
+                                app.nav.escape();
+                            }
+                            KeyCode::Up => {
+                                app.queue.selected = app.queue.selected.saturating_sub(1);
+                            }
+                            KeyCode::Down => {
+                                if let Fetch::Ready(summary) = &app.queue.fetch {
+                                    if !summary.queue.is_empty() {
+                                        app.queue.selected =
+                                            (app.queue.selected + 1).min(summary.queue.len() - 1);
+                                    }
+                                }
+                            }
+                            // No d/r/m here -- the public Web API has no
+                            // remove or reorder endpoint for the queue at
+                            // all (see api::queue's own doc comment).
+                            // Adding to a playlist is the one real
+                            // mutation available for a queued track.
+                            KeyCode::Char('a') => {
+                                if let Fetch::Ready(summary) = &app.queue.fetch {
+                                    if let Some(track) = summary.queue.get(app.queue.selected) {
+                                        app.playlist_picker =
+                                            Some(PlaylistPicker { track_uri: track.uri.clone(), selected: 0 });
+                                    }
+                                }
                             }
                             _ => {}
                         },

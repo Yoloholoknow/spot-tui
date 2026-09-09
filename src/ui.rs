@@ -24,6 +24,7 @@ pub enum Screen {
     YourPlaylists,
     PlaylistDetail,
     Help,
+    Queue,
 }
 
 /// Which persistent pane currently receives arrow keys / `Enter`, toggled
@@ -124,6 +125,7 @@ pub const SIDEBAR_ENTRIES: &[(&str, Screen)] = &[
     ("Search", Screen::Search),
     ("Library", Screen::Library),
     ("Liked Songs", Screen::LikedSongs),
+    ("Queue", Screen::Queue),
 ];
 
 /// One row of the sidebar -- either a static menu entry or one of the
@@ -469,6 +471,29 @@ mod move_item_tests {
         let selected = move_item_to(&mut items, selected, start);
         assert_eq!(items, original);
         assert_eq!(selected, start);
+    }
+}
+
+/// The Connect queue (Phase 7). Kept separate from `LibraryState` --
+/// unlike Liked Songs/Saved Albums/etc, this reflects live playback
+/// state that changes on its own even when this app hasn't done
+/// anything (the current track finishes, another device skips ahead),
+/// so it's periodically refetched while visible rather than fetched once
+/// and cached indefinitely -- see `main.rs`'s own polling logic.
+pub struct QueueState {
+    pub fetch: Fetch<crate::api::queue::QueueSummary>,
+    pub selected: usize,
+}
+
+impl QueueState {
+    pub fn new() -> Self {
+        Self { fetch: Fetch::NotStarted, selected: 0 }
+    }
+}
+
+impl Default for QueueState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1120,6 +1145,7 @@ pub struct AppState {
     pub sidebar_sel: usize,
     pub search: SearchState,
     pub library: LibraryState,
+    pub queue: QueueState,
     pub playlist_detail: Option<PlaylistDetailState>,
     pub pinned_playlists: std::collections::HashSet<String>,
     pub pinned_tracks: std::collections::HashSet<String>,
@@ -1166,6 +1192,7 @@ pub struct ScrollState {
     pub playlists: ListState,
     pub playlist_detail: ListState,
     pub playlist_picker: ListState,
+    pub queue: ListState,
 }
 
 pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState) {
@@ -1233,6 +1260,7 @@ pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState) {
         Screen::YourPlaylists => render_your_playlists(frame, app, &mut scroll.playlists, main_area),
         Screen::PlaylistDetail => render_playlist_detail(frame, app, &mut scroll.playlist_detail, main_area),
         Screen::Help => render_help(frame, main_area),
+        Screen::Queue => render_queue(frame, app, &mut scroll.queue, main_area),
     }
     render_playbar(frame, app, playbar_area);
     render_status(frame, app, status_area);
@@ -1369,7 +1397,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
-        "Sidebar (Now Playing, Search, Library, Liked Songs, then your playlists)",
+        "Sidebar (Now Playing, Search, Library, Liked Songs, Queue, then your playlists)",
         &[
             ("\u{2191} / \u{2193}", "move cursor"),
             ("Enter / \u{2192}", "open the selected entry or playlist"),
@@ -1414,6 +1442,17 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "m",
                 "reorder tracks (Playlist Detail only) -- requires no filter/sort active; pinned tracks are fine",
             ),
+        ],
+    ),
+    (
+        "Queue",
+        &[
+            ("\u{2191} / \u{2193}", "move selection among what's up next"),
+            (
+                "a",
+                "add the selected queued track to a playlist -- the public Web API has no remove or reorder for the queue itself",
+            ),
+            ("refreshes", "automatically every 5s while this screen is open"),
         ],
     ),
     (
@@ -1597,6 +1636,41 @@ fn render_your_playlists(frame: &mut Frame, app: &AppState, list_state: &mut Lis
                 app.library.playlists_filter.query.is_empty(),
                 list_state,
             );
+        }
+    }
+}
+
+/// The Connect queue (Phase 7): a static "currently playing" caption
+/// above a plain list of what's up next. No filter/sort/pin concept --
+/// unlike every other list screen, this one has no local mutation
+/// surface at all (see `api::queue`'s own doc comment for why: the
+/// public Web API has no remove/reorder endpoint for it), so it's the
+/// one list screen that's genuinely just a view.
+fn render_queue(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new("Queue").style(Style::default().add_modifier(Modifier::BOLD)),
+        chunks[0],
+    );
+    match &app.queue.fetch {
+        Fetch::NotStarted | Fetch::Loading => {
+            frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
+        }
+        Fetch::Failed(e) => {
+            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), chunks[1]);
+        }
+        Fetch::Ready(summary) => {
+            let now_playing = match &summary.currently_playing {
+                Some(t) => format!("Now playing: {} \u{2014} {}", t.artist, t.title),
+                None => "Now playing: (nothing)".to_string(),
+            };
+            frame.render_widget(Paragraph::new(now_playing).style(Style::default().fg(ACCENT)), chunks[1]);
+            let label = |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title);
+            let display: Vec<(usize, &TrackResult)> = summary.queue.iter().enumerate().collect();
+            render_display_list(frame, chunks[2], &display, app.queue.selected, &label, true, list_state);
         }
     }
 }

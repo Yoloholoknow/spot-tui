@@ -26,6 +26,7 @@
 //! that issued them (confirmed earlier). First run needs a real one-time
 //! browser login; the resulting token is cached separately from ncspot's.
 
+pub mod devices;
 pub mod library;
 pub mod playlists;
 pub mod queue;

@@ -29,12 +29,17 @@ pub struct QueueSummary {
 /// plan), and `TrackResult` has no shape for one anyway.
 fn playable_to_track(item: PlayableItem) -> Option<TrackResult> {
     match item {
-        PlayableItem::Track(t) => Some(TrackResult {
-            uri: t.id.map(|id| id.uri()).unwrap_or_default(),
-            title: t.name,
-            artist: t.artists.first().map(|a| a.name.clone()).unwrap_or_default(),
-            album: t.album.name,
-        }),
+        PlayableItem::Track(t) => {
+            let first_artist = t.artists.first();
+            Some(TrackResult {
+                uri: t.id.map(|id| id.uri()).unwrap_or_default(),
+                title: t.name,
+                artist: first_artist.map(|a| a.name.clone()).unwrap_or_default(),
+                artist_uri: first_artist.and_then(|a| a.id.clone()).map(|id| id.uri()).unwrap_or_default(),
+                album_uri: t.album.id.clone().map(|id| id.uri()).unwrap_or_default(),
+                album: t.album.name,
+            })
+        }
         PlayableItem::Episode(_) => None,
         // Confirmed live root cause of "queued items don't show up": rspotify's
         // `FullTrack` (used by `#[serde(untagged)]`'s Track arm) requires
@@ -76,7 +81,21 @@ fn lenient_track_from_raw(raw: &serde_json::Value) -> Option<TrackResult> {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    Some(TrackResult { uri, title, artist, album })
+    let artist_uri = raw
+        .get("artists")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|a| a.get("uri"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let album_uri = raw
+        .get("album")
+        .and_then(|v| v.get("uri"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Some(TrackResult { uri, title, artist, album, artist_uri, album_uri })
 }
 
 #[cfg(test)]
@@ -90,8 +109,8 @@ mod lenient_parse_tests {
         // external_ids field, which is exactly what makes FullTrack's
         // strict deserialization fail and land here in the first place.
         let raw = json!({
-            "album": {"name": "Some Album"},
-            "artists": [{"name": "Some Artist"}],
+            "album": {"name": "Some Album", "uri": "spotify:album:xyz"},
+            "artists": [{"name": "Some Artist", "uri": "spotify:artist:xyz"}],
             "disc_number": 1,
             "duration_ms": 200000,
             "explicit": false,
@@ -110,6 +129,8 @@ mod lenient_parse_tests {
         assert_eq!(track.title, "Some Track");
         assert_eq!(track.artist, "Some Artist");
         assert_eq!(track.album, "Some Album");
+        assert_eq!(track.artist_uri, "spotify:artist:xyz");
+        assert_eq!(track.album_uri, "spotify:album:xyz");
     }
 
     #[test]

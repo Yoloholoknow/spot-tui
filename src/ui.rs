@@ -26,6 +26,8 @@ pub enum Screen {
     Help,
     Queue,
     Devices,
+    ArtistDetail,
+    AlbumDetail,
 }
 
 /// Which persistent pane currently receives arrow keys / `Enter`, toggled
@@ -580,6 +582,23 @@ pub struct PlaylistDetailState {
     pub move_mode: Option<usize>,
 }
 
+/// Phase 9, read-only, no filter/sort/pin concept -- just enough state
+/// to show one artist's albums and remember which real artist this is,
+/// so a stale in-flight fetch from an artist backed out of can't
+/// overwrite whichever one is showing now (same guard idiom
+/// `PlaylistDetailState` already uses).
+pub struct ArtistDetailState {
+    pub artist_uri: String,
+    pub detail: Fetch<crate::api::artist::ArtistDetail>,
+    pub selected: usize,
+}
+
+pub struct AlbumDetailState {
+    pub album_uri: String,
+    pub detail: Fetch<crate::api::album::AlbumDetail>,
+    pub selected: usize,
+}
+
 // Phase 5's transient overlays (name prompt, yes/no confirm, playlist
 // picker) live as sibling `Option<_>` fields on `AppState` rather than
 // new `Screen` stack variants -- `Screen::Help`'s own addition (the most
@@ -648,7 +667,15 @@ pub struct PendingConfirm {
 
 pub enum ConfirmAction {
     DeletePlaylist(crate::api::library::PlaylistSummary),
-    RemoveTrack { playlist_uri: String, track_uri: String },
+    RemoveTrack { playlist_uri: String, track_uri: String, occurrences: usize },
+    /// Confirmed past the "this playlist already has this track" warning
+    /// -- adds it anyway, the exact same call `TrackAdded`'s normal path
+    /// uses, just reached from the confirm overlay instead of directly.
+    AddTrackAnyway { playlist_uri: String, track_uri: String },
+    /// `q`, when `Config::confirm_quit` is on -- the one confirm action
+    /// that doesn't mutate anything, just tells the main loop to actually
+    /// exit once confirmed.
+    Quit,
 }
 
 /// The add-to-playlist picker (`a`). Lists `app.library.playlists`,
@@ -659,6 +686,17 @@ pub enum ConfirmAction {
 pub struct PlaylistPicker {
     pub track_uri: String,
     pub selected: usize,
+    /// Always live -- unlike the list screens' `/`-to-start-editing
+    /// convention, the picker has no other letter-key action competing
+    /// for space, so every printable character narrows it immediately,
+    /// no explicit "start editing" step needed. `editing`/`sort_alpha`
+    /// go unused here; reusing `ListFilter` wholesale (rather than a
+    /// bespoke query+cursor pair) is what gets `filtered_sorted` for
+    /// free. Reported live as needed once a real account had enough
+    /// playlists that scrolling to find one by hand was real friction --
+    /// originally scoped out on the assumption the list would stay
+    /// short.
+    pub filter: ListFilter,
 }
 
 #[cfg(test)]
@@ -1171,6 +1209,8 @@ pub struct AppState {
     pub queue: QueueState,
     pub devices: DevicesState,
     pub playlist_detail: Option<PlaylistDetailState>,
+    pub artist_detail: Option<ArtistDetailState>,
+    pub album_detail: Option<AlbumDetailState>,
     pub pinned_playlists: std::collections::HashSet<String>,
     pub pinned_tracks: std::collections::HashSet<String>,
     /// Phase 5's transient overlays -- see the doc comment above
@@ -1218,6 +1258,8 @@ pub struct ScrollState {
     pub playlist_picker: ListState,
     pub queue: ListState,
     pub devices: ListState,
+    pub artist_detail: ListState,
+    pub album_detail: ListState,
 }
 
 pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState) {
@@ -1287,6 +1329,8 @@ pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState) {
         Screen::Help => render_help(frame, main_area),
         Screen::Queue => render_queue(frame, app, &mut scroll.queue, main_area),
         Screen::Devices => render_devices(frame, app, &mut scroll.devices, main_area),
+        Screen::ArtistDetail => render_artist_detail(frame, app, &mut scroll.artist_detail, main_area),
+        Screen::AlbumDetail => render_album_detail(frame, app, &mut scroll.album_detail, main_area),
     }
     render_playbar(frame, app, playbar_area);
     render_status(frame, app, status_area);
@@ -1339,16 +1383,77 @@ fn render_text_prompt_overlay(frame: &mut Frame, prompt: &TextPrompt) {
     );
 }
 
+/// Greedy word-wrap line count, matching `Paragraph`'s own `Wrap` behavior
+/// closely enough to size the box correctly -- there's no way to ask
+/// ratatui how many lines a `Paragraph` will wrap to before rendering it,
+/// so this has to be predicted separately.
+fn wrapped_line_count(text: &str, width: u16) -> u16 {
+    let width = width.max(1) as usize;
+    let mut lines: u16 = 1;
+    let mut current = 0usize;
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        if current == 0 {
+            current = word_len;
+        } else if current + 1 + word_len <= width {
+            current += 1 + word_len;
+        } else {
+            lines += 1;
+            current = word_len;
+        }
+    }
+    lines.max(1)
+}
+
 fn render_confirm_overlay(frame: &mut Frame, confirm: &PendingConfirm) {
-    let width = (confirm.message.chars().count() as u16 + 4).clamp(24, 60);
-    let area = centered_rect(frame.area(), width, 3);
+    let frame_area = frame.area();
+    // Fixed at a max of 60 cols with no wrapping originally -- fine for
+    // short messages ("Quit spot-tui? y/n") but the newer, longer ones
+    // (duplicate-track warnings naming both the track and the playlist)
+    // ran off both edges of the box with no way to read the rest,
+    // reported live as "completely cutoff." Now wraps, and the box grows
+    // to fit however many lines that takes instead of assuming one.
+    let max_width = frame_area.width.saturating_sub(4).clamp(24, 70);
+    let width = (confirm.message.chars().count() as u16 + 4).clamp(24, max_width);
+    let inner_width = width.saturating_sub(2);
+    let height = (wrapped_line_count(&confirm.message, inner_width) + 2).min(frame_area.height);
+    let area = centered_rect(frame_area, width, height);
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(confirm.message.clone())
             .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
             .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Red))),
         area,
     );
+}
+
+#[cfg(test)]
+mod confirm_overlay_tests {
+    use super::*;
+
+    #[test]
+    fn short_message_fits_on_one_line() {
+        assert_eq!(wrapped_line_count("Quit spot-tui? y/n", 60), 1);
+    }
+
+    #[test]
+    fn long_message_wraps_to_the_expected_number_of_lines() {
+        // 5 words of 4 chars each ("aaaa" x5) at width 10 fits "aaaa aaaa"
+        // (9 chars) per line, one word per line beyond that -- 3 lines.
+        let text = "aaaa aaaa aaaa aaaa aaaa";
+        assert_eq!(wrapped_line_count(text, 10), 3);
+    }
+
+    #[test]
+    fn a_word_longer_than_the_width_still_counts_as_one_line() {
+        assert_eq!(wrapped_line_count("supercalifragilisticexpialidocious", 10), 1);
+    }
+
+    #[test]
+    fn empty_message_is_one_line_not_zero() {
+        assert_eq!(wrapped_line_count("", 20), 1);
+    }
 }
 
 /// Reuses `render_display_list` (the same helper every other list in the
@@ -1362,33 +1467,45 @@ fn render_playlist_picker_overlay(
     picker: &PlaylistPicker,
     list_state: &mut ListState,
 ) {
-    let area = centered_rect(frame.area(), 40, 12);
+    let area = centered_rect(frame.area(), 40, 13);
     frame.render_widget(Clear, area);
     let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(ACCENT)).title("Add to playlist");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let chunks =
+        Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(1)]).split(inner);
+    // Trailing cursor only, same as every other ListFilter-backed field --
+    // this one is always "editing," there's no separate committed state.
+    frame.render_widget(Paragraph::new(format!("/{}\u{2588}", picker.filter.query)), chunks[0]);
+
     let label = |p: &crate::api::library::PlaylistSummary| p.name.clone();
     match &app.library.playlists {
         Fetch::NotStarted | Fetch::Loading => {
-            frame.render_widget(Paragraph::new("loading\u{2026}"), inner);
+            frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
         }
         Fetch::Failed(e) => {
-            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), inner);
+            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), chunks[1]);
         }
         Fetch::Ready(items) if items.is_empty() => {
-            frame.render_widget(Paragraph::new("no playlists yet -- press c to create one"), inner);
+            frame.render_widget(Paragraph::new("no playlists yet -- press c to create one"), chunks[1]);
         }
         Fetch::Ready(items) => {
             let ordered =
-                pinned_first(filtered_sorted(items, &ListFilter::default(), &label), &app.pinned_playlists, |p| {
-                    p.uri.as_str()
-                });
+                pinned_first(filtered_sorted(items, &picker.filter, &label), &app.pinned_playlists, |p| p.uri.as_str());
             let pin_label = |p: &crate::api::library::PlaylistSummary| {
                 let marker = if app.pinned_playlists.contains(&p.uri) { "* " } else { "  " };
                 format!("{marker}{}", label(p))
             };
-            render_display_list(frame, inner, &ordered, picker.selected, &pin_label, false, list_state);
+            render_display_list(
+                frame,
+                chunks[1],
+                &ordered,
+                picker.selected,
+                &pin_label,
+                picker.filter.query.is_empty(),
+                list_state,
+            );
         }
     }
 }
@@ -1408,10 +1525,21 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("Tab", "switch focus between Sidebar and Main"),
             ("Esc", "back one level; at the root, focus moves to Sidebar"),
             ("?", "this screen (not while typing in Search or a filter)"),
-            ("q / Ctrl+C", "quit (not while typing in Search)"),
+            (
+                "q",
+                "quit -- asks \"Quit spot-tui? y/n\" first by default; set confirm_quit = false in config.toml for immediate quit (not while typing in Search)",
+            ),
+            (
+                "Ctrl+C",
+                "quit immediately, never confirms -- a harder interrupt than q, by convention (not while typing in Search)",
+            ),
             ("Space / n / p / + / -", "play-pause / next / previous / volume -- works from any screen, including while browsing a list, not just Now Playing (not while typing in Search)"),
             ("/", "jump to Search (Sidebar, Now Playing) or open a list's filter"),
             ("l", "jump to Library"),
+            (
+                "f",
+                "fullscreen Now Playing/lyrics -- jumps there from anywhere; toggles off if already there",
+            ),
         ],
     ),
     (
@@ -1419,7 +1547,6 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("\u{2190} / \u{2192}", "seek \u{00b1}5s"),
             ("\u{2191} / \u{2193}", "volume (same as +/-)"),
-            ("f", "toggle fullscreen"),
         ],
     ),
     (
@@ -1465,6 +1592,10 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "add a track to a playlist (opens the picker) -- Liked Songs, Playlist Detail, and Now Playing (the currently playing track)",
             ),
             (
+                "(duplicate check)",
+                "the picker warns and asks first if the target playlist already has that track, rather than silently adding a second copy",
+            ),
+            (
                 "m",
                 "reorder tracks (Playlist Detail only) -- requires no filter/sort active; pinned tracks are fine",
             ),
@@ -1490,6 +1621,45 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Artist Detail (Followed Artists, or `v`/Ctrl+\u{2192} from a track)",
+        &[
+            ("\u{2191} / \u{2193}", "move selection among the artist's albums"),
+            ("Enter / \u{2192}", "open the selected album"),
+            (
+                "(no top tracks)",
+                "Spotify removed the artist-top-tracks endpoint -- not something this app is choosing to skip",
+            ),
+        ],
+    ),
+    (
+        "Album Detail (Saved Albums, an artist's album list, or `v` from a track)",
+        &[
+            ("\u{2191} / \u{2193}", "move selection among the album's tracks"),
+            ("Enter", "play the album as context, starting from the selected track"),
+            ("a", "add the selected track to a playlist"),
+            ("v", "view this album's artist"),
+        ],
+    ),
+    (
+        "View an item's artist/album",
+        &[
+            (
+                "v",
+                "open the selected track's album -- Liked Songs, Playlist Detail, Queue (on Album Detail, opens the album's own artist instead -- there's no separate album to open from inside one)",
+            ),
+            ("Shift+V", "open the selected track's artist -- Liked Songs, Playlist Detail, Queue"),
+            (
+                "Ctrl+\u{2192} / Alt+\u{2192}",
+                "open the selected result's album / artist -- Search only (plain letters all type into the query box there)",
+            ),
+            (
+                "Ctrl+\u{2193}",
+                "add the selected result to a playlist -- Search only, opens the picker without needing to play or leave first",
+            ),
+            ("Enter / \u{2192}", "open the album from Saved Albums; open the artist from Followed Artists"),
+        ],
+    ),
+    (
         "Move mode (Playlist Detail, after `m`)",
         &[
             ("\u{2191} / \u{2193}", "relocate the track one slot at a time, locally -- no network call per keystroke"),
@@ -1503,8 +1673,13 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("Enter", "prompt: submit. picker: add to the selected playlist. confirm: same as y"),
             ("y / n", "confirm: y does it, n cancels"),
             ("Esc", "cancel and close, no exceptions"),
-            ("\u{2190} / \u{2192}", "prompt: move the cursor within the text"),
+            ("\u{2190} / \u{2192}", "prompt: move the cursor within the text. picker: move the cursor within its filter"),
             ("\u{2191} / \u{2193}", "picker: move the selected playlist"),
+            (
+                "any letter/number",
+                "picker: narrows the list by name -- always live, no separate key to start typing",
+            ),
+            ("Backspace", "picker: delete the character before the cursor in its filter"),
         ],
     ),
     (
@@ -1737,6 +1912,76 @@ fn render_devices(frame: &mut Frame, app: &AppState, list_state: &mut ListState,
             };
             let display: Vec<(usize, &crate::api::devices::DeviceSummary)> = items.iter().enumerate().collect();
             render_display_list(frame, chunks[1], &display, app.devices.selected, &label, true, list_state);
+        }
+    }
+}
+
+/// Artist Detail (Phase 9): name + genres in the header, a plain list of
+/// albums below. No top-tracks section -- see `api::artist`'s own doc
+/// comment for why (Spotify removed that endpoint).
+fn render_artist_detail(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
+    let Some(state) = &app.artist_detail else {
+        frame.render_widget(Paragraph::new("no artist selected"), area);
+        return;
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+    match &state.detail {
+        Fetch::NotStarted | Fetch::Loading => {
+            frame.render_widget(Paragraph::new("loading\u{2026}").style(Style::default().add_modifier(Modifier::BOLD)), chunks[0]);
+            frame.render_widget(Paragraph::new(""), chunks[1]);
+        }
+        Fetch::Failed(e) => {
+            frame.render_widget(Paragraph::new("Artist").style(Style::default().add_modifier(Modifier::BOLD)), chunks[0]);
+            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), chunks[1]);
+        }
+        Fetch::Ready(artist) => {
+            let genres = if artist.genres.is_empty() { String::new() } else { format!("  ({})", artist.genres.join(", ")) };
+            frame.render_widget(
+                Paragraph::new(format!("{}{genres}", artist.name)).style(Style::default().add_modifier(Modifier::BOLD)),
+                chunks[0],
+            );
+            let label = |a: &crate::api::library::SavedAlbumSummary| a.name.clone();
+            let display: Vec<(usize, &crate::api::library::SavedAlbumSummary)> =
+                artist.albums.iter().enumerate().collect();
+            render_display_list(frame, chunks[1], &display, state.selected, &label, true, list_state);
+        }
+    }
+}
+
+/// Album Detail (Phase 9): name + artist in the header, the track list
+/// below -- `Enter` plays the album as context starting from the
+/// selected track, same convention `render_playlist_detail` already
+/// established.
+fn render_album_detail(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
+    let Some(state) = &app.album_detail else {
+        frame.render_widget(Paragraph::new("no album selected"), area);
+        return;
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+    match &state.detail {
+        Fetch::NotStarted | Fetch::Loading => {
+            frame.render_widget(Paragraph::new("loading\u{2026}").style(Style::default().add_modifier(Modifier::BOLD)), chunks[0]);
+            frame.render_widget(Paragraph::new(""), chunks[1]);
+        }
+        Fetch::Failed(e) => {
+            frame.render_widget(Paragraph::new("Album").style(Style::default().add_modifier(Modifier::BOLD)), chunks[0]);
+            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), chunks[1]);
+        }
+        Fetch::Ready(album) => {
+            frame.render_widget(
+                Paragraph::new(format!("{}  \u{2014}  {} (v: view artist)", album.name, album.artist))
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
+                chunks[0],
+            );
+            let label = |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title);
+            let display: Vec<(usize, &TrackResult)> = album.tracks.iter().enumerate().collect();
+            render_display_list(frame, chunks[1], &display, state.selected, &label, true, list_state);
         }
     }
 }

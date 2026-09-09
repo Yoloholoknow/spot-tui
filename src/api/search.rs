@@ -14,6 +14,15 @@ pub struct TrackResult {
     pub title: String,
     pub artist: String,
     pub album: String,
+    /// Added for Phase 9 (Artist/Album Detail) -- `#[serde(default)]` so
+    /// a search-cache entry written before this field existed still
+    /// deserializes (as empty strings) instead of being treated as
+    /// corrupt and discarded outright; the 1-hour cache TTL means a
+    /// stale-shaped entry ages out on its own regardless.
+    #[serde(default)]
+    pub artist_uri: String,
+    #[serde(default)]
+    pub album_uri: String,
 }
 
 /// Tier 4: search/metadata response caching. Directly reduces Web API
@@ -88,6 +97,8 @@ mod cache_tests {
             title: title.to_string(),
             artist: "A".to_string(),
             album: "B".to_string(),
+            artist_uri: "spotify:artist:a".to_string(),
+            album_uri: "spotify:album:b".to_string(),
         }
     }
 
@@ -175,7 +186,14 @@ mod relevance_tests {
     use super::*;
 
     fn track(uri: &str) -> TrackResult {
-        TrackResult { uri: uri.to_string(), title: uri.to_string(), artist: "A".to_string(), album: "B".to_string() }
+        TrackResult {
+            uri: uri.to_string(),
+            title: uri.to_string(),
+            artist: "A".to_string(),
+            album: "B".to_string(),
+            artist_uri: "spotify:artist:a".to_string(),
+            album_uri: "spotify:album:b".to_string(),
+        }
     }
 
     #[test]
@@ -232,11 +250,16 @@ async fn run_query(client: &AuthCodeSpotify, query: &str, limit: u32) -> ClientR
     Ok(page
         .items
         .into_iter()
-        .map(|t| TrackResult {
-            uri: t.id.map(|id| id.uri()).unwrap_or_default(),
-            title: t.name,
-            artist: t.artists.first().map(|a| a.name.clone()).unwrap_or_default(),
-            album: t.album.name,
+        .map(|t| {
+            let first_artist = t.artists.first();
+            TrackResult {
+                uri: t.id.map(|id| id.uri()).unwrap_or_default(),
+                title: t.name,
+                artist: first_artist.map(|a| a.name.clone()).unwrap_or_default(),
+                artist_uri: first_artist.and_then(|a| a.id.clone()).map(|id| id.uri()).unwrap_or_default(),
+                album_uri: t.album.id.clone().map(|id| id.uri()).unwrap_or_default(),
+                album: t.album.name,
+            }
         })
         .collect())
 }

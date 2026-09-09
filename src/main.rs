@@ -28,9 +28,9 @@ use rspotify::AuthCodeSpotify;
 use api::library::{FollowedArtist, PlaylistSummary, SavedAlbumSummary};
 use api::search::TrackResult;
 use ui::{
-    filtered_sorted, pinned_first, AppState, ConfirmAction, Fetch, Focus, LibraryState, ListFilter, LyricsState,
-    Nav, PendingConfirm, PlaylistDetailState, PlaylistPicker, Screen, SearchState, TextPrompt, TextPromptAction,
-    LIBRARY_ENTRIES,
+    filtered_sorted, pinned_first, AlbumDetailState, AppState, ArtistDetailState, ConfirmAction, Fetch, Focus,
+    LibraryState, ListFilter, LyricsState, Nav, PendingConfirm, PlaylistDetailState, PlaylistPicker, Screen,
+    SearchState, TextPrompt, TextPromptAction, LIBRARY_ENTRIES,
 };
 
 enum LibraryFetchResult {
@@ -44,6 +44,8 @@ enum LibraryFetchResult {
     },
     Queue(Result<api::queue::QueueSummary, String>),
     Devices(Result<Vec<api::devices::DeviceSummary>, String>),
+    ArtistDetail { artist_uri: String, result: Result<api::artist::ArtistDetail, String> },
+    AlbumDetail { album_uri: String, result: Result<api::album::AlbumDetail, String> },
 }
 
 /// Results of Phase 5's mutating calls, following the exact same
@@ -56,7 +58,12 @@ enum CrudResult {
     PlaylistRenamed { playlist_uri: String, new_name: String, result: Result<(), String> },
     PlaylistDeleted { playlist_uri: String, result: Result<(), String> },
     TrackAdded { playlist_uri: String, result: Result<(), String> },
-    TrackRemoved { playlist_uri: String, result: Result<(), String> },
+    /// The picker's target playlist already contains this track (checked
+    /// live before adding, not assumed) -- carries a ready-made message
+    /// so the main loop just has to show it, not re-derive the track's
+    /// name from a bare URI.
+    PlaylistAlreadyHasTrack { playlist_uri: String, track_uri: String, message: String },
+    TrackRemoved { playlist_uri: String, occurrences: usize, result: Result<(), String> },
     TrackReordered { playlist_uri: String, result: Result<(), String> },
     DeviceTransferred(Result<(), String>),
 }
@@ -157,6 +164,24 @@ fn tmux_toggle_zoom() {
     }
 }
 
+/// `f`, made universal (every screen except Search, same standing
+/// exception every other universal key already has -- every printable
+/// character there has to reach the query box). Already on Now Playing:
+/// toggles fullscreen in place, same as always. Anywhere else: jumps
+/// straight to the fullscreen Now Playing/lyrics view rather than merely
+/// flipping a flag that would have no visible effect until Now Playing
+/// was reached some other way -- reported live as wanted ("fullscreen
+/// lyric view should be global").
+fn toggle_or_enter_fullscreen(app: &mut AppState) {
+    if *app.nav.top() == Screen::NowPlaying {
+        app.fullscreen = !app.fullscreen;
+    } else {
+        app.fullscreen = true;
+        app.nav.goto(Screen::NowPlaying);
+    }
+    tmux_toggle_zoom();
+}
+
 /// While move-mode is active, `pd.selected` is a raw array index (see
 /// `render_playlist_detail`'s doc comment on why pinned-first bubbling is
 /// skipped during a move). This finds where `real_index` lands in the
@@ -248,6 +273,31 @@ fn refetch_playlists(
     }
 }
 
+/// Locally adjusts a playlist's `track_count` by `delta`, both in the
+/// library-wide list (Your Playlists/Sidebar) and in Playlist Detail's
+/// own copy if it's the one currently open. Applied immediately after a
+/// successful add/remove instead of trusting a refetch to reflect it --
+/// a refetch was tried first and reported still showing the stale count.
+/// Confirmed via the request log that the refetch really was firing
+/// immediately after the add (not a wiring bug), so this isn't a client
+/// bug being covered up: Spotify's own `/me/playlists` response just
+/// doesn't necessarily reflect a write completed a moment earlier,
+/// within the same request-response round trip a refetch fires in. This
+/// also sidesteps the refetch briefly flashing the whole list to
+/// "loading..." for what should be a single-number update.
+fn bump_track_count(app: &mut AppState, playlist_uri: &str, delta: i64) {
+    if let Fetch::Ready(items) = &mut app.library.playlists {
+        if let Some(p) = items.iter_mut().find(|p| p.uri == playlist_uri) {
+            p.track_count = (p.track_count as i64 + delta).max(0) as u32;
+        }
+    }
+    if let Some(pd) = &mut app.playlist_detail {
+        if pd.playlist.uri == playlist_uri {
+            pd.playlist.track_count = (pd.playlist.track_count as i64 + delta).max(0) as u32;
+        }
+    }
+}
+
 /// Shared by entering the Devices screen and by a successful transfer
 /// (to move the active-device marker) -- the second concrete case that
 /// justifies pulling this out rather than duplicating the spawn body.
@@ -286,6 +336,71 @@ fn open_playlist_detail(
     refetch_playlist_tracks(app, library_tx, spotify_client, playlist_uri);
 }
 
+/// Opens Artist Detail on `artist_uri` (Phase 9) and kicks off its fetch.
+/// Reachable from Followed Artists, Search results, Liked Songs, Playlist
+/// Detail, Queue, and Album Detail -- every one of those just needs an
+/// artist URI, so they all funnel through this one function rather than
+/// each spawning the fetch themselves.
+fn open_artist_detail(
+    app: &mut AppState,
+    library_tx: &mpsc::Sender<LibraryFetchResult>,
+    spotify_client: &Option<AuthCodeSpotify>,
+    artist_uri: String,
+) {
+    if artist_uri.is_empty() {
+        app.status = Some(("no artist info for this track".to_string(), true));
+        return;
+    }
+    app.nav.push(Screen::ArtistDetail);
+    app.artist_detail = Some(ArtistDetailState { artist_uri: artist_uri.clone(), detail: Fetch::Loading, selected: 0 });
+    match spotify_client.clone() {
+        Some(client) => {
+            let tx = library_tx.clone();
+            let uri_for_task = artist_uri.clone();
+            tokio::spawn(async move {
+                let result = api::artist::get_artist_detail(&client, &uri_for_task).await;
+                let _ = tx.send(LibraryFetchResult::ArtistDetail { artist_uri: uri_for_task, result });
+            });
+        }
+        None => {
+            if let Some(state) = &mut app.artist_detail {
+                state.detail = Fetch::Failed("Spotify client not ready yet".into());
+            }
+        }
+    }
+}
+
+/// Opens Album Detail on `album_uri` (Phase 9) and kicks off its fetch.
+/// Reachable from Saved Albums and from Artist Detail's own album list.
+fn open_album_detail(
+    app: &mut AppState,
+    library_tx: &mpsc::Sender<LibraryFetchResult>,
+    spotify_client: &Option<AuthCodeSpotify>,
+    album_uri: String,
+) {
+    if album_uri.is_empty() {
+        app.status = Some(("no album info for this track".to_string(), true));
+        return;
+    }
+    app.nav.push(Screen::AlbumDetail);
+    app.album_detail = Some(AlbumDetailState { album_uri: album_uri.clone(), detail: Fetch::Loading, selected: 0 });
+    match spotify_client.clone() {
+        Some(client) => {
+            let tx = library_tx.clone();
+            let uri_for_task = album_uri.clone();
+            tokio::spawn(async move {
+                let result = api::album::get_album_detail(&client, &uri_for_task).await;
+                let _ = tx.send(LibraryFetchResult::AlbumDetail { album_uri: uri_for_task, result });
+            });
+        }
+        None => {
+            if let Some(state) = &mut app.album_detail {
+                state.detail = Fetch::Failed("Spotify client not ready yet".into());
+            }
+        }
+    }
+}
+
 /// A physical Shift+<letter>: matches the literal uppercase char (how
 /// most terminals report it) as well as lowercase-plus-SHIFT-modifier
 /// (how some terminals/configurations report it instead). Originally
@@ -304,17 +419,25 @@ fn is_pin_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
 
 /// Fires the mutation behind a confirmed `ConfirmAction`. Split out of
 /// `handle_confirm_key` so the "no client yet" bail-out is written once.
+/// Returns whether the caller should actually quit -- `ConfirmAction::Quit`
+/// needs no client and can't spawn anything, it just tells the main loop
+/// to break its event loop once confirmed (a labeled `break` can't cross
+/// a function boundary, so this is the only way that signal gets back).
 fn fire_confirm_action(
     app: &mut AppState,
     action: ConfirmAction,
     crud_tx: &mpsc::Sender<CrudResult>,
     spotify_client: &Option<AuthCodeSpotify>,
-) {
+) -> bool {
+    if matches!(action, ConfirmAction::Quit) {
+        return true;
+    }
     let Some(client) = spotify_client.clone() else {
         app.status = Some(("Spotify client not ready yet".to_string(), true));
-        return;
+        return false;
     };
     match action {
+        ConfirmAction::Quit => unreachable!("handled above"),
         ConfirmAction::DeletePlaylist(playlist) => {
             app.status = Some((format!("deleting \"{}\"\u{2026}", playlist.name), false));
             let tx = crud_tx.clone();
@@ -324,41 +447,54 @@ fn fire_confirm_action(
                 let _ = tx.send(CrudResult::PlaylistDeleted { playlist_uri, result });
             });
         }
-        ConfirmAction::RemoveTrack { playlist_uri, track_uri } => {
+        ConfirmAction::RemoveTrack { playlist_uri, track_uri, occurrences } => {
             app.status = Some(("removing track\u{2026}".to_string(), false));
             let tx = crud_tx.clone();
             let playlist_uri_for_result = playlist_uri.clone();
             tokio::spawn(async move {
                 let result = api::playlists::remove_track(&client, &playlist_uri, &track_uri).await;
-                let _ = tx.send(CrudResult::TrackRemoved { playlist_uri: playlist_uri_for_result, result });
+                let _ = tx.send(CrudResult::TrackRemoved { playlist_uri: playlist_uri_for_result, occurrences, result });
+            });
+        }
+        ConfirmAction::AddTrackAnyway { playlist_uri, track_uri } => {
+            app.status = Some(("adding to playlist\u{2026}".to_string(), false));
+            let tx = crud_tx.clone();
+            let playlist_uri_for_result = playlist_uri.clone();
+            tokio::spawn(async move {
+                let result = api::playlists::add_track(&client, &playlist_uri, &track_uri).await;
+                let _ = tx.send(CrudResult::TrackAdded { playlist_uri: playlist_uri_for_result, result });
             });
         }
     }
+    false
 }
 
 /// `y` confirms and fires the mutation; `n`/`Esc` cancels; every other
 /// key is swallowed without touching or dismissing the dialog -- an
 /// arbitrary keypress shouldn't accidentally confirm or cancel a
 /// destructive action.
+/// Returns whether the caller should break its event loop and quit.
 fn handle_confirm_key(
     app: &mut AppState,
     code: KeyCode,
     crud_tx: &mpsc::Sender<CrudResult>,
     spotify_client: &Option<AuthCodeSpotify>,
-) {
+) -> bool {
     match code {
         // Enter as a synonym for `y` -- reported live as wanted, matches
         // `Enter`'s standing role elsewhere in the app as the one
         // universal "confirm/activate" key.
         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
             if let Some(confirm) = app.pending_confirm.take() {
-                fire_confirm_action(app, confirm.action, crud_tx, spotify_client);
+                return fire_confirm_action(app, confirm.action, crud_tx, spotify_client);
             }
+            false
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
             app.pending_confirm = None;
+            false
         }
-        _ => {}
+        _ => false,
     }
 }
 
@@ -438,6 +574,16 @@ fn handle_picker_key(
     crud_tx: &mpsc::Sender<CrudResult>,
     spotify_client: &Option<AuthCodeSpotify>,
 ) {
+    let count = |app: &AppState| match &app.library.playlists {
+        Fetch::Ready(items) => {
+            let label = |p: &PlaylistSummary| p.name.clone();
+            app.playlist_picker
+                .as_ref()
+                .map(|picker| filtered_sorted(items, &picker.filter, &label).len())
+                .unwrap_or(0)
+        }
+        _ => 0,
+    };
     match code {
         KeyCode::Esc => {
             app.playlist_picker = None;
@@ -448,42 +594,91 @@ fn handle_picker_key(
             }
         }
         KeyCode::Down => {
-            let count = match &app.library.playlists {
-                Fetch::Ready(items) => items.len(),
-                _ => 0,
-            };
+            let count = count(app);
             if let Some(picker) = &mut app.playlist_picker {
                 if count > 0 {
                     picker.selected = (picker.selected + 1).min(count - 1);
                 }
             }
         }
+        KeyCode::Left => {
+            if let Some(picker) = &mut app.playlist_picker {
+                picker.filter.cursor_left();
+            }
+        }
+        KeyCode::Right => {
+            if let Some(picker) = &mut app.playlist_picker {
+                picker.filter.cursor_right();
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(picker) = &mut app.playlist_picker {
+                picker.filter.backspace_at_cursor();
+                picker.selected = 0;
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(picker) = &mut app.playlist_picker {
+                picker.filter.insert_at_cursor(c);
+                picker.selected = 0;
+            }
+        }
         KeyCode::Enter => {
             let label = |p: &PlaylistSummary| p.name.clone();
-            let picked_playlist_uri = match &app.library.playlists {
+            let picked_playlist = match &app.library.playlists {
                 Fetch::Ready(items) => {
-                    let ordered =
-                        pinned_first(filtered_sorted(items, &ListFilter::default(), &label), &app.pinned_playlists, |p| {
+                    let ordered = app.playlist_picker.as_ref().map(|picker| {
+                        pinned_first(filtered_sorted(items, &picker.filter, &label), &app.pinned_playlists, |p| {
                             p.uri.as_str()
-                        });
-                    app.playlist_picker
-                        .as_ref()
-                        .and_then(|picker| ordered.get(picker.selected).map(|&(_, p)| p.uri.clone()))
+                        })
+                    });
+                    ordered.and_then(|ordered| {
+                        app.playlist_picker
+                            .as_ref()
+                            .and_then(|picker| ordered.get(picker.selected).map(|&(_, p)| (p.uri.clone(), p.name.clone())))
+                    })
                 }
                 _ => None,
             };
             let Some(picker) = app.playlist_picker.take() else { return };
-            let Some(playlist_uri) = picked_playlist_uri else { return };
+            let Some((playlist_uri, playlist_name)) = picked_playlist else { return };
             let Some(client) = spotify_client.clone() else {
                 app.status = Some(("Spotify client not ready yet".to_string(), true));
                 return;
             };
             app.status = Some(("adding to playlist\u{2026}".to_string(), false));
             let tx = crud_tx.clone();
-            let playlist_uri_for_result = playlist_uri.clone();
+            let track_uri = picker.track_uri.clone();
             tokio::spawn(async move {
-                let result = api::playlists::add_track(&client, &playlist_uri, &picker.track_uri).await;
-                let _ = tx.send(CrudResult::TrackAdded { playlist_uri: playlist_uri_for_result, result });
+                // Checks membership before adding, rather than warning
+                // after the fact the way `d`'s duplicate-removal warning
+                // has to (removal can't be undone; a would-be duplicate
+                // add can be caught before it ever happens). Fetches the
+                // whole target playlist to do it -- Spotify's Web API has
+                // no "does this playlist contain this URI" endpoint, so
+                // there's no cheaper primitive to check against. Falls
+                // back to adding directly if the fetch itself fails,
+                // rather than blocking the add on a check that couldn't
+                // run.
+                match api::library::playlist_tracks(&client, &playlist_uri).await {
+                    Ok(tracks) => {
+                        if let Some(existing) = tracks.iter().find(|t| t.uri == track_uri) {
+                            let message = format!(
+                                "\"{} \u{2014} {}\" is already in \"{playlist_name}\". Add it again anyway? y/n",
+                                existing.artist, existing.title
+                            );
+                            let _ = tx.send(CrudResult::PlaylistAlreadyHasTrack { playlist_uri, track_uri, message });
+                        } else {
+                            let result = api::playlists::add_track(&client, &playlist_uri, &track_uri).await;
+                            let _ = tx.send(CrudResult::TrackAdded { playlist_uri, result });
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("duplicate check before add_track failed, adding anyway: {e}");
+                        let result = api::playlists::add_track(&client, &playlist_uri, &track_uri).await;
+                        let _ = tx.send(CrudResult::TrackAdded { playlist_uri, result });
+                    }
+                }
             });
         }
         _ => {}
@@ -588,6 +783,20 @@ async fn main() -> std::io::Result<()> {
         }
         return Ok(());
     }
+    // Phase 5's remove_track risk #1 tripwire: reported live (duplicate
+    // track in a playlist, removing one removed both). Checks the
+    // position-scoped removal call actually behaves before switching
+    // remove_track over to it.
+    if std::env::args().any(|a| a == "--spike-remove-occurrence") {
+        let token = api::load_or_refresh_token()
+            .await
+            .map_err(std::io::Error::other)?;
+        let client = api::client_from_token(token).await;
+        if let Err(e) = spike::run_spike_remove_specific_occurrence(&client).await {
+            eprintln!("spike failed: {e}");
+        }
+        return Ok(());
+    }
 
     install_panic_hook();
     // env_logger defaults to stderr -- wrong assumption made earlier that
@@ -662,6 +871,8 @@ async fn main() -> std::io::Result<()> {
         queue: ui::QueueState::new(),
         devices: ui::DevicesState::new(),
         playlist_detail: None,
+        artist_detail: None,
+        album_detail: None,
         pinned_playlists: pins::load("playlists"),
         pinned_tracks: pins::load("tracks"),
         search: SearchState::new(),
@@ -886,6 +1097,22 @@ async fn main() -> std::io::Result<()> {
                 LibraryFetchResult::Devices(result) => {
                     app.devices.fetch = result.map_or_else(Fetch::Failed, Fetch::Ready);
                 }
+                LibraryFetchResult::ArtistDetail { artist_uri, result } => {
+                    // Same staleness guard as PlaylistTracks -- discards a
+                    // fetch for an artist the user has since backed out of.
+                    if let Some(state) = &mut app.artist_detail {
+                        if state.artist_uri == artist_uri {
+                            state.detail = result.map_or_else(Fetch::Failed, Fetch::Ready);
+                        }
+                    }
+                }
+                LibraryFetchResult::AlbumDetail { album_uri, result } => {
+                    if let Some(state) = &mut app.album_detail {
+                        if state.album_uri == album_uri {
+                            state.detail = result.map_or_else(Fetch::Failed, Fetch::Ready);
+                        }
+                    }
+                }
             }
         }
 
@@ -932,6 +1159,10 @@ async fn main() -> std::io::Result<()> {
                 }
                 CrudResult::TrackAdded { playlist_uri, result: Ok(()) } => {
                     app.status = Some(("added to playlist".to_string(), false));
+                    // Local, immediate -- see bump_track_count's own doc
+                    // comment for why a refetch (tried first) isn't reliable
+                    // here. Before consuming playlist_uri below.
+                    bump_track_count(&mut app, &playlist_uri, 1);
                     // Same staleness guard as TrackRemoved -- rare (the
                     // add-to-playlist target is usually a *different*
                     // playlist than whichever one's open), but if they
@@ -944,8 +1175,19 @@ async fn main() -> std::io::Result<()> {
                 CrudResult::TrackAdded { result: Err(e), .. } => {
                     app.status = Some((format!("add to playlist failed: {e}"), true));
                 }
-                CrudResult::TrackRemoved { playlist_uri, result: Ok(()) } => {
+                CrudResult::PlaylistAlreadyHasTrack { playlist_uri, track_uri, message } => {
+                    app.pending_confirm =
+                        Some(PendingConfirm { message, action: ConfirmAction::AddTrackAnyway { playlist_uri, track_uri } });
+                }
+                CrudResult::TrackRemoved { playlist_uri, occurrences, result: Ok(()) } => {
                     app.status = Some(("removed from playlist".to_string(), false));
+                    // remove_track deletes every occurrence in one call
+                    // (see api::playlists::remove_track's own doc comment
+                    // and spike::run_spike_remove_specific_occurrence --
+                    // there's no reliable position-scoped alternative), so
+                    // the count drops by however many copies existed, not
+                    // always 1.
+                    bump_track_count(&mut app, &playlist_uri, -(occurrences as i64));
                     if app.playlist_detail.as_ref().is_some_and(|pd| pd.playlist.uri == playlist_uri) {
                         refetch_playlist_tracks(&mut app, &library_tx, &spotify_client, playlist_uri);
                     }
@@ -1028,7 +1270,9 @@ async fn main() -> std::io::Result<()> {
                 // comment above `ui::TextPrompt` for why these are
                 // sibling `Option`s here rather than `Screen` variants.
                 if app.pending_confirm.is_some() {
-                    handle_confirm_key(&mut app, key.code, &crud_tx, &spotify_client);
+                    if handle_confirm_key(&mut app, key.code, &crud_tx, &spotify_client) {
+                        break 'inner LoopExit::Quit;
+                    }
                 } else if app.text_prompt.is_some() {
                     handle_text_prompt_key(&mut app, key.code, &crud_tx, &spotify_client);
                 } else if app.playlist_picker.is_some() {
@@ -1038,6 +1282,20 @@ async fn main() -> std::io::Result<()> {
                 // literal keystroke a text field might want.
                 } else if key.code == KeyCode::Tab {
                     app.nav.toggle_focus();
+                // `q` asks first, same as every other destructive action,
+                // when enabled (default on; `confirm_quit = false` in
+                // config.toml restores the old immediate-quit behavior).
+                // Excludes Search specifically -- `q` isn't a quit key
+                // there at all, it's a literal character the query box
+                // needs, same standing exception as every other letter.
+                } else if key.code == KeyCode::Char('q')
+                    && cfg.confirm_quit
+                    && !(app.nav.focus == Focus::Main && *app.nav.top() == Screen::Search)
+                {
+                    app.pending_confirm = Some(PendingConfirm {
+                        message: "Quit spot-tui? y/n".to_string(),
+                        action: ConfirmAction::Quit,
+                    });
                 } else if app.nav.focus == Focus::Sidebar {
                     match key.code {
                         KeyCode::Char('q') => break 'inner LoopExit::Quit,
@@ -1053,9 +1311,9 @@ async fn main() -> std::io::Result<()> {
                             // of its own, so Esc then did nothing at all.
                             app.nav.focus = Focus::Main;
                         }
-                        KeyCode::Char('f') if *app.nav.top() == Screen::NowPlaying => {
-                            app.fullscreen = !app.fullscreen;
-                            tmux_toggle_zoom();
+                        KeyCode::Char('f') => {
+                            toggle_or_enter_fullscreen(&mut app);
+                            app.nav.focus = Focus::Main;
                         }
                         KeyCode::Char('/') => {
                             app.nav.goto(Screen::Search);
@@ -1161,11 +1419,41 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Left => {
                                 app.search.cursor_left();
                             }
+                            // Ctrl+Right/Alt+Right, not plain letters -- every
+                            // printable character here has to reach the query box,
+                            // and plain Right already means "move the cursor," so
+                            // these need keys that can't be typed and aren't already
+                            // claimed. Album on Ctrl+Right (matches the `v` = album
+                            // convention elsewhere -- the more common action from a
+                            // plain track), artist on Alt+Right (matches `v`'s
+                            // Shift+V pairing there).
+                            KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                if let Some(track) = app.search.results.get(app.search.selected).cloned() {
+                                    open_album_detail(&mut app, &library_tx, &spotify_client, track.album_uri);
+                                }
+                            }
+                            KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+                                if let Some(track) = app.search.results.get(app.search.selected).cloned() {
+                                    open_artist_detail(&mut app, &library_tx, &spotify_client, track.artist_uri);
+                                }
+                            }
                             KeyCode::Right => {
                                 app.search.cursor_right();
                             }
                             KeyCode::Up => {
                                 app.search.selected = app.search.selected.saturating_sub(1);
+                            }
+                            // Ctrl+Down, not plain `a` -- same reasoning as
+                            // Ctrl+Right/Alt+Right above. This is the "search to add
+                            // to a playlist" flow itself: search normally, land on a
+                            // result, add it without ever having to play it or leave
+                            // Search first. Reported live as still missing even after
+                            // add-to-playlist existed everywhere else a track shows up.
+                            KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                if let Some(track) = app.search.results.get(app.search.selected).cloned() {
+                                    app.playlist_picker =
+                                        Some(PlaylistPicker { track_uri: track.uri, selected: 0, filter: ListFilter::default() });
+                                }
                             }
                             KeyCode::Down => {
                                 if !app.search.results.is_empty() {
@@ -1230,8 +1518,7 @@ async fn main() -> std::io::Result<()> {
                                 app.nav.push(Screen::Help);
                             }
                             KeyCode::Char('f') => {
-                                app.fullscreen = !app.fullscreen;
-                                tmux_toggle_zoom();
+                                toggle_or_enter_fullscreen(&mut app);
                             }
                             KeyCode::Char('/') => {
                                 app.nav.push(Screen::Search);
@@ -1256,7 +1543,7 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Char('a') => {
                                 if let Some(track_id) = tracker.current_track_id() {
                                     app.playlist_picker =
-                                        Some(PlaylistPicker { track_uri: track_id.to_string(), selected: 0 });
+                                        Some(PlaylistPicker { track_uri: track_id.to_string(), selected: 0, filter: ListFilter::default() });
                                 }
                             }
                             KeyCode::Char(' ') => {
@@ -1309,6 +1596,9 @@ async fn main() -> std::io::Result<()> {
                             }
                             KeyCode::Char('-') => {
                                 let _ = spirc.volume_down();
+                            }
+                            KeyCode::Char('f') => {
+                                toggle_or_enter_fullscreen(&mut app);
                             }
                             KeyCode::Char('l') => {
                                 app.nav.goto(Screen::Library);
@@ -1471,6 +1761,9 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Char('-') => {
                                     let _ = spirc.volume_down();
                                 }
+                                KeyCode::Char('f') => {
+                                    toggle_or_enter_fullscreen(&mut app);
+                                }
                                 KeyCode::Char('l') => {
                                     app.nav.goto(Screen::Library);
                                 }
@@ -1507,8 +1800,45 @@ async fn main() -> std::io::Result<()> {
                                             display.get(app.library.liked_songs_selected).map(|&(_, t)| t.clone())
                                         {
                                             app.playlist_picker =
-                                                Some(PlaylistPicker { track_uri: track.uri, selected: 0 });
+                                                Some(PlaylistPicker { track_uri: track.uri, selected: 0, filter: ListFilter::default() });
                                         }
+                                    }
+                                }
+                                // Shift+V (artist) has to be checked before plain `v`
+                                // (album) -- some terminals report Shift+V as lowercase
+                                // 'v' plus a SHIFT modifier flag rather than literal
+                                // uppercase 'V', same encoding gap `is_pin_key`/Shift+D
+                                // already exist for; an unguarded plain-`v` arm placed
+                                // first would swallow that case before this one ever saw it.
+                                KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'V', 'v') => {
+                                    let artist_uri = match &app.library.liked_songs {
+                                        Fetch::Ready(items) => {
+                                            let display = filtered_sorted(items, &app.library.liked_songs_filter, &label);
+                                            display
+                                                .get(app.library.liked_songs_selected)
+                                                .map(|&(_, t)| t.artist_uri.clone())
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(artist_uri) = artist_uri {
+                                        open_artist_detail(&mut app, &library_tx, &spotify_client, artist_uri);
+                                    }
+                                }
+                                // `v` = open this track's album -- the more common
+                                // action from a plain track list. Reported live as
+                                // backwards from the original (artist-on-`v`) design.
+                                KeyCode::Char('v') => {
+                                    let album_uri = match &app.library.liked_songs {
+                                        Fetch::Ready(items) => {
+                                            let display = filtered_sorted(items, &app.library.liked_songs_filter, &label);
+                                            display
+                                                .get(app.library.liked_songs_selected)
+                                                .map(|&(_, t)| t.album_uri.clone())
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(album_uri) = album_uri {
+                                        open_album_detail(&mut app, &library_tx, &spotify_client, album_uri);
                                     }
                                 }
                                 KeyCode::Up => {
@@ -1592,6 +1922,9 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Char('-') => {
                                     let _ = spirc.volume_down();
                                 }
+                                KeyCode::Char('f') => {
+                                    toggle_or_enter_fullscreen(&mut app);
+                                }
                                 KeyCode::Char('l') => {
                                     app.nav.goto(Screen::Library);
                                 }
@@ -1628,6 +1961,23 @@ async fn main() -> std::io::Result<()> {
                                             app.library.saved_albums_selected =
                                                 (app.library.saved_albums_selected + 1).min(display.len() - 1);
                                         }
+                                    }
+                                }
+                                // Pure navigation, no playback -- opening an album
+                                // doesn't play anything.
+                                KeyCode::Enter | KeyCode::Right => {
+                                    let album_uri = match &app.library.saved_albums {
+                                        Fetch::Ready(items) => {
+                                            let display =
+                                                filtered_sorted(items, &app.library.saved_albums_filter, &label);
+                                            display
+                                                .get(app.library.saved_albums_selected)
+                                                .map(|&(_, a)| a.uri.clone())
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(album_uri) = album_uri {
+                                        open_album_detail(&mut app, &library_tx, &spotify_client, album_uri);
                                     }
                                 }
                                 _ => {}
@@ -1679,6 +2029,9 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Char('-') => {
                                     let _ = spirc.volume_down();
                                 }
+                                KeyCode::Char('f') => {
+                                    toggle_or_enter_fullscreen(&mut app);
+                                }
                                 KeyCode::Char('l') => {
                                     app.nav.goto(Screen::Library);
                                 }
@@ -1715,6 +2068,23 @@ async fn main() -> std::io::Result<()> {
                                             app.library.followed_artists_selected =
                                                 (app.library.followed_artists_selected + 1).min(display.len() - 1);
                                         }
+                                    }
+                                }
+                                // Pure navigation, no playback -- opening an artist
+                                // doesn't play anything.
+                                KeyCode::Enter | KeyCode::Right => {
+                                    let artist_uri = match &app.library.followed_artists {
+                                        Fetch::Ready(items) => {
+                                            let display =
+                                                filtered_sorted(items, &app.library.followed_artists_filter, &label);
+                                            display
+                                                .get(app.library.followed_artists_selected)
+                                                .map(|&(_, a)| a.uri.clone())
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(artist_uri) = artist_uri {
+                                        open_artist_detail(&mut app, &library_tx, &spotify_client, artist_uri);
                                     }
                                 }
                                 _ => {}
@@ -1766,6 +2136,9 @@ async fn main() -> std::io::Result<()> {
                                 }
                                 KeyCode::Char('-') => {
                                     let _ = spirc.volume_down();
+                                }
+                                KeyCode::Char('f') => {
+                                    toggle_or_enter_fullscreen(&mut app);
                                 }
                                 KeyCode::Char('l') => {
                                     app.nav.goto(Screen::Library);
@@ -2058,6 +2431,9 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Char('-') => {
                                     let _ = spirc.volume_down();
                                 }
+                                KeyCode::Char('f') => {
+                                    toggle_or_enter_fullscreen(&mut app);
+                                }
                                 KeyCode::Char('l') => {
                                     app.nav.goto(Screen::Library);
                                 }
@@ -2118,14 +2494,34 @@ async fn main() -> std::io::Result<()> {
                                             if let Some((_, track)) = display.get(pd.selected) {
                                                 let track = (*track).clone();
                                                 let playlist_uri = pd.playlist.uri.clone();
-                                                app.pending_confirm = Some(PendingConfirm {
-                                                    message: format!(
+                                                // Spotify's own remove-tracks endpoint has no
+                                                // reliable way to remove just one copy of a
+                                                // duplicated track (spiked both variants --
+                                                // `spike::run_spike_remove_specific_occurrence`
+                                                // -- one removed every copy regardless of the
+                                                // position given, the other silently removed
+                                                // none). Warn honestly rather than surprise
+                                                // the user with a bigger deletion than they
+                                                // asked for.
+                                                let occurrences =
+                                                    items.iter().filter(|t| t.uri == track.uri).count();
+                                                let message = if occurrences > 1 {
+                                                    format!(
+                                                        "\"{} \u{2014} {}\" appears {occurrences} times in this playlist -- Spotify's API can only remove ALL copies at once, not a single one. Remove all {occurrences}? y/n",
+                                                        track.artist, track.title
+                                                    )
+                                                } else {
+                                                    format!(
                                                         "Remove \"{} \u{2014} {}\" from this playlist? y/n",
                                                         track.artist, track.title
-                                                    ),
+                                                    )
+                                                };
+                                                app.pending_confirm = Some(PendingConfirm {
+                                                    message,
                                                     action: ConfirmAction::RemoveTrack {
                                                         playlist_uri,
                                                         track_uri: track.uri,
+                                                        occurrences,
                                                     },
                                                 });
                                             }
@@ -2155,9 +2551,46 @@ async fn main() -> std::io::Result<()> {
                                             );
                                             if let Some((_, track)) = display.get(pd.selected) {
                                                 app.playlist_picker =
-                                                    Some(PlaylistPicker { track_uri: track.uri.clone(), selected: 0 });
+                                                    Some(PlaylistPicker { track_uri: track.uri.clone(), selected: 0, filter: ListFilter::default() });
                                             }
                                         }
+                                    }
+                                }
+                                // Shift+V (artist) before plain `v` (album) -- same
+                                // terminal-encoding reasoning as every other
+                                // is_shift_char guard in this file.
+                                KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'V', 'v') => {
+                                    let artist_uri = app.playlist_detail.as_ref().and_then(|pd| {
+                                        if let Fetch::Ready(items) = &pd.tracks {
+                                            let display = pinned_first(
+                                                filtered_sorted(items, &pd.filter, &label),
+                                                &app.pinned_tracks,
+                                                |t| t.uri.as_str(),
+                                            );
+                                            display.get(pd.selected).map(|&(_, t)| t.artist_uri.clone())
+                                        } else {
+                                            None
+                                        }
+                                    });
+                                    if let Some(artist_uri) = artist_uri {
+                                        open_artist_detail(&mut app, &library_tx, &spotify_client, artist_uri);
+                                    }
+                                }
+                                KeyCode::Char('v') => {
+                                    let album_uri = app.playlist_detail.as_ref().and_then(|pd| {
+                                        if let Fetch::Ready(items) = &pd.tracks {
+                                            let display = pinned_first(
+                                                filtered_sorted(items, &pd.filter, &label),
+                                                &app.pinned_tracks,
+                                                |t| t.uri.as_str(),
+                                            );
+                                            display.get(pd.selected).map(|&(_, t)| t.album_uri.clone())
+                                        } else {
+                                            None
+                                        }
+                                    });
+                                    if let Some(album_uri) = album_uri {
+                                        open_album_detail(&mut app, &library_tx, &spotify_client, album_uri);
                                     }
                                 }
                                 KeyCode::Char(c) if is_pin_key(KeyCode::Char(c), key.modifiers) => {
@@ -2264,6 +2697,9 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Char('-') => {
                                 let _ = spirc.volume_down();
                             }
+                            KeyCode::Char('f') => {
+                                toggle_or_enter_fullscreen(&mut app);
+                            }
                             KeyCode::Char('l') => {
                                 app.nav.goto(Screen::Library);
                             }
@@ -2296,6 +2732,9 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Char('-') => {
                                 let _ = spirc.volume_down();
                             }
+                            KeyCode::Char('f') => {
+                                toggle_or_enter_fullscreen(&mut app);
+                            }
                             KeyCode::Char('l') => {
                                 app.nav.goto(Screen::Library);
                             }
@@ -2326,8 +2765,30 @@ async fn main() -> std::io::Result<()> {
                                 if let Fetch::Ready(summary) = &app.queue.fetch {
                                     if let Some(track) = summary.queue.get(app.queue.selected) {
                                         app.playlist_picker =
-                                            Some(PlaylistPicker { track_uri: track.uri.clone(), selected: 0 });
+                                            Some(PlaylistPicker { track_uri: track.uri.clone(), selected: 0, filter: ListFilter::default() });
                                     }
+                                }
+                            }
+                            KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'V', 'v') => {
+                                let artist_uri = match &app.queue.fetch {
+                                    Fetch::Ready(summary) => {
+                                        summary.queue.get(app.queue.selected).map(|t| t.artist_uri.clone())
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(artist_uri) = artist_uri {
+                                    open_artist_detail(&mut app, &library_tx, &spotify_client, artist_uri);
+                                }
+                            }
+                            KeyCode::Char('v') => {
+                                let album_uri = match &app.queue.fetch {
+                                    Fetch::Ready(summary) => {
+                                        summary.queue.get(app.queue.selected).map(|t| t.album_uri.clone())
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(album_uri) = album_uri {
+                                    open_album_detail(&mut app, &library_tx, &spotify_client, album_uri);
                                 }
                             }
                             _ => {}
@@ -2354,6 +2815,9 @@ async fn main() -> std::io::Result<()> {
                             }
                             KeyCode::Char('-') => {
                                 let _ = spirc.volume_down();
+                            }
+                            KeyCode::Char('f') => {
+                                toggle_or_enter_fullscreen(&mut app);
                             }
                             KeyCode::Char('l') => {
                                 app.nav.goto(Screen::Library);
@@ -2393,6 +2857,164 @@ async fn main() -> std::io::Result<()> {
                                         });
                                     } else {
                                         app.status = Some(("Spotify client not ready yet".to_string(), true));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        },
+                        Screen::ArtistDetail => match key.code {
+                            KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                break 'inner LoopExit::Quit
+                            }
+                            KeyCode::Char('?') => {
+                                app.nav.push(Screen::Help);
+                            }
+                            KeyCode::Char(' ') => {
+                                let _ = spirc.play_pause();
+                            }
+                            KeyCode::Char('n') => {
+                                let _ = spirc.next();
+                            }
+                            KeyCode::Char('p') => {
+                                let _ = spirc.prev();
+                            }
+                            KeyCode::Char('+') => {
+                                let _ = spirc.volume_up();
+                            }
+                            KeyCode::Char('-') => {
+                                let _ = spirc.volume_down();
+                            }
+                            KeyCode::Char('f') => {
+                                toggle_or_enter_fullscreen(&mut app);
+                            }
+                            KeyCode::Char('l') => {
+                                app.nav.goto(Screen::Library);
+                            }
+                            KeyCode::Char('c') => {
+                                app.text_prompt =
+                                    Some(TextPrompt::new("New playlist name", "", TextPromptAction::CreatePlaylist));
+                            }
+                            KeyCode::Esc | KeyCode::Left => {
+                                app.nav.escape();
+                            }
+                            KeyCode::Up => {
+                                if let Some(state) = &mut app.artist_detail {
+                                    state.selected = state.selected.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Down => {
+                                if let Some(state) = &app.artist_detail {
+                                    if let Fetch::Ready(artist) = &state.detail {
+                                        if !artist.albums.is_empty() {
+                                            let next = (state.selected + 1).min(artist.albums.len() - 1);
+                                            app.artist_detail.as_mut().unwrap().selected = next;
+                                        }
+                                    }
+                                }
+                            }
+                            // Pure navigation, no playback -- opening an album doesn't
+                            // play anything, matching the "Right = go deeper" rule.
+                            KeyCode::Enter | KeyCode::Right => {
+                                let album_uri = app.artist_detail.as_ref().and_then(|state| match &state.detail {
+                                    Fetch::Ready(artist) => artist.albums.get(state.selected).map(|a| a.uri.clone()),
+                                    _ => None,
+                                });
+                                if let Some(album_uri) = album_uri {
+                                    open_album_detail(&mut app, &library_tx, &spotify_client, album_uri);
+                                }
+                            }
+                            _ => {}
+                        },
+                        Screen::AlbumDetail => match key.code {
+                            KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                break 'inner LoopExit::Quit
+                            }
+                            KeyCode::Char('?') => {
+                                app.nav.push(Screen::Help);
+                            }
+                            KeyCode::Char(' ') => {
+                                let _ = spirc.play_pause();
+                            }
+                            KeyCode::Char('n') => {
+                                let _ = spirc.next();
+                            }
+                            KeyCode::Char('p') => {
+                                let _ = spirc.prev();
+                            }
+                            KeyCode::Char('+') => {
+                                let _ = spirc.volume_up();
+                            }
+                            KeyCode::Char('-') => {
+                                let _ = spirc.volume_down();
+                            }
+                            KeyCode::Char('f') => {
+                                toggle_or_enter_fullscreen(&mut app);
+                            }
+                            KeyCode::Char('l') => {
+                                app.nav.goto(Screen::Library);
+                            }
+                            KeyCode::Char('c') => {
+                                app.text_prompt =
+                                    Some(TextPrompt::new("New playlist name", "", TextPromptAction::CreatePlaylist));
+                            }
+                            KeyCode::Esc | KeyCode::Left => {
+                                app.nav.escape();
+                            }
+                            // Views the album's own (first-listed) artist -- plain `v`,
+                            // not Ctrl+Right, since Album Detail has no text-input
+                            // constraint stopping a normal letter key here.
+                            KeyCode::Char('v') => {
+                                let artist_uri =
+                                    app.album_detail.as_ref().and_then(|state| match &state.detail {
+                                        Fetch::Ready(album) => Some(album.artist_uri.clone()),
+                                        _ => None,
+                                    });
+                                if let Some(artist_uri) = artist_uri {
+                                    open_artist_detail(&mut app, &library_tx, &spotify_client, artist_uri);
+                                }
+                            }
+                            KeyCode::Char('a') => {
+                                let track_uri = app.album_detail.as_ref().and_then(|state| match &state.detail {
+                                    Fetch::Ready(album) => album.tracks.get(state.selected).map(|t| t.uri.clone()),
+                                    _ => None,
+                                });
+                                if let Some(track_uri) = track_uri {
+                                    app.playlist_picker =
+                                        Some(PlaylistPicker { track_uri, selected: 0, filter: ListFilter::default() });
+                                }
+                            }
+                            KeyCode::Up => {
+                                if let Some(state) = &mut app.album_detail {
+                                    state.selected = state.selected.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Down => {
+                                if let Some(state) = &app.album_detail {
+                                    if let Fetch::Ready(album) = &state.detail {
+                                        if !album.tracks.is_empty() {
+                                            let next = (state.selected + 1).min(album.tracks.len() - 1);
+                                            app.album_detail.as_mut().unwrap().selected = next;
+                                        }
+                                    }
+                                }
+                            }
+                            // Not Right -- this plays and jumps to Now Playing, a real
+                            // "leave here" side effect, same rule as everywhere else.
+                            KeyCode::Enter => {
+                                if let Some(state) = &app.album_detail {
+                                    if let Fetch::Ready(album) = &state.detail {
+                                        if state.selected < album.tracks.len() {
+                                            let opts = LoadRequestOptions {
+                                                playing_track: Some(PlayingTrack::Index(state.selected as u32)),
+                                                ..Default::default()
+                                            };
+                                            let _ = spirc.activate();
+                                            let _ = spirc.load(LoadRequest::from_context_uri(album.uri.clone(), opts));
+                                            let _ = spirc.play();
+                                            app.nav.goto(Screen::NowPlaying);
+                                        }
                                     }
                                 }
                             }

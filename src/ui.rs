@@ -368,6 +368,110 @@ pub fn pinned_first<'a, T>(
     items
 }
 
+/// Playlist reorder move-mode (Phase 6): `Up`/`Down` relocate the
+/// selected item one slot at a time, entirely locally -- no network call
+/// per keystroke, only once on confirm. Returns the item's new selected
+/// index (unchanged, a no-op, at either end of the list).
+pub fn move_item_up<T>(items: &mut [T], selected: usize) -> usize {
+    if selected == 0 {
+        return selected;
+    }
+    items.swap(selected, selected - 1);
+    selected - 1
+}
+
+pub fn move_item_down<T>(items: &mut [T], selected: usize) -> usize {
+    if selected + 1 >= items.len() {
+        return selected;
+    }
+    items.swap(selected, selected + 1);
+    selected + 1
+}
+
+/// Walks the item at `selected` back to `target` one adjacent swap at a
+/// time. Used to cancel move-mode (`Esc`): since only one item has
+/// actually been relocated -- an insertion-sort-style move, not
+/// independent per-item swaps -- this exactly restores the original
+/// arrangement without needing a full snapshot of the list to revert to.
+pub fn move_item_to<T>(items: &mut [T], mut selected: usize, target: usize) -> usize {
+    while selected > target {
+        selected = move_item_up(items, selected);
+    }
+    while selected < target {
+        selected = move_item_down(items, selected);
+    }
+    selected
+}
+
+#[cfg(test)]
+mod move_item_tests {
+    use super::*;
+
+    #[test]
+    fn move_up_swaps_with_the_previous_slot() {
+        let mut items = vec!['a', 'b', 'c'];
+        let selected = move_item_up(&mut items, 1);
+        assert_eq!(items, vec!['b', 'a', 'c']);
+        assert_eq!(selected, 0);
+    }
+
+    #[test]
+    fn move_up_at_the_top_is_a_noop() {
+        let mut items = vec!['a', 'b', 'c'];
+        let selected = move_item_up(&mut items, 0);
+        assert_eq!(items, vec!['a', 'b', 'c']);
+        assert_eq!(selected, 0);
+    }
+
+    #[test]
+    fn move_down_swaps_with_the_next_slot() {
+        let mut items = vec!['a', 'b', 'c'];
+        let selected = move_item_down(&mut items, 1);
+        assert_eq!(items, vec!['a', 'c', 'b']);
+        assert_eq!(selected, 2);
+    }
+
+    #[test]
+    fn move_down_at_the_bottom_is_a_noop() {
+        let mut items = vec!['a', 'b', 'c'];
+        let selected = move_item_down(&mut items, 2);
+        assert_eq!(items, vec!['a', 'b', 'c']);
+        assert_eq!(selected, 2);
+    }
+
+    #[test]
+    fn move_item_to_walks_down_to_a_later_target() {
+        let mut items = vec!['a', 'b', 'c', 'd'];
+        let selected = move_item_to(&mut items, 0, 2);
+        assert_eq!(items, vec!['b', 'c', 'a', 'd']);
+        assert_eq!(selected, 2);
+    }
+
+    #[test]
+    fn move_item_to_walks_up_to_an_earlier_target() {
+        let mut items = vec!['a', 'b', 'c', 'd'];
+        let selected = move_item_to(&mut items, 3, 1);
+        assert_eq!(items, vec!['a', 'd', 'b', 'c']);
+        assert_eq!(selected, 1);
+    }
+
+    #[test]
+    fn round_trip_through_move_item_to_restores_the_original_order() {
+        // This is the actual cancel-move-mode use case: move an item
+        // partway, then walk it straight back to where it started.
+        let mut items = vec!['a', 'b', 'c', 'd', 'e'];
+        let original = items.clone();
+        let start = 1;
+        let mut selected = start;
+        selected = move_item_down(&mut items, selected);
+        selected = move_item_down(&mut items, selected);
+        assert_ne!(items, original);
+        let selected = move_item_to(&mut items, selected, start);
+        assert_eq!(items, original);
+        assert_eq!(selected, start);
+    }
+}
+
 pub struct LibraryState {
     pub home_selected: usize,
     pub liked_songs: Fetch<Vec<TrackResult>>,
@@ -421,6 +525,11 @@ pub struct PlaylistDetailState {
     pub tracks: Fetch<Vec<TrackResult>>,
     pub selected: usize,
     pub filter: ListFilter,
+    /// `Some(start_index)` while move-mode (Phase 6, `m`) is active --
+    /// the index the moving track started at, so confirming (`Enter`)
+    /// knows the net displacement regardless of how many times it moved
+    /// up and down in between.
+    pub move_mode: Option<usize>,
 }
 
 // Phase 5's transient overlays (name prompt, yes/no confirm, playlist
@@ -1276,6 +1385,10 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("Enter / \u{2192}", "open (Your Playlists \u{2192} Playlist Detail only)"),
             ("\u{2190}", "back to Sidebar (same as Esc)"),
             ("/", "open this list's filter (live-narrows as you type)"),
+            (
+                "Esc",
+                "if a filter is applied (even after Enter, not actively typing), clears it first; press again to leave",
+            ),
             ("o", "toggle alphabetical sort"),
             ("Shift+P", "pin / unpin (Your Playlists, Playlist Detail)"),
         ],
@@ -1297,6 +1410,18 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "a",
                 "add a track to a playlist (opens the picker) -- Liked Songs, Playlist Detail, and Now Playing (the currently playing track)",
             ),
+            (
+                "m",
+                "reorder tracks (Playlist Detail only) -- requires no filter/sort active; pinned tracks are fine",
+            ),
+        ],
+    ),
+    (
+        "Move mode (Playlist Detail, after `m`)",
+        &[
+            ("\u{2191} / \u{2193}", "relocate the track one slot at a time, locally -- no network call per keystroke"),
+            ("Enter", "confirm -- one reorder call for the net displacement"),
+            ("Esc", "cancel -- walks the track back to where it started"),
         ],
     ),
     (
@@ -1375,11 +1500,22 @@ fn render_playlist_detail(frame: &mut Frame, app: &AppState, list_state: &mut Li
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
-    frame.render_widget(
-        Paragraph::new(filter_header(&pd.playlist.name, &pd.filter))
-            .style(Style::default().add_modifier(Modifier::BOLD)),
-        chunks[0],
-    );
+    if pd.move_mode.is_some() {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{} \u{2014} MOVE MODE: \u{2191}/\u{2193} relocate, Enter confirm, Esc cancel",
+                pd.playlist.name
+            ))
+            .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            chunks[0],
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(filter_header(&pd.playlist.name, &pd.filter))
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+            chunks[0],
+        );
+    }
     match &pd.tracks {
         Fetch::NotStarted | Fetch::Loading => {
             frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
@@ -1388,11 +1524,19 @@ fn render_playlist_detail(frame: &mut Frame, app: &AppState, list_state: &mut Li
             frame.render_widget(Paragraph::new(format!("failed to load: {e}")), chunks[1]);
         }
         Fetch::Ready(items) => {
-            let display = pinned_first(
-                filtered_sorted(items, &pd.filter, &label),
-                &app.pinned_tracks,
-                |t| t.uri.as_str(),
-            );
+            // Move-mode intentionally does NOT bubble pinned tracks to the
+            // top here, even though every other rendering of this list
+            // does -- pinned_first is what breaks the display-position ==
+            // real-array-position identity move-mode depends on. Skipping
+            // it during the move keeps that identity exact regardless of
+            // what's pinned, rather than blocking reorder whenever
+            // anything in the playlist happens to be pinned.
+            let natural = filtered_sorted(items, &pd.filter, &label);
+            let display = if pd.move_mode.is_some() {
+                natural
+            } else {
+                pinned_first(natural, &app.pinned_tracks, |t| t.uri.as_str())
+            };
             let pin_label = |t: &TrackResult| {
                 let marker = if app.pinned_tracks.contains(&t.uri) { "* " } else { "  " };
                 format!("{marker}{}", label(t))

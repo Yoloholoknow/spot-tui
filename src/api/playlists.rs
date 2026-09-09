@@ -125,3 +125,58 @@ pub async fn remove_track(client: &AuthCodeSpotify, playlist_uri: &str, track_ur
         .map_err(|e| e.to_string())?;
     Ok(())
 }
+
+/// `insert_before`'s asymmetry, confirmed live against a real playlist in
+/// Phase 0's spike (`spike.rs`): it is *not* simply `to_index`. Moving
+/// down (`to_index > from_index`) needs `to_index + 1`; moving up needs
+/// `to_index` with no `+1`. Passing the caller's intended target straight
+/// through as `insert_before` is the off-by-one that failed on the first
+/// spike attempt -- pulled out as its own pure function specifically so
+/// that exact regression stays covered by a test, not just a comment.
+fn insert_before_for_move(from_index: usize, to_index: usize) -> usize {
+    if to_index > from_index {
+        to_index + 1
+    } else {
+        to_index
+    }
+}
+
+#[cfg(test)]
+mod reorder_tests {
+    use super::*;
+
+    #[test]
+    fn moving_down_needs_target_plus_one() {
+        assert_eq!(insert_before_for_move(0, 2), 3);
+    }
+
+    #[test]
+    fn moving_up_needs_target_with_no_plus_one() {
+        assert_eq!(insert_before_for_move(2, 0), 0);
+    }
+
+    #[test]
+    fn no_net_movement_is_a_harmless_identity_call() {
+        assert_eq!(insert_before_for_move(1, 1), 1);
+    }
+}
+
+/// Moves a single track (`range_length: Some(1)`) from `from_index` to
+/// end up at `to_index`.
+pub async fn reorder_track(
+    client: &AuthCodeSpotify,
+    playlist_uri: &str,
+    from_index: usize,
+    to_index: usize,
+) -> Result<(), String> {
+    if let Err(e) = ensure_fresh(client).await {
+        log::warn!("token refresh before reorder_track failed, trying with existing token anyway: {e}");
+    }
+    let id = playlist_id(playlist_uri)?;
+    let insert_before = insert_before_for_move(from_index, to_index);
+    client
+        .playlist_reorder_items(id, Some(from_index as i32), Some(insert_before as i32), Some(1), None)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}

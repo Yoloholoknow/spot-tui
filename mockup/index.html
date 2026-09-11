@@ -4,16 +4,44 @@
 <meta charset="utf-8">
 <title>spot-tui design preview</title>
 <style>
+  /* ---------- design tokens ----------
+     Consolidated from the v1 mockup's ad-hoc values (11+ distinct font
+     sizes, padding numbers that didn't share a scale) into an explicit
+     system: a 4/8/12/16/24/32 spacing scale, a 5-step type scale (each
+     step earns its keep: micro/meta/body/header/hero -- fewer than that
+     and screen titles stop reading as titles), and named surfaces instead
+     of one flat --panel for both sidebar and modals. */
   :root {
-    --bg: #10141c;
-    --panel: #161b26;
-    --border: #2a3142;
-    --text: #cdd6e0;
-    --dim: #5a6472;
-    --accent: #3ec46d;
-    --accent-dim: #2a7a45;
-    --danger: #e0645a;
-    --warn: #d9a441;
+    --bg: #0b0e14;
+    --surface: #12161f;
+    --surface-2: #181d29;
+    --border: #262c3a;
+    --border-soft: #1c212c;
+    --text: #dbe2ea;
+    --text-dim: #7c869a;
+    --text-faint: #4b5468;
+    --accent: #3ecf8e;
+    --accent-soft: rgba(62,207,142,0.14);
+    --accent-dim: #2b8f63;
+    --danger: #ef6a63;
+    --danger-soft: rgba(239,106,99,0.12);
+    --warn: #e0a83f;
+    --warn-soft: rgba(224,168,63,0.12);
+    /* type scale -- micro(pills/hints/status) meta(secondary lines)
+       body(base/rows) header(screen titles) hero(Now Playing only) */
+    --fs-micro: 11px;
+    --fs-meta: 13px;
+    --fs-body: 15px;
+    --fs-header: 18px;
+    --fs-hero: 24px;
+    /* spacing scale -- every padding/margin/gap below snaps to one of
+       these, no in-between numbers */
+    --sp-1: 4px;
+    --sp-2: 8px;
+    --sp-3: 12px;
+    --sp-4: 16px;
+    --sp-6: 24px;
+    --sp-8: 32px;
   }
   * { box-sizing: border-box; }
   html, body {
@@ -21,15 +49,15 @@
     background: #05070a;
     color: var(--text);
     font-family: "SF Mono", "Menlo", "Consolas", monospace;
-    font-size: 15px;
+    font-size: var(--fs-body);
     display: flex;
     align-items: center;
     justify-content: center;
   }
   #shell {
-    width: 1180px;
+    width: 1220px;
     max-width: 97vw;
-    height: 700px;
+    height: 720px;
     max-height: 92vh;
     background: var(--bg);
     border: 1px solid var(--border);
@@ -38,119 +66,278 @@
     flex-direction: column;
     overflow: hidden;
     box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    position: relative;
   }
   #titlebar {
-    background: #0a0e15;
-    padding: 6px 12px;
-    font-size: 12px;
-    color: var(--dim);
+    background: #080a10;
+    padding: var(--sp-2) var(--sp-3);
+    font-size: var(--fs-micro);
+    color: var(--text-dim);
     border-bottom: 1px solid var(--border);
     display: flex;
     justify-content: space-between;
   }
   #titlebar .dots span {
     display: inline-block; width: 9px; height: 9px; border-radius: 50%;
-    margin-right: 6px; background: #333;
+    margin-right: var(--sp-2); background: #333;
   }
   #body { flex: 1; display: flex; overflow: hidden; min-height: 0; }
+
+  /* ---------- sidebar ---------- */
   #sidebar {
     width: 230px; flex-shrink: 0; overflow-y: auto;
-    padding: 10px 0; border-right: 1px solid var(--border);
+    padding: var(--sp-2) 0; background: var(--surface);
+    border-right: 1px solid var(--border);
     border-top: 2px solid transparent;
   }
   #sidebar.focused { border-top-color: var(--accent); }
-  .sb-section { padding: 10px 16px 4px; font-size: 10px; letter-spacing: 1px; color: var(--dim); }
-  .sb-divider { height: 1px; background: var(--border); margin: 8px 14px; }
+  .sb-section { padding: var(--sp-3) var(--sp-4) var(--sp-1); font-size: var(--fs-micro); letter-spacing: 1px; color: var(--text-faint); }
+  .sb-divider { height: 1px; background: var(--border); margin: var(--sp-2) var(--sp-3); }
   .sb-item {
-    padding: 5px 16px; cursor: pointer; display: flex; gap: 8px; align-items: center;
+    padding: var(--sp-1) var(--sp-4); cursor: pointer; display: flex; gap: var(--sp-2); align-items: center;
     border-left: 2px solid transparent; color: var(--text);
   }
-  .sb-item .ic { color: var(--dim); width: 12px; display: inline-block; text-align: center; }
-  .sb-item .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sb-item.sel { background: rgba(62,196,109,0.14); }
-  .sb-item.open { border-left-color: var(--accent); color: var(--accent); }
+  .sb-item .ic { color: var(--text-faint); width: 12px; display: inline-block; text-align: center; flex-shrink: 0; }
+  .sb-item .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .sb-item .pin { color: var(--warn); font-size: var(--fs-micro); flex-shrink: 0; }
+  .sb-item.sel { background: var(--accent-soft); }
+  .sb-item.sel .pin { color: var(--accent-dim); }
+  .sb-item.open { border-left-color: var(--accent); color: var(--accent); font-weight: 700; }
+
+  /* ---------- main pane ---------- */
   #main {
     flex: 1; min-width: 0; overflow-y: auto;
-    padding: 18px 24px; white-space: pre-wrap; line-height: 1.5;
+    padding: var(--sp-4) var(--sp-6);
     border-top: 2px solid transparent;
   }
   #main.focused { border-top-color: var(--accent); }
+  .screen-header {
+    font-size: var(--fs-header); font-weight: 700; color: var(--text);
+    display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap;
+    margin-bottom: var(--sp-3);
+  }
+  .screen-header .num { color: var(--accent); }
+  .rule { border: none; border-top: 1px solid var(--border); margin: 0 0 var(--sp-3); }
+
+  /* one shared row shape for every list on every screen: a fixed-width
+     marker column, a truncating primary label, and right-aligned dim
+     meta -- replaces the v1 mockup's ad-hoc concatenated strings
+     ("name (N tracks)", "artist — title") with real columns the eye can
+     track down, the way a scannable table should read. */
+  .row {
+    display: flex; align-items: baseline; gap: var(--sp-2);
+    padding: var(--sp-1) var(--sp-2); cursor: pointer;
+  }
+  .row-marker { width: 16px; flex-shrink: 0; text-align: center; color: var(--text-faint); }
+  .row-primary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+  .row-meta { flex-shrink: 0; color: var(--text-dim); font-size: var(--fs-meta); }
+  .row-heart { width: 14px; flex-shrink: 0; text-align: center; color: var(--border); font-size: var(--fs-meta); }
+  .row-heart.liked { color: var(--danger); }
+  .row.sel { background: var(--accent-soft); }
+  .row.sel .row-primary { color: var(--accent); font-weight: 700; }
+  .row.sel .row-meta { color: var(--accent-dim); }
+  .row.pinned .row-marker { color: var(--warn); }
+  .row.playing .row-marker { color: var(--accent); }
+  .row.moving { background: var(--warn-soft); }
+  .row.danger .row-primary { color: var(--danger); }
+  /* A pinned row that's also the selected row was showing an amber
+     pin mark next to green selected text -- two accent colors on one
+     row, nobody chose that on purpose (pinning and selection shipped
+     in different phases and were never checked together). Selection
+     wins; the pin state is still visible from the marker glyph itself
+     (★), it just stops fighting for a second color. */
+  .row.sel .row-marker { color: var(--accent-dim); }
+
+  .filter-header {
+    display: flex; align-items: baseline; gap: var(--sp-2);
+    color: var(--text-dim); font-size: var(--fs-meta); margin: 0 0 var(--sp-2);
+  }
+  .filter-header .live { color: var(--text); }
+  .hint { color: var(--text-faint); font-size: var(--fs-meta); }
+  .pill {
+    display: inline-block; border: 1px solid var(--border);
+    padding: 0 var(--sp-2); font-size: var(--fs-micro); color: var(--text-dim);
+  }
+
+  /* ---------- state design: loading / error / empty ----------
+     Designed as their own thing, not a stripped-down list -- a screen
+     that only ever shows its happy path hides the states users actually
+     live in most (real 400s and empty libraries were the two most
+     live-reported pain points this project has had). */
+  /* Horizontal padding matches .row's own -- an empty/error/loading
+     message was sitting less indented than the real rows it replaces. */
+  .state-block { padding: var(--sp-4) var(--sp-2); }
+  .state-loading { color: var(--text-faint); }
+  .state-error {
+    border: 1px solid var(--danger); background: var(--danger-soft);
+    padding: var(--sp-3) var(--sp-4); color: var(--danger);
+  }
+  .state-error .retry { color: var(--text-dim); margin-top: var(--sp-2); font-size: var(--fs-meta); }
+  .state-empty { color: var(--text-faint); }
+  .state-empty .headline { color: var(--text-dim); margin-bottom: var(--sp-1); }
+
+  /* ---------- playback bar ---------- */
   #playbar {
-    border-top: 1px solid var(--border); background: #0a0e15;
-    padding: 8px 16px; display: flex; align-items: center; gap: 12px;
+    border-top: 1px solid var(--border); background: var(--surface);
+    padding: var(--sp-2) var(--sp-4); display: flex; align-items: center; gap: var(--sp-3);
   }
   .pb-art {
-    width: 38px; height: 38px; border-radius: 4px; flex-shrink: 0;
+    width: 36px; height: 36px; flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
-    font-size: 13px; font-weight: 700; color: rgba(255,255,255,.85);
+    font-size: var(--fs-meta); font-weight: 700; color: rgba(255,255,255,.85);
   }
   .pb-info { min-width: 0; width: 190px; flex-shrink: 0; }
   .pb-title, .pb-artist { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .pb-title { font-size: 13px; color: var(--text); }
-  .pb-artist { font-size: 11px; color: var(--dim); }
-  .pb-gauge { flex: 1; font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 8px; }
-  .pb-vol { font-size: 11px; color: var(--dim); width: 60px; text-align: right; flex-shrink: 0; }
-  .pb-controls { display: flex; align-items: center; gap: 10px; font-size: 14px; flex-shrink: 0; }
-  .pb-toggles { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 700; flex-shrink: 0; }
-  .pb-btn { cursor: pointer; color: var(--dim); }
+  .pb-title { font-size: var(--fs-meta); color: var(--text); }
+  .pb-artist { font-size: var(--fs-micro); color: var(--text-dim); }
+  .pb-gauge { flex: 1; font-size: var(--fs-micro); color: var(--text-dim); display: flex; align-items: center; gap: var(--sp-2); }
+  .pb-vol { font-size: var(--fs-micro); color: var(--text-dim); width: 58px; text-align: right; flex-shrink: 0; }
+  .pb-controls { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-body); flex-shrink: 0; }
+  .pb-toggles { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-micro); font-weight: 700; flex-shrink: 0; }
+  .pb-btn { cursor: pointer; color: var(--text-dim); }
   .pb-btn.accent { color: var(--accent); }
+
+  /* ---------- now playing hero ---------- */
+  /* No rounded corners, no drop shadow, no gradient (see artStyle() in
+     the script) -- a real terminal cell grid can't do any of the three:
+     ratatui paints one solid background color per cell, sharp corners
+     only, and there's no compositing pass for a soft shadow to live in.
+     This block is exactly what the real app can actually render: a flat
+     rectangle of one hashed color plus a monogram. */
   .art-hero {
-    width: 200px; height: 200px; border-radius: 8px; flex-shrink: 0;
+    width: 200px; height: 200px; flex-shrink: 0;
     display: flex; align-items: center; justify-content: center; position: relative;
-    box-shadow: 0 12px 30px rgba(0,0,0,0.45);
   }
   .art-mono { font-size: 56px; font-weight: 700; color: rgba(255,255,255,.85); letter-spacing: 2px; }
-  .art-tag { position: absolute; bottom: 8px; right: 10px; font-size: 10px; color: rgba(255,255,255,.35); letter-spacing: 1px; }
-  .np-top { display: flex; gap: 24px; align-items: flex-start; margin-bottom: 18px; }
-  .np-meta { padding-top: 6px; }
-  .np-title { font-size: 22px; font-weight: 700; color: var(--text); }
-  .np-artist { font-size: 15px; color: var(--dim); margin-top: 2px; }
-  .np-transport { margin-top: 16px; font-size: 14px; }
-  .lyrics-box { font-size: 16px; line-height: 1.9; }
-  .lyrics-box .cur { font-size: 19px; font-weight: 700; }
+  /* Compact Now Playing: hero row fixed at top, lyrics fill the rest of
+     the pane and scroll on their own -- the default view now shows the
+     *whole* sheet (like official Spotify's lyrics tab), not a ±2-line
+     peephole, so it needs its own scroll container instead of relying
+     on #main's. */
+  .now-playing { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+  .np-side { display: flex; gap: var(--sp-6); align-items: flex-start; margin-bottom: var(--sp-4); flex-shrink: 0; }
+  .np-meta { padding-top: var(--sp-1); min-width: 0; }
+  .np-title { font-size: var(--fs-hero); font-weight: 700; color: var(--text); }
+  .np-heart { font-size: var(--fs-body); color: var(--border); }
+  .np-heart.liked { color: var(--danger); }
+  .np-artist { font-size: var(--fs-body); color: var(--text-dim); margin-top: 2px; }
+  .np-context { font-size: var(--fs-meta); color: var(--text-faint); margin-top: 2px; }
+  .np-transport { margin-top: var(--sp-4); font-size: var(--fs-meta); color: var(--text-dim); }
+  .gauge-track { font-family: monospace; margin-top: var(--sp-1); cursor: pointer; }
+  .gauge-fill { color: var(--accent); }
+  .gauge-empty { color: var(--border); }
+  .lyrics-pane { flex: 1; min-height: 0; overflow-y: auto; font-size: 16px; line-height: 1.9; }
+  /* Every line stays the same size -- a terminal cell grid is uniform,
+     there's no such thing as one line of text being physically bigger
+     than its neighbors. Bold + accent color is the entire toolkit a
+     real TUI has for "this is the current line," so that's all this
+     uses too. No transition either -- terminal redraws are instant,
+     never an animated fade between frames. */
+  /* --text-faint reads at roughly 1.4:1 against --bg -- fine for a
+     one-word hint, unreadable as the primary content of the exact
+     screen built to show all of it. --text-dim clears real body-text
+     contrast. */
+  .lyrics-pane .lyric-line { color: var(--text-dim); }
+  .lyrics-pane .lyric-section { color: var(--text-faint); font-size: var(--fs-micro); letter-spacing: 1px; text-transform: uppercase; padding-top: var(--sp-3); }
+  .lyrics-pane .cur { color: var(--text); font-weight: 700; }
+  .np-idle { color: var(--text-dim); padding-top: var(--sp-6); }
+
+  /* Fullscreen: a real two-pane "beautiful lyrics" layout -- art +
+     song info anchored on one side, the full lyric sheet given the
+     other, wider half, instead of everything stacked in one centered
+     column. This is the one screen allowed to break the app's normal
+     single-column convention, same reasoning Help's 2-column reference
+     already earned: a fundamentally different job (immersive reading),
+     not a list to navigate. */
   #shell.fullscreen #sidebar, #shell.fullscreen #playbar { display: none; }
-  #shell.fullscreen #main { display: flex; flex-direction: column; justify-content: center; padding: 40px 60px; }
-  #shell.fullscreen .art-hero { width: 320px; height: 320px; }
-  #shell.fullscreen .art-mono { font-size: 88px; }
+  #shell.fullscreen #main { padding: var(--sp-8) var(--sp-8); }
+  #shell.fullscreen .now-playing.fs { flex-direction: row; align-items: stretch; gap: var(--sp-8); height: 100%; }
+  #shell.fullscreen .np-side { flex: 0 0 300px; display: flex; flex-direction: column; justify-content: center; }
+  #shell.fullscreen .art-hero { width: 260px; height: 260px; }
+  #shell.fullscreen .art-mono { font-size: 72px; }
   #shell.fullscreen .np-title { font-size: 30px; }
-  #shell.fullscreen .np-artist { font-size: 18px; }
-  #shell.fullscreen .lyrics-box { font-size: 19px; }
-  #shell.fullscreen .lyrics-box .cur { font-size: 23px; }
+  #shell.fullscreen .np-artist { font-size: 17px; }
+  #shell.fullscreen .lyrics-pane { flex: 1; min-width: 0; font-size: 22px; line-height: 2; padding-left: var(--sp-6); border-left: 1px solid var(--border); }
+
+  /* ---------- status line ---------- */
   #statusbar {
     border-top: 1px solid var(--border);
-    padding: 6px 14px;
-    font-size: 12px;
-    color: var(--dim);
-    background: #0a0e15;
+    padding: var(--sp-2) var(--sp-3);
+    font-size: var(--fs-micro);
+    color: var(--text-dim);
+    background: var(--surface);
+    display: flex; align-items: center; gap: var(--sp-2);
   }
   #statusbar b { color: var(--text); }
+  #statusbar.ok { color: var(--accent); }
+  #statusbar.err { color: var(--danger); }
+
   .header { font-weight: 700; color: var(--text); }
-  .dim { color: var(--dim); }
+  .dim { color: var(--text-dim); }
+  .faint { color: var(--text-faint); }
   .accent { color: var(--accent); font-weight: 700; }
   .danger { color: var(--danger); }
   .warn { color: var(--warn); }
-  .sel { background: rgba(62,196,109,0.14); }
-  .rule { color: var(--border); }
   .cursor { background: var(--text); color: var(--bg); }
-  .gauge-fill { color: var(--accent); }
-  .gauge-empty { color: #2a3142; }
-  .pill {
-    display: inline-block; border: 1px solid var(--border); border-radius: 3px;
-    padding: 0 6px; font-size: 11px; color: var(--dim); margin-left: 6px;
-  }
+
+  /* ---------- overlays: confirm / prompt / picker ----------
+     Severity is now a real, consistently-applied signal instead of
+     every confirm using the same red border regardless of stakes:
+     danger = irreversible (delete playlist, remove track), warn = a
+     heads-up that's easy to undo (duplicate-add), neutral = a plain
+     yes/no with no risk framing (quit). Reading the border color alone
+     should tell you how carefully to read the text before answering. */
   .modal-overlay {
     position: absolute; inset: 0; background: rgba(5,7,10,0.72);
     display: flex; align-items: center; justify-content: center;
+    z-index: 10;
   }
+  /* Sharp corners -- the real overlay is a ratatui Block with the
+     default border type (┌─┐ / └─┘), not BorderType::Rounded. */
   .modal-box {
-    background: var(--panel); border: 1px solid var(--accent-dim);
-    border-radius: 6px; padding: 18px 24px; min-width: 340px;
+    background: var(--surface-2); border: 1px solid var(--accent-dim);
+    padding: var(--sp-4) var(--sp-6); min-width: 320px; max-width: 640px;
   }
-  #shell { position: relative; }
+  .modal-box.sev-danger { border-color: var(--danger); }
+  .modal-box.sev-warn { border-color: var(--warn); }
+  .modal-box.sev-neutral { border-color: var(--accent-dim); }
+  .modal-msg { margin-bottom: var(--sp-3); line-height: 1.5; }
+  .modal-msg.sev-danger { color: var(--danger); }
+  .modal-msg.sev-warn { color: var(--warn); }
+  .modal-msg.sev-neutral { color: var(--text); }
+  .modal-hint { color: var(--text-dim); font-size: var(--fs-meta); }
+  .modal-btn { cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+  .modal-title { font-size: var(--fs-meta); color: var(--text-dim); margin-bottom: var(--sp-2); letter-spacing: .5px; }
+  .prompt-input { color: var(--text); font-size: var(--fs-body); }
+
+  .picker-box {
+    background: var(--surface-2); border: 1px solid var(--accent-dim);
+    padding: var(--sp-3) var(--sp-4); width: 380px; max-height: 380px;
+    display: flex; flex-direction: column;
+  }
+  .picker-title { font-size: var(--fs-meta); color: var(--text-dim); margin-bottom: var(--sp-2); }
+  .picker-filter { color: var(--text); margin-bottom: var(--sp-2); }
+  .picker-list { overflow-y: auto; }
+
+  /* ---------- help screen: dense 2-column reference ----------
+     Help grew to 11 sections as the app grew; a single flat column
+     would run several screens deep. Unlike the action lists elsewhere,
+     Help is a reference the user scans, not a list they navigate item
+     by item -- calibrating density to that expert-reference role earns
+     the 2-column layout, a deliberate exception to the app's normal
+     single-column convention. */
+  .help-columns { display: flex; gap: var(--sp-8); align-items: flex-start; }
+  .help-col { flex: 1; min-width: 0; }
+  .help-section { margin-bottom: var(--sp-4); }
+  .help-section-title { font-size: var(--fs-meta); font-weight: 700; color: var(--accent); margin-bottom: var(--sp-1); letter-spacing: .5px; }
+  .help-row { display: flex; gap: var(--sp-3); padding: var(--sp-1) 0; }
+  .help-key { color: var(--text); width: 108px; flex-shrink: 0; }
+  .help-desc { color: var(--text-dim); }
+
   .banner {
     position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
-    background: #161b26; border: 1px solid var(--border); color: var(--dim);
-    font-size: 12px; padding: 6px 14px; border-radius: 4px; font-family: monospace;
+    background: var(--surface-2); border: 1px solid var(--border); color: var(--text-dim);
+    font-size: var(--fs-micro); padding: var(--sp-2) var(--sp-4); border-radius: 4px; font-family: monospace;
   }
 </style>
 </head>
@@ -185,7 +372,8 @@ window.onerror = function(msg, src, line, col, err) {
 
 /* ---------- sample data (real artists/tracks from this project's own history) ---------- */
 
-const T = (title, artist, album, dur) => ({title, artist, album, dur});
+let uriSeq = 0;
+const T = (title, artist, album, dur) => ({uri: "spotify:track:" + (uriSeq++), title, artist, album, dur});
 
 const TRACKS = {
   loveMeNot:  T("Love Me Not", "Ravyn Lenae", "Bird's Eye", "3:33"),
@@ -210,61 +398,178 @@ const ALBUMS = [
   {name: "Retour", artist: "Tony Anderson", tracks: [TRACKS.retour]},
 ];
 
+// No `following` / `topTracks` -- Spotify removed the artist-top-tracks
+// endpoint entirely (not a scope choice, see api::artist's own doc
+// comment in the real app), and follow/unfollow was explicitly deferred
+// as a non-goal for Phase 9's read-only Artist Detail. `genres` replaces
+// them as the one extra fact the real ArtistDetail struct actually has.
 const ARTISTS = [
-  {name: "yung kai", following: true, topTracks: [TRACKS.listenDown, TRACKS.blue, TRACKS.ithinkofyou],
+  {uri: "spotify:artist:yungkai", name: "yung kai", genres: ["pop", "bedroom pop"],
    albums: ["listen to this when you're down <3", "stay with the ocean, i'll find you"]},
-  {name: "keshi", following: true, topTracks: [TRACKS.besideYou, TRACKS.skeletons],
-   albums: ["GABRIEL"]},
-  {name: "Ravyn Lenae", following: false, topTracks: [TRACKS.loveMeNot],
-   albums: ["Bird's Eye"]},
-  {name: "Radiohead", following: true, topTracks: [TRACKS.creep],
-   albums: ["Pablo Honey"]},
+  {uri: "spotify:artist:keshi", name: "keshi", genres: ["r&b", "indie pop"], albums: ["GABRIEL"]},
+  {uri: "spotify:artist:ravynlenae", name: "Ravyn Lenae", genres: ["neo-soul"], albums: ["Bird's Eye"]},
+  {uri: "spotify:artist:radiohead", name: "Radiohead", genres: ["alternative rock"], albums: ["Pablo Honey"]},
 ];
 
 let PLAYLISTS = [
-  {name: "late night drive", tracks: [TRACKS.besideYou, TRACKS.blue, TRACKS.retour]},
-  {name: "sad girl hours", tracks: [TRACKS.listenDown, TRACKS.mindPrison]},
-  {name: "focus", tracks: [TRACKS.retour]},
+  // "late night drive" carries a genuine duplicate (blue appears twice)
+  // specifically so the removal-warning flow has something real to
+  // demonstrate without the user having to manually create one first.
+  {uri: "spotify:playlist:latenight", name: "late night drive", tracks: [TRACKS.besideYou, TRACKS.blue, TRACKS.retour, TRACKS.blue]},
+  {uri: "spotify:playlist:sadgirl", name: "sad girl hours", tracks: [TRACKS.listenDown, TRACKS.mindPrison]},
+  {uri: "spotify:playlist:focus", name: "focus", tracks: [TRACKS.retour]},
 ];
 
 const QUEUE = [TRACKS.blue, TRACKS.skeletons, TRACKS.sailorSong, TRACKS.creep];
 
 const DEVICES = [
-  {name: "This computer (spot-tui)", active: true},
-  {name: "iPhone", active: false},
-  {name: "Living Room speaker", active: false},
+  {id: "d1", name: "This computer (spot-tui)", kind: "Computer", active: true, vol: 80},
+  {id: "d2", name: "iPhone", kind: "Smartphone", active: false, vol: 60},
+  {id: "d3", name: "Living Room speaker", kind: "Speaker", active: false, vol: 45},
 ];
 
+// A full-length lyric sheet, not a 5-line snippet -- the whole point of
+// this redesign is showing the entire song at once (like official
+// Spotify's default lyrics view), so a short array would understate
+// what the scrollable/auto-centering treatment is actually for.
 const LYRICS = [
+  "", "verse 1",
   "you're the one that got away, and i'm not okay",
   "see, right now, I need you, I'll meet you somewhere now",
   "you up now, I see you, I get you, take care now",
   "slow down, be cool, I miss you, come here now",
+  "", "chorus",
+  "for you, for you, for you",
+  "I'd do anything, anything, anything for you",
+  "and if the night runs out, I'm right here beside you",
+  "for you, for you, for you",
+  "", "verse 2",
+  "city lights fade in the rearview, I keep driving",
+  "thought I had it figured out, but here I go again",
+  "every road looks like it's leading back to you",
+  "maybe that's the only way this ever ends",
+  "", "chorus",
+  "for you, for you, for you",
+  "I'd do anything, anything, anything for you",
+  "and if the night runs out, I'm right here beside you",
+  "for you, for you, for you",
+  "", "bridge",
+  "and if I fall, I fall for you",
+  "and if I stay, I stay for you",
+  "", "outro",
   "for you, for you, for you",
 ];
+// Index into LYRICS currently "playing" -- driven by nowPlaying.pos so
+// seeking (←/→) visibly moves which line is highlighted, same as a
+// real synced lyric line advancing with playback.
+const SECTION_LABELS = ["verse 1", "verse 2", "chorus", "bridge", "outro"];
+// Only real sung lines are eligible to be "current" -- mapping playback
+// progress across the raw array (including blank spacers and section
+// labels) could land the highlight on an empty line with nothing to
+// show, which is exactly what happened until this was caught: the
+// default demo position (43/213s) landed on a blank spacer, so nothing
+// was ever highlighted at all.
+const REAL_LYRIC_INDICES = LYRICS.map((l, i) => i).filter(i => LYRICS[i] !== "" && !SECTION_LABELS.includes(LYRICS[i]));
+function currentLyricIndex() {
+  const progress = nowPlaying.pos / nowPlaying.dur;
+  const pick = Math.min(REAL_LYRIC_INDICES.length - 1, Math.floor(progress * REAL_LYRIC_INDICES.length));
+  return REAL_LYRIC_INDICES[Math.max(0, pick)];
+}
 
 /* ---------- state ---------- */
 
 let stack = [{screen: "nowplaying"}];
 let sel = {};              // selected index per screen key
-let mode = null;           // null | "input" | "confirm" | "move"
-let inputTarget = null;    // "search" | "create" | "rename"
-let inputBuf = "";
-let confirmMsg = "";
-let confirmAction = null;
-let moveList = null;       // array being reordered live
-let moveIndex = null;
-let nowPlaying = { track: TRACKS.loveMeNot, playing: true, pos: 43, dur: 213, vol: 100 };
-let searchResults = [];
+// Real overlays are three sibling states, not Screen-stack variants
+// (the plan's own "alternatives considered" rejected the Screen-variant
+// approach: Help alone cost 8+ call sites when it was added that way).
+// Exactly one of these three is non-null at a time; whichever is set
+// owns every keypress, checked before Tab/focus/anything else.
+let confirmOverlay = null;  // { message, severity: "danger"|"warn"|"neutral", action }
+let textPrompt = null;      // { title, buf, cursor, kind: "create"|"rename", target }
+let picker = null;          // { trackUri, trackLabel, selected, filter: {query, cursor} }
+let moveMode = null;        // { list, index, start, playlist } while reordering
+// contextLabel: "playing from X" -- real Spotify keeps this visible
+// under the track; spot-tui's Now Playing currently loses it the moment
+// you navigate away and back. Set at every "start playing" call site.
+let nowPlaying = { track: TRACKS.loveMeNot, playing: true, pos: 43, dur: 213, vol: 100, contextLabel: "Liked Songs" };
+// Cycled by `!` on Now Playing (same debug convention as the other
+// fetchable screens) to review the 3 real LyricsState variants besides
+// Synced that the app has never had a reason to render in this preview.
+let lyricsDemoState = "synced"; // "synced" | "plain" | "instrumental" | "notfound"
+// Search is always-live (no separate typing-vs-browsing mode) -- every
+// printable character always reaches this, matching the real app's one
+// standing exception where q/?/l/c/a/v never fire.
+let search = { query: "", cursor: 0, results: [], searching: false, searched: false, error: null };
+// Quick jump (Ctrl+P) -- fuzzy-jumps to any LOCAL entity (playlist,
+// liked track, followed artist, saved album, device, or screen) by
+// name, without drilling through Sidebar -> Library -> submenu first.
+// Distinct from Search, which only ever hits the remote catalog. This
+// is the single feature most likely to make spot-tui provably faster
+// than official Spotify for everyday local navigation.
+let quickJump = null; // { query, cursor, selected }
 let focus = "sidebar";     // "sidebar" | "main"
 let sidebarSel = 0;
 let fullscreen = false;
 let queueIndex = 0;        // index into QUEUE of the currently-playing track
 let shuffle = false;
 let repeat = false;
+let status = null;         // { text, kind: "ok"|"err"|null }
+
+// One ListFilter-shaped object per filterable screen -- `/` starts
+// editing, typing narrows live, `o` toggles alpha sort, Esc is layered
+// (clears the query first, only leaves on a second press once it's
+// already empty). Playlist Detail's own filter lives in a Map keyed by
+// playlist uri, reset fresh each time a playlist opens (matching the
+// real PlaylistDetailState being rebuilt per open, not persisted).
+function newFilter() { return { query: "", cursor: 0, editing: false, sortAlpha: false }; }
+const filters = { likedSongs: newFilter(), savedAlbums: newFilter(), followedArtists: newFilter(), yourPlaylists: newFilter() };
+const playlistFilters = new Map();
+function playlistFilter(uri) {
+  if (!playlistFilters.has(uri)) playlistFilters.set(uri, newFilter());
+  return playlistFilters.get(uri);
+}
+
+const pins = { playlists: new Set(), tracks: new Set() };
+// Liked/followed/saved -- real, currently-missing product capabilities
+// (spot-tui has no way to like a track, follow an artist, or save an
+// album from inside the app at all). Modeled here so the interaction
+// gets designed once, even though wiring the real Rust side is its own
+// separate roadmap item, not part of this preview.
+const liked = new Set(LIKED_SONGS.map(t => t.uri));
+const following = new Set(ARTISTS.filter((a, i) => i < 2).map(a => a.uri));
+const savedAlbumUris = new Set(ALBUMS.filter((a, i) => i < 2).map(a => a.name));
+
+// Simulates Fetch<T>'s loading/ready/error lifecycle -- real screens are
+// backed by a live Web API call with real latency and real failure
+// modes; this mockup can't make a network call, but it can still show
+// what those states look like, which matters since a 400 mid-screen was
+// this project's single most-repeated live bug report.
+const fetchState = {};
+const visitedOnce = new Set();
+function ensureFetched(key) {
+  if (visitedOnce.has(key)) { if (!fetchState[key]) fetchState[key] = { status: "ready" }; return; }
+  visitedOnce.add(key);
+  const forceError = fetchState[key] && fetchState[key].forceError;
+  fetchState[key] = { status: "loading" };
+  setTimeout(() => {
+    fetchState[key] = forceError
+      ? { status: "error", error: "HTTP 400 Bad Request: Invalid limit" }
+      : { status: "ready" };
+    render();
+  }, 260);
+}
+// Debug-only affordance (see the banner) -- re-runs a screen's fetch as
+// a forced failure so the error-state design can actually be reviewed
+// without needing a real Dev-Mode account to reproduce a 400 on demand.
+function forceRefetchAsError(key) {
+  visitedOnce.delete(key);
+  fetchState[key] = { forceError: true };
+  ensureFetched(key);
+}
 
 function curScreen() { return stack[stack.length - 1]; }
-function push(screen, ctx) { stack.push(Object.assign({screen}, ctx || {})); }
+function push(screen, ctx) { stack.push(Object.assign({screen}, ctx || {})); setSel(0); }
 function pop() { if (stack.length > 1) stack.pop(); }
 function goto(screen, ctx) {
   const target = Object.assign({screen}, ctx || {});
@@ -274,20 +579,87 @@ function goto(screen, ctx) {
   stack = screen === "nowplaying" ? [target] : [{screen: "nowplaying"}, target];
   setSel(0);
 }
-function selKey() { return curScreen().screen + JSON.stringify(curScreen().name || curScreen().playlist || ""); }
+function selKey() {
+  const f = curScreen();
+  const id = f.playlist ? f.playlist.uri : f.artist ? f.artist.uri : f.album ? f.album.name : "";
+  return f.screen + ":" + id;
+}
 function getSel() { return sel[selKey()] || 0; }
 function setSel(v) { sel[selKey()] = v; }
+function esc(s) { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
 
 /* ---------- rendering ---------- */
 
-function esc(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
-function line(text, cls) { return `<div class="${cls||''}">${text}</div>`; }
-function ruleLine() { return `<div class="rule">${"─".repeat(78)}</div>`; }
+function ruleLine() { return `<hr class="rule">`; }
 
-function renderList(items, labelFn, selected) {
-  return items.map((it, i) =>
-    `<div class="${i === selected ? "sel accent" : ""}" data-i="${i}">${(i === selected ? "&gt; " : "  ")}${esc(labelFn(it))}</div>`
-  ).join("");
+// One shared row shape for every list on every screen (see .row in the
+// stylesheet for why) -- marker column, truncating primary label,
+// right-aligned dim meta. `cls` adds e.g. "playing"/"pinned"/"moving".
+// `heart` is a separate slot from `marker` -- pin/playing/moving and
+// liked-status are independent facts about a row and a track can be
+// both at once (pinned AND liked), so they need their own columns
+// instead of fighting over one glyph the way pin+selection used to.
+function row(i, marker, primary, meta, selected, cls, heart) {
+  return `<div class="row${selected ? " sel" : ""}${cls ? " " + cls : ""}" data-i="${i}">` +
+    `<span class="row-marker">${marker || ""}</span>` +
+    `<span class="row-primary">${esc(primary)}</span>` +
+    `<span class="row-heart${heart ? " liked" : ""}" data-heart-i="${i}">${heart ? "♥" : ""}</span>` +
+    (meta ? `<span class="row-meta">${esc(meta)}</span>` : "") +
+    `</div>`;
+}
+function renderRows(items, i0, labelFn, metaFn, selected, markerFn, clsFn, heartFn) {
+  return items.map((it, i) => {
+    const idx = i0 + i;
+    return row(idx, markerFn ? markerFn(it, idx) : "", labelFn(it), metaFn ? metaFn(it) : "", idx === selected,
+      clsFn ? clsFn(it, idx) : "", heartFn ? heartFn(it, idx) : false);
+  }).join("");
+}
+
+function loadingState() { return `<div class="state-block state-loading">loading…</div>`; }
+function errorState(msg, canRetry) {
+  return `<div class="state-block"><div class="state-error">failed to load: ${esc(msg)}` +
+    (canRetry ? `<div class="retry">press <b>r</b> to retry</div>` : "") + `</div></div>`;
+}
+function emptyState(headline, hint) {
+  return `<div class="state-block state-empty"><div class="headline">${esc(headline)}</div>` +
+    (hint ? `<div class="hint">${esc(hint)}</div>` : "") + `</div>`;
+}
+// Wraps a screen's real content behind its simulated Fetch<T> lifecycle
+// -- loading once per visit, then ready, or a forced error via the `!`
+// debug key (see forceRefetchAsError). `renderReady` is only called
+// once fetchState says the data would actually be there.
+function withFetch(key, renderReady) {
+  ensureFetched(key);
+  const fs = fetchState[key];
+  if (fs.status === "loading") return loadingState();
+  if (fs.status === "error") return errorState(fs.error, true);
+  return renderReady();
+}
+
+function filterHeaderHtml(filter, count) {
+  if (filter.editing) return `<div class="filter-header">/ <span class="live">${esc(filter.query)}<span class="cursor">&nbsp;</span></span></div>`;
+  if (filter.query) return `<div class="filter-header">filter: "<span class="live">${esc(filter.query)}</span>"${filter.sortAlpha ? ", A–Z" : ""} <span class="hint">(${count} shown)</span></div>`;
+  if (filter.sortAlpha) return `<div class="filter-header">A–Z sort <span class="hint">-- / to filter</span></div>`;
+  return "";
+}
+// Applies filter.query (case-insensitive substring on labelFn) and,
+// if set, an alpha sort -- returns [origIndex, item] pairs so a
+// filtered/sorted view never loses track of the real position Spotify
+// needs for playback (the exact bug the real app's own filtered_sorted
+// was written to avoid).
+function filteredSorted(items, filter, labelFn) {
+  let out = items.map((it, i) => [i, it]);
+  if (filter.query) {
+    const q = filter.query.toLowerCase();
+    out = out.filter(([, it]) => labelFn(it).toLowerCase().includes(q));
+  }
+  if (filter.sortAlpha) out = out.slice().sort((a, b) => labelFn(a[1]).localeCompare(labelFn(b[1])));
+  return out;
+}
+function pinnedFirst(pairs, pinSet, uriFn) {
+  const pinned = pairs.filter(([, it]) => pinSet.has(uriFn(it)));
+  const rest = pairs.filter(([, it]) => !pinSet.has(uriFn(it)));
+  return pinned.concat(rest);
 }
 
 function hashHue(s) {
@@ -295,186 +667,411 @@ function hashHue(s) {
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
   return h % 360;
 }
+// A single solid color, not a gradient -- matches what the real app can
+// actually paint: one `Color::Indexed` background per cell, hashed from
+// artist+album. A two-color blend has no terminal equivalent (no
+// compositing between cells), so showing one here would be promising a
+// look this app can never actually ship.
 function artStyle(track) {
-  const h1 = hashHue(track.album + track.artist);
-  const h2 = (h1 + 40) % 360;
-  return `background: linear-gradient(135deg, hsl(${h1},55%,32%), hsl(${h2},60%,20%));`;
+  const h = hashHue(track.album + track.artist);
+  return `background: hsl(${h},50%,28%);`;
 }
 function monogram(track) {
   return ((track.artist[0] || "") + (track.album[0] || track.title[0] || "")).toUpperCase();
 }
 
+// The art block is this screen's one deliberate bold moment (Restraint
+// Rule) -- everything else here stays quiet so it reads as the thing to
+// look at, not one accent among several competing for attention.
+//
+// Shows the WHOLE lyric sheet by default (like official Spotify's
+// lyrics tab), not a small context window -- the sheet scrolls on its
+// own and auto-centers on the current line (see scrollCurrentLyricIntoView,
+// called after every render). Fullscreen reflows the same two pieces
+// (art+meta, lyrics) from a stacked column into a real side-by-side
+// "beautiful lyrics" layout instead of just scaling the stacked version
+// up, via the .fs class toggled on the wrapper.
 function nowPlayingHero() {
   const tr = nowPlaying.track;
   const icon = nowPlaying.playing ? "▶" : "⏸";
   const filled = Math.round((nowPlaying.pos / nowPlaying.dur) * 40);
   const gauge = `<span class="gauge-fill">${"█".repeat(filled)}</span><span class="gauge-empty">${"░".repeat(40-filled)}</span>`;
   const mm = s => `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;
-  let html = `<div class="np-top">
-    <div class="art-hero" style="${artStyle(tr)}"><span class="art-mono">${esc(monogram(tr))}</span><span class="art-tag">ART</span></div>
+  const curIdx = currentLyricIndex();
+  const lyricsHtml = lyricsDemoState === "instrumental" ? `<div class="lyric-line">♪ instrumental</div>`
+    : lyricsDemoState === "notfound" ? `<div class="lyric-line">no lyrics found</div>`
+    : lyricsDemoState === "plain" ? `<div class="lyric-line" style="margin-bottom:8px">(unsynced)</div>` +
+        LYRICS.filter(l => l && !SECTION_LABELS.includes(l)).map(l => `<div class="lyric-line">${esc(l)}</div>`).join("")
+    : LYRICS.map((l, i) => {
+        if (l === "") return "";
+        if (SECTION_LABELS.includes(l)) return `<div class="lyric-section">${esc(l)}</div>`;
+        return `<div class="lyric-line${i === curIdx ? " cur" : ""}" data-lyric-i="${i}">${esc(l)}</div>`;
+      }).join("");
+
+  const side = `<div class="np-side">
+    <div class="art-hero" style="${artStyle(tr)}"><span class="art-mono">${esc(monogram(tr))}</span></div>
     <div class="np-meta">
-      <div class="np-title">${esc(tr.title)}</div>
+      <div class="np-title">${esc(tr.title)}<span class="np-heart${liked.has(tr.uri) ? " liked" : ""}"> ♥</span></div>
       <div class="np-artist">${esc(tr.artist)} — ${esc(tr.album)}</div>
-      <div class="np-transport">${icon} ${mm(nowPlaying.pos)} / ${mm(nowPlaying.dur)}&nbsp;&nbsp;&nbsp;vol ${nowPlaying.vol}%<br>${gauge}</div>
+      ${nowPlaying.contextLabel ? `<div class="np-context">Playing from ${esc(nowPlaying.contextLabel)}</div>` : ""}
+      <div class="np-transport">${icon} ${mm(nowPlaying.pos)} / ${mm(nowPlaying.dur)} &nbsp;&nbsp; vol ${nowPlaying.vol}%</div>
+      <div class="gauge-track">${gauge}</div>
     </div>
   </div>`;
-  html += ruleLine();
-  const curLine = 2;
-  html += `<div class="lyrics-box">` + LYRICS.map((l, i) =>
-    `<div class="${i === curLine ? "cur accent" : "dim"}">${esc(l)}</div>`
-  ).join("") + `</div>`;
-  return html;
+  const lyrics = `<div class="lyrics-pane" id="lyricsPane">${lyricsHtml}</div>`;
+
+  return `<div class="now-playing${fullscreen ? " fs" : ""}">${side}${fullscreen ? "" : ruleLine()}${lyrics}</div>`;
+}
+// Called after every render while Now Playing is showing -- keeps the
+// current line roughly centered in its scroll container without
+// fighting a user who's manually scrolled elsewhere in the sheet, the
+// same "only move the viewport when it actually needs to" idea the real
+// app's list screens already use for their own scroll state.
+function scrollCurrentLyricIntoView() {
+  const el = document.querySelector('[data-lyric-i="' + currentLyricIndex() + '"]');
+  if (el) el.scrollIntoView({ block: "center" });
+}
+// Deliberately not a stripped-down hero -- no art block at all, since
+// there's nothing yet to depict art for. Matches the real app's own
+// idle/session-ended treatment being designed as its own state, not a
+// hero with the numbers zeroed out.
+function nowPlayingIdle() {
+  return `<div class="np-idle">ready — press <b>/</b> to search, or <b>l</b> for your library…</div>`;
+}
+
+// Breadcrumb derived from the real stack, not a hand-picked string per
+// screen -- the v1 mockup's hardcoded crumbs only ever worked 2 deep;
+// this app legitimately goes 5 deep (NowPlaying→Library→FollowedArtists
+// →ArtistDetail→AlbumDetail), and Help can push from any depth.
+function crumbLabel(frame) {
+  switch (frame.screen) {
+    case "nowplaying": return "now playing";
+    case "search": return "search";
+    case "library": return "library";
+    case "likedSongs": return "liked songs";
+    case "savedAlbums": return "saved albums";
+    case "followedArtists": return "followed artists";
+    case "yourPlaylists": return "your playlists";
+    case "playlistDetail": return "playlist / " + frame.playlist.name;
+    case "artistDetail": return "artist / " + frame.artist.name;
+    case "albumDetail": return "album / " + frame.album.name;
+    case "queue": return "queue";
+    case "devices": return "devices";
+    case "help": return "help";
+    default: return frame.screen;
+  }
 }
 
 function renderScreen() {
   const t = curScreen();
-  let html = "";
-  let crumb = "now playing";
+  const renderers = {
+    nowplaying: renderNowPlaying, search: renderSearch, library: renderLibraryHome,
+    likedSongs: renderLikedSongs, savedAlbums: renderSavedAlbums, followedArtists: renderFollowedArtists,
+    yourPlaylists: renderYourPlaylists, artistDetail: renderArtistDetail, albumDetail: renderAlbumDetail,
+    playlistDetail: renderPlaylistDetail, queue: renderQueue, devices: renderDevices, help: renderHelp,
+  };
+  const html = (renderers[t.screen] || (() => ""))(t);
 
-  if (mode === "input") {
-    html = renderInputScreen();
-  } else if (t.screen === "nowplaying") {
-    crumb = "now playing";
-    html = nowPlayingHero();
-  } else if (t.screen === "search") {
-    crumb = "search";
-    html = line(`<span class="header">/ ${esc(inputBuf)}<span class="cursor">&nbsp;</span></span>`) + ruleLine();
-    if (searchResults.length === 0) {
-      html += line("type a query, Enter to search, Esc to cancel", "dim");
-    } else {
-      html += renderList(searchResults, r => `${r.artist} — ${r.title} [${r.album}]`, getSel());
-    }
-  } else if (t.screen === "library") {
-    crumb = "library";
-    const entries = ["Liked Songs", "Saved Albums", "Followed Artists", "Your Playlists"];
-    html = line("<span class=\"header\">Library</span>") + ruleLine() +
-           renderList(entries, e => e, getSel());
-  } else if (t.screen === "likedSongs") {
-    crumb = "library / liked songs";
-    html = line("<span class=\"header\">Liked Songs</span>") + ruleLine() +
-           renderList(LIKED_SONGS, tr => `${tr.artist} — ${tr.title}`, getSel());
-  } else if (t.screen === "savedAlbums") {
-    crumb = "library / saved albums";
-    html = line("<span class=\"header\">Saved Albums</span>") + ruleLine() +
-           renderList(ALBUMS, a => `${a.name} — ${a.artist}`, getSel());
-  } else if (t.screen === "followedArtists") {
-    crumb = "library / followed artists";
-    html = line("<span class=\"header\">Followed Artists</span>") + ruleLine() +
-           renderList(ARTISTS, a => a.name + (a.following ? "" : "  (not following)"), getSel());
-  } else if (t.screen === "yourPlaylists") {
-    crumb = "library / your playlists";
-    html = line("<span class=\"header\">Your Playlists</span>&nbsp;&nbsp;<span class=\"pill\">c: create</span>") + ruleLine() +
-           renderList(PLAYLISTS, p => `${p.name}  (${p.tracks.length} tracks)`, getSel());
-  } else if (t.screen === "artistDetail") {
-    crumb = "artist / " + t.name.name;
-    const a = t.name;
-    html = line(`<span class="header">${esc(a.name)}</span>&nbsp;&nbsp;<span class="pill">${a.following ? "following" : "not following"} (f to toggle)</span>`) + ruleLine();
-    html += line("top tracks", "dim");
-    html += renderList(a.topTracks, tr => `${tr.title}`, getSel());
-    html += line("");
-    html += line("albums: " + a.albums.join(", "), "dim");
-  } else if (t.screen === "albumDetail") {
-    crumb = "album / " + t.album.name;
-    const al = t.album;
-    html = line(`<span class="header">${esc(al.name)} — ${esc(al.artist)}</span>&nbsp;&nbsp;<span class="pill">Enter: play album</span>`) + ruleLine() +
-           renderList(al.tracks, tr => `${tr.title}  (${tr.dur})`, getSel());
-  } else if (t.screen === "playlistDetail") {
-    crumb = "playlist / " + t.playlist.name;
-    const p = t.playlist;
-    html = line(`<span class="header">${esc(p.name)}</span>&nbsp;&nbsp;<span class="pill">a: add</span><span class="pill">d: remove</span><span class="pill">r: rename</span><span class="pill">m: move</span>`) + ruleLine();
-    if (p.tracks.length === 0) {
-      html += line("(empty -- press / from search or a track screen, then 'a' to add here)", "dim");
-    } else {
-      html += p.tracks.map((tr, i) => {
-        const marker = (mode === "move" && i === moveIndex) ? "<span class=\"warn\">[moving] </span>" : "";
-        return `<div class="${i === getSel() ? "sel accent" : ""}" data-i="${i}">${marker}${(i === getSel() ? "&gt; " : "  ")}${esc(`${tr.artist} — ${tr.title}`)}</div>`;
-      }).join("");
-    }
-  } else if (t.screen === "addToPlaylistPicker") {
-    crumb = "add to playlist";
-    html = line(`<span class="header">Add "${esc(t.track.title)}" to...</span>&nbsp;&nbsp;<span class="pill">c: new playlist</span>`) + ruleLine() +
-           renderList(PLAYLISTS, p => p.name, getSel());
-  } else if (t.screen === "queue") {
-    crumb = "queue";
-    html = line("<span class=\"header\">Queue</span>&nbsp;&nbsp;<span class=\"pill\">Enter: play</span><span class=\"pill\">d: remove</span>") + ruleLine();
-    html += QUEUE.map((tr, i) => {
-      const playing = i === queueIndex ? "<span class=\"accent\">▶ </span>" : "  ";
-      return `<div class="${i === getSel() ? "sel accent" : ""}" data-i="${i}">${(i === getSel() ? "&gt;" : " ")}${playing}${esc(`${tr.artist} — ${tr.title}`)}</div>`;
-    }).join("");
-  } else if (t.screen === "devices") {
-    crumb = "devices";
-    html = line("<span class=\"header\">Devices</span>&nbsp;&nbsp;<span class=\"pill\">Enter: transfer playback</span>") + ruleLine() +
-           renderList(DEVICES, d => d.name + (d.active ? "  (active)" : ""), getSel());
-  } else if (t.screen === "help") {
-    crumb = "help";
-    const rows = [
-      ["Tab","switch sidebar / main pane"],
-      ["Space","play / pause"], ["n / p","next / previous track"],
-      ["← / →","seek ±5s"], ["+ / -","volume"], ["s","shuffle"], ["R","repeat"],
-      ["/","search"], ["l","library"], ["f","fullscreen now playing"],
-      ["a","add to playlist"], ["c","create playlist"], ["r","rename"],
-      ["d","delete / remove (confirms)"], ["m","move / reorder"],
-      ["D","devices"], ["Esc","back"], ["?","this screen"], ["q","quit"],
-    ];
-    html = line("<span class=\"header\">Keybinds</span>") + ruleLine() +
-           rows.map(r => line(`  ${r[0].padEnd(10)} ${r[1]}`)).join("");
-  }
-
-  document.getElementById("breadcrumb").textContent = crumb;
+  document.getElementById("breadcrumb").textContent = stack.map(crumbLabel).join(" / ");
   document.getElementById("main").innerHTML = html;
   document.getElementById("main").classList.toggle("focused", focus === "main");
   document.getElementById("sidebar").classList.toggle("focused", focus === "sidebar");
   document.getElementById("shell").classList.toggle("fullscreen", fullscreen);
-
-  let status = mode === "move"
-    ? "MOVE MODE — ↑/↓ relocate, Enter confirm, Esc cancel"
-    : fullscreen ? "FULLSCREEN — <b>f</b> or <b>Esc</b> to exit"
-    : `stack depth ${stack.length} — <b>Tab</b> switch pane, <b>Esc</b> back, <b>?</b> help`;
-  document.getElementById("statusbar").innerHTML = status;
-
+  renderStatusBar();
   renderSidebar();
   renderPlaybar();
   renderOverlay();
+  if (t.screen === "nowplaying" && nowPlaying.track) scrollCurrentLyricIntoView();
 }
 
+function renderStatusBar() {
+  const el = document.getElementById("statusbar");
+  el.classList.remove("ok", "err");
+  if (moveMode) { el.innerHTML = `MOVE MODE — <b>↑/↓</b> relocate, <b>g</b> jump to position, <b>Enter</b> confirm, <b>Esc</b> cancel`; return; }
+  if (fullscreen) { el.innerHTML = `FULLSCREEN — <b>f</b> or <b>Esc</b> to exit`; return; }
+  if (status) {
+    el.classList.add(status.kind === "err" ? "err" : "ok");
+    el.textContent = status.text;
+    return;
+  }
+  el.innerHTML = `stack depth ${stack.length} — <b>Tab</b> switch pane, <b>Esc</b> back, <b>?</b> help`;
+}
+
+function screenHeader(title, ...pills) {
+  return `<div class="screen-header"><span>${esc(title)}</span>${pills.map(p => `<span class="pill">${p}</span>`).join("")}</div>`;
+}
+
+function renderNowPlaying() {
+  return nowPlaying.track ? nowPlayingHero() : nowPlayingIdle();
+}
+
+// Always-live query line (no separate typing-vs-browsing mode) -- every
+// printable char always inserts here, matching the one standing
+// exception where q/?/l/c/a/v never reach this screen as commands.
+function renderSearch() {
+  let html = `<div class="screen-header">/ ${esc(search.query)}<span class="cursor">&nbsp;</span></div>` + ruleLine();
+  if (search.error) {
+    html += errorState(search.error, false) + `<div class="hint" style="margin-top:8px">press Enter to retry the search</div>`;
+  } else if (!search.searched) {
+    html += search.query.trim()
+      ? emptyState("press Enter to search", `hits the Web API directly -- not a live local filter`)
+      : emptyState("type a query, Enter to search", "Ctrl+→ album · Alt+→ artist · Ctrl+↓ add to playlist · Alt+Enter demos a failed search");
+  } else if (search.results.length === 0) {
+    html += emptyState(`no results for "${search.query}"`, "try a different query, or check the spelling");
+  } else {
+    html += renderRows(search.results, 0, r => r.title, r => `${r.artist} · ${r.album}`, getSel(), null, null, r => liked.has(r.uri));
+  }
+  return html;
+}
+
+function renderLibraryHome() {
+  const entries = [["Liked Songs", "likedSongs"], ["Saved Albums", "savedAlbums"], ["Followed Artists", "followedArtists"], ["Your Playlists", "yourPlaylists"]];
+  return screenHeader("Library") + ruleLine() + renderRows(entries, 0, e => e[0], null, getSel());
+}
+
+function renderLikedSongs() {
+  return withFetch("likedSongs", () => {
+    if (LIKED_SONGS.length === 0) return screenHeader("Liked Songs") + ruleLine() + emptyState("no liked songs yet", "press Shift+L on any track to like it");
+    const filter = filters.likedSongs;
+    const pairs = filteredSorted(LIKED_SONGS, filter, tr => tr.artist + " " + tr.title);
+    let html = screenHeader("Liked Songs", `${LIKED_SONGS.length} songs`) + ruleLine() + filterHeaderHtml(filter, pairs.length);
+    if (pairs.length === 0) return html + emptyState(`no matches for "${filter.query}"`);
+    html += renderRows(pairs.map(([, tr]) => tr), 0, tr => tr.title, tr => tr.artist, getSel(), null, null, tr => liked.has(tr.uri));
+    return html;
+  });
+}
+
+function renderSavedAlbums() {
+  return withFetch("savedAlbums", () => {
+    if (ALBUMS.length === 0) return screenHeader("Saved Albums") + ruleLine() + emptyState("no saved albums yet", "save albums from the Spotify app for now");
+    const filter = filters.savedAlbums;
+    const pairs = filteredSorted(ALBUMS, filter, a => a.name + " " + a.artist);
+    let html = screenHeader("Saved Albums") + ruleLine() + filterHeaderHtml(filter, pairs.length);
+    if (pairs.length === 0) return html + emptyState(`no matches for "${filter.query}"`);
+    html += renderRows(pairs.map(([, a]) => a), 0, a => a.name, a => a.artist, getSel());
+    return html;
+  });
+}
+
+function renderFollowedArtists() {
+  return withFetch("followedArtists", () => {
+    if (ARTISTS.length === 0) return screenHeader("Followed Artists") + ruleLine() + emptyState("not following anyone yet", "follow artists from the Spotify app for now");
+    const filter = filters.followedArtists;
+    const pairs = filteredSorted(ARTISTS, filter, a => a.name);
+    let html = screenHeader("Followed Artists") + ruleLine() + filterHeaderHtml(filter, pairs.length);
+    if (pairs.length === 0) return html + emptyState(`no matches for "${filter.query}"`);
+    html += renderRows(pairs.map(([, a]) => a), 0, a => a.name, a => a.genres.join(", "), getSel());
+    return html;
+  });
+}
+
+function renderYourPlaylists() {
+  return withFetch("yourPlaylists", () => {
+    if (PLAYLISTS.length === 0) return screenHeader("Your Playlists") + ruleLine() + emptyState("no playlists yet", "press c to create one");
+    const filter = filters.yourPlaylists;
+    const pairs = pinnedFirst(filteredSorted(PLAYLISTS, filter, p => p.name), pins.playlists, p => p.uri);
+    // No keybind legend here -- Help already owns that, and repeating
+    // c/r/d/Shift+P as pills on every visit competed with the actual
+    // list for attention. A count is real info Help can't give you.
+    let html = screenHeader("Your Playlists", `${PLAYLISTS.length} playlists`) + ruleLine() + filterHeaderHtml(filter, pairs.length);
+    if (pairs.length === 0) return html + emptyState(`no matches for "${filter.query}"`);
+    html += renderRows(pairs.map(([, p]) => p), 0, p => p.name, p => `${p.tracks.length} tracks`, getSel(),
+      (p) => pins.playlists.has(p.uri) ? "★" : "", (p) => pins.playlists.has(p.uri) ? "pinned" : "");
+    return html;
+  });
+}
+
+// No top-tracks section, no follow toggle -- see the ARTISTS comment:
+// Spotify removed the top-tracks endpoint outright, and follow/unfollow
+// is real but explicitly deferred past this phase's read-only scope.
+// Follow/unfollow is a real, currently-deferred product capability (see
+// the ARTISTS comment) -- modeled here since it's the same one-key
+// affordance real Spotify has, even though wiring the real Rust side
+// (library_add/library_remove with LibraryId::Artist) is its own
+// separate roadmap item.
+function renderArtistDetail(t) {
+  const a = t.artist;
+  return withFetch("artistDetail:" + a.uri, () => {
+    const followState = following.has(a.uri) ? "following (Shift+F to unfollow)" : "not following (Shift+F to follow)";
+    let html = screenHeader(a.name, esc(a.genres.join(", ")), followState) + ruleLine();
+    if (a.albums.length === 0) return html + emptyState("no albums found for this artist");
+    html += renderRows(a.albums, 0, name => name, null, getSel());
+    return html;
+  });
+}
+
+function renderAlbumDetail(t) {
+  const al = t.album;
+  return withFetch("albumDetail:" + al.name, () => {
+    const saveState = savedAlbumUris.has(al.name) ? "saved (Shift+S to remove)" : "not saved (Shift+S to save)";
+    const html = screenHeader(al.name, `— ${esc(al.artist)}`, `${al.tracks.length} tracks`, saveState) + ruleLine();
+    return html + renderRows(al.tracks, 0, tr => tr.title, tr => tr.dur, getSel(), null, null, tr => liked.has(tr.uri));
+  });
+}
+
+// The one screen with a real gate before you can even reach it (`m`) --
+// eligibility depends on filter/sort state, checked live rather than
+// just disabling the key silently.
+function moveIneligibleReason(p, filter) {
+  if (filter.editing || filter.query || filter.sortAlpha) return "clear the filter and turn off sort to reorder";
+  if (p.tracks.length < 2) return null; // nothing to reorder, but not an error -- `m` just does nothing
+  return "";
+}
+
+function renderPlaylistDetail(t) {
+  const p = t.playlist;
+  return withFetch("playlistDetail:" + p.uri, () => {
+    const filter = playlistFilter(p.uri);
+    if (moveMode) {
+      let html = screenHeader(p.name, `<span class="warn">MOVE MODE</span>`) + ruleLine();
+      html += renderRows(p.tracks, 0, tr => tr.title, tr => tr.artist, getSel(),
+        (tr, i) => i === moveMode.index ? "→" : "", (tr, i) => i === moveMode.index ? "moving" : "");
+      return html;
+    }
+    let html = screenHeader(p.name, `${p.tracks.length} tracks`) + ruleLine();
+    html += filterHeaderHtml(filter, p.tracks.length);
+    if (p.tracks.length === 0) {
+      return html + emptyState("this playlist is empty", "press a from Search, Liked Songs, Now Playing, Queue, or Album Detail to add a track here");
+    }
+    const pairs = pinnedFirst(filteredSorted(p.tracks, filter, tr => tr.artist + " " + tr.title), pins.tracks, tr => tr.uri);
+    if (pairs.length === 0) return html + emptyState(`no matches for "${filter.query}"`);
+    html += renderRows(pairs.map(([, tr]) => tr), 0, tr => tr.title, tr => tr.artist, getSel(),
+      (tr) => pins.tracks.has(tr.uri) ? "★" : "", (tr) => pins.tracks.has(tr.uri) ? "pinned" : "", (tr) => liked.has(tr.uri));
+    return html;
+  });
+}
+
+// No `d`, no `m` -- the public Web API has no remove or reorder
+// endpoint for the queue at all (confirmed by reading rspotify's full
+// method list before building anything here), matching what the
+// official Spotify app can do with its own queue too. Not a corner cut.
+function renderQueue() {
+  return withFetch("queue", () => {
+    let html = screenHeader("Queue") + ruleLine();
+    const current = QUEUE[queueIndex];
+    html += `<div class="dim" style="margin-bottom:8px">now playing: ${current ? esc(current.artist + " — " + current.title) : "(nothing)"}</div>`;
+    if (QUEUE.length === 0) return html + emptyState("queue is empty");
+    html += renderRows(QUEUE, 0, tr => tr.title, tr => tr.artist, getSel(),
+      (tr, i) => i === queueIndex ? "▶" : "", (tr, i) => i === queueIndex ? "playing" : "", (tr) => liked.has(tr.uri));
+    html += `<div class="hint" style="margin-top:8px">refreshes automatically every 5s while this screen is open -- no remove/reorder: the Web API doesn't expose either for the queue</div>`;
+    return html;
+  });
+}
+
+function renderDevices() {
+  return withFetch("devices", () => {
+    let html = screenHeader("Devices", `${DEVICES.length} devices`) + ruleLine();
+    if (DEVICES.length === 0) return html + emptyState("no devices found", "open Spotify on another device, or press r to check again");
+    html += renderRows(DEVICES, 0, d => d.name, d => `${d.kind} · ${d.vol}%`, getSel(),
+      (d) => d.active ? "●" : "", (d) => d.active ? "playing" : "");
+    return html;
+  });
+}
+
+// Verbatim-in-spirit, not byte-for-byte, the real app's own
+// `ui::HELP_SECTIONS` (that's a Rust const inside the actual binary --
+// this reproduces its facts precisely, not its exact string literals).
+// Reference material, not a list you navigate item-by-item -- the
+// 2-column layout below is a deliberate exception to this app's normal
+// single-column convention, earned by that different job.
+const HELP_SECTIONS = [
+  ["Global", [
+    ["Tab", "switch focus between Sidebar and Main"],
+    ["Esc", "back one level; at the root, focus moves to Sidebar"],
+    ["?", "help, from anywhere except Search"],
+    ["q", "quit -- asks “Quit? y/n” first by default (config: confirm_quit=false skips this); never a quit key in Search"],
+    ["Ctrl+C", "immediate quit, no confirm, always (real terminal only -- browsers own this shortcut, can't demo it here)"],
+    ["Space / n / p", "play-pause / next / previous -- every screen except Search"],
+    ["+ / -", "volume -- every screen except Search"],
+    ["/", "search"], ["l", "library"], ["f", "fullscreen Now Playing, from anywhere"],
+    ["Ctrl+P", "quick jump -- any local playlist, track, artist, album, device, or screen by name, from anywhere including Search"],
+  ]],
+  ["Now Playing", [["← / →", "seek ±5s"], ["↑ / ↓", "volume (also +/-)"], ["Shift+L", "like / unlike the current track"]]],
+  ["Sidebar", [
+    ["↑ / ↓", "move selection"], ["Enter / →", "open"],
+    ["Shift+P", "pin / unpin a playlist row"], ["Esc", "no-op -- already at the root"],
+  ]],
+  ["Library lists", [
+    ["↑ / ↓", "move selection (works while a filter is being typed too)"],
+    ["Enter / →", "open (Liked Songs: Enter plays, → does not)"],
+    ["/", "start filtering, live"], ["o", "toggle A–Z sort"],
+    ["Esc", "clears the filter first; a second Esc leaves"],
+    ["Shift+P", "pin / unpin -- Your Playlists, Playlist Detail tracks"],
+    ["Shift+L", "like / unlike a track -- Liked Songs, Playlist Detail, Queue, Album Detail"],
+  ]],
+  ["Playlist CRUD", [
+    ["c", "create a playlist -- any screen except Search"],
+    ["r", "rename -- Your Playlists: selected; Playlist Detail: the open one"],
+    ["d", "remove, always confirms -- warns first if the track appears more than once"],
+    ["Shift+D", "delete the open playlist -- Playlist Detail only, always confirms"],
+    ["a", "add to playlist (opens the picker) -- warns if it's already there"],
+    ["m", "reorder tracks -- Playlist Detail only, needs no filter/sort active"],
+  ]],
+  ["Queue", [["↑ / ↓", "move selection"], ["a", "add the selected track to a playlist"], ["--", "no remove/reorder -- not exposed by the Web API"]]],
+  ["Devices", [["↑ / ↓", "move selection"], ["Enter", "transfer playback here"], ["r", "refresh"]]],
+  ["Artist Detail", [["↑ / ↓", "move selection among albums"], ["Enter / →", "open the album"], ["Shift+F", "follow / unfollow"], ["--", "no top tracks -- Spotify removed that endpoint"]]],
+  ["Album Detail", [["↑ / ↓", "move selection"], ["Enter", "play the album from here"], ["a", "add to playlist"], ["v", "view this album's artist"], ["Shift+S", "save / remove from your library"]]],
+  ["View artist / album", [
+    ["v", "open the track's album (Shift+V for artist)"],
+    ["Ctrl+→ / Alt+→", "album / artist -- Search only"],
+    ["Ctrl+↓", "add a search result to a playlist, without leaving Search"],
+  ]],
+  ["Move mode", [["↑ / ↓", "relocate, locally, no network call per keystroke"], ["g", "jump straight to a position, instead of one slot at a time"], ["Enter", "confirm -- one reorder call"], ["Esc", "cancel -- walks back to the start"]]],
+  ["Overlays", [
+    ["Enter", "prompt: submit · picker/quick jump: activate · confirm: same as y"],
+    ["y / n", "confirm / cancel"], ["Esc", "cancel, no exceptions"],
+    ["any key", "picker & quick jump: narrows the list live, no / needed"],
+  ]],
+];
+
+function renderHelp() {
+  const mid = Math.ceil(HELP_SECTIONS.length / 2);
+  const col = (sections) => sections.map(([title, rows]) => `<div class="help-section">
+      <div class="help-section-title">${esc(title)}</div>
+      ${rows.map(([k, d]) => `<div class="help-row"><span class="help-key">${esc(k)}</span><span class="help-desc">${esc(d)}</span></div>`).join("")}
+    </div>`).join("");
+  return screenHeader("Keybinds") + ruleLine() +
+    `<div class="help-columns"><div class="help-col">${col(HELP_SECTIONS.slice(0, mid))}</div><div class="help-col">${col(HELP_SECTIONS.slice(mid))}</div></div>`;
+}
+
+// 6 static entries -- Help is deliberately NOT one of them, reachable
+// only via `?` -- plus a live, pinned-first view of the user's
+// playlists. No "+ new playlist" row here: the real Sidebar has no `c`
+// binding of its own (confirmed by reading the source directly rather
+// than assumed) -- creating a playlist requires Your Playlists.
 function sidebarEntries() {
   const entries = [
     {type:"menu", label:"Now Playing", icon:"▶", screen:"nowplaying"},
-    {type:"menu", label:"Search", icon:"/", action:() => { mode="input"; inputTarget="search"; inputBuf=""; }},
+    {type:"menu", label:"Search", icon:"/", screen:"search"},
     {type:"menu", label:"Library", icon:"☰", screen:"library"},
+    {type:"menu", label:"Liked Songs", icon:"♥", screen:"likedSongs"},
     {type:"menu", label:"Queue", icon:"≡", screen:"queue"},
     {type:"menu", label:"Devices", icon:"◧", screen:"devices"},
-    {type:"menu", label:"Help", icon:"?", screen:"help"},
     {type:"divider"},
     {type:"section", label:"PLAYLISTS"},
   ];
-  PLAYLISTS.forEach(p => entries.push({type:"playlist", label:p.name, playlist:p}));
-  entries.push({type:"new", label:"+ new playlist", icon:"+"});
+  const pairs = pinnedFirst(PLAYLISTS.map((p, i) => [i, p]), pins.playlists, p => p.uri);
+  pairs.forEach(([, p]) => entries.push({type:"playlist", label:p.name, playlist:p}));
   return entries;
+}
+
+function openScreenFromSidebar(screen) {
+  goto(screen);
+  if (screen === "search") { search = { query: "", cursor: 0, results: [], searching: false }; }
+  if (screen === "devices") ensureFetched("devices");
 }
 
 function activateSidebarEntry(e) {
   if (!e) return;
-  if (e.type === "menu") {
-    if (e.action) e.action(); else goto(e.screen);
-  } else if (e.type === "playlist") {
-    goto("playlistDetail", {playlist: e.playlist});
-  } else if (e.type === "new") {
-    mode = "input"; inputTarget = "create"; inputBuf = "";
-  }
-  // Always -- even while mode is "input" (e.g. the Search shortcut opens
-  // straight into typing). Input mode intercepts keys before any focus
-  // check runs, so this is harmless while typing, and it's the ONLY
-  // place focus was getting set for this path -- skipping it here meant
-  // focus silently stayed "sidebar" even after search results appeared,
-  // and Escape (which only acts when focus === "main") looked broken.
+  if (e.type === "menu") openScreenFromSidebar(e.screen);
+  else if (e.type === "playlist") goto("playlistDetail", {playlist: e.playlist});
   focus = "main";
   render();
 }
 
 function renderSidebar() {
   const entries = sidebarEntries();
-  const rootScreen = stack.length === 1 ? stack[0] : null;
+  const rootScreen = stack.length === 1 ? stack[0] : (stack.length === 2 ? stack[1] : null);
   let html = "";
   let selIdx = 0;
   entries.forEach(e => {
@@ -483,11 +1080,12 @@ function renderSidebar() {
     const isSel = focus === "sidebar" && selIdx === sidebarSel;
     let isOpen = false;
     if (rootScreen) {
-      if (e.type === "menu" && e.screen && rootScreen.screen === e.screen) isOpen = true;
+      if (e.type === "menu" && rootScreen.screen === e.screen) isOpen = true;
       if (e.type === "playlist" && rootScreen.screen === "playlistDetail" && rootScreen.playlist === e.playlist) isOpen = true;
     }
+    const pinMarker = e.type === "playlist" && pins.playlists.has(e.playlist.uri) ? `<span class="pin">★</span>` : "";
     html += `<div class="sb-item${isSel ? " sel" : ""}${isOpen ? " open" : ""}" data-i="${selIdx}">` +
-            `<span class="ic">${e.icon || ""}</span><span class="name">${esc(e.label)}</span></div>`;
+            `<span class="ic">${e.icon || ""}</span><span class="name">${esc(e.label)}</span>${pinMarker}</div>`;
     selIdx++;
   });
   document.getElementById("sidebar").innerHTML = html;
@@ -495,6 +1093,7 @@ function renderSidebar() {
 
 function renderPlaybar() {
   const tr = nowPlaying.track;
+  if (!tr) { document.getElementById("playbar").innerHTML = `<div class="dim">nothing playing</div>`; return; }
   const icon = nowPlaying.playing ? "▶" : "⏸";
   const mm = s => `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;
   const filled = Math.round((nowPlaying.pos / nowPlaying.dur) * 24);
@@ -522,232 +1121,514 @@ function renderPlaybar() {
 function doNext() {
   if (!QUEUE.length) return;
   queueIndex = Math.min(QUEUE.length - 1, queueIndex + 1);
-  nowPlaying.track = QUEUE[queueIndex]; nowPlaying.pos = 0; nowPlaying.playing = true; render();
+  nowPlaying.track = QUEUE[queueIndex]; nowPlaying.pos = 0; nowPlaying.playing = true; nowPlaying.contextLabel = "Queue"; render();
 }
 function doPrev() {
   if (!QUEUE.length) return;
   queueIndex = Math.max(0, queueIndex - 1);
-  nowPlaying.track = QUEUE[queueIndex]; nowPlaying.pos = 0; nowPlaying.playing = true; render();
+  nowPlaying.track = QUEUE[queueIndex]; nowPlaying.pos = 0; nowPlaying.playing = true; nowPlaying.contextLabel = "Queue"; render();
 }
 function togglePlay() { nowPlaying.playing = !nowPlaying.playing; render(); }
 function toggleShuffle() { shuffle = !shuffle; render(); }
 function toggleRepeat() { repeat = !repeat; render(); }
+function setStatus(text, isErr) { status = { text, kind: isErr ? "err" : "ok" }; }
 
-function renderInputScreen() {
-  const titles = {search: "search", create: "new playlist name", rename: "rename playlist"};
-  return line(`<span class="header">${titles[inputTarget]}</span>`) + ruleLine() +
-         line(`&gt; ${esc(inputBuf)}<span class="cursor">&nbsp;</span>`);
+// The three overlays render here, on top of whatever screen is showing
+// underneath -- not a screen-stack replacement, so the context you were
+// acting on (the playlist, the track) stays visible in place. Severity
+// (danger/warn/neutral) sets the border+text color so the risk level
+// reads before the words do.
+function quickJumpEntries() {
+  const entries = [];
+  [["Now Playing", "▶", "nowplaying"], ["Search", "/", "search"], ["Library", "☰", "library"],
+   ["Liked Songs", "♥", "likedSongs"], ["Queue", "≡", "queue"], ["Devices", "◧", "devices"], ["Help", "?", "help"]]
+    .forEach(([label, icon, screen]) => entries.push({ kind: "screen", label, icon, screen }));
+  PLAYLISTS.forEach(p => entries.push({ kind: "playlist", label: p.name, meta: `playlist · ${p.tracks.length} tracks`, playlist: p }));
+  ARTISTS.forEach(a => entries.push({ kind: "artist", label: a.name, meta: "artist", artist: a }));
+  ALBUMS.forEach(a => entries.push({ kind: "album", label: a.name, meta: `album · ${a.artist}`, album: a }));
+  LIKED_SONGS.forEach(t => entries.push({ kind: "track", label: `${t.artist} — ${t.title}`, meta: "liked song", track: t }));
+  DEVICES.forEach(d => entries.push({ kind: "device", label: d.name, meta: d.active ? "device · active" : "device", device: d }));
+  return entries;
+}
+function quickJumpMatches() {
+  const q = quickJump.query.toLowerCase();
+  const all = quickJumpEntries();
+  return (q ? all.filter(e => e.label.toLowerCase().includes(q)) : all).slice(0, 12);
+}
+// Each kind activates the way it already does from its own home screen
+// -- playlist/artist/album open their detail (pure nav), a track plays
+// immediately, a device transfers immediately. No new convention
+// invented, just the existing per-kind "Enter" behavior reached from
+// anywhere instead of only from that entity's own list.
+function activateQuickJump(entry) {
+  quickJump = null;
+  if (!entry) { render(); return; }
+  if (entry.kind === "screen") openScreenFromSidebar(entry.screen);
+  else if (entry.kind === "playlist") push("playlistDetail", { playlist: entry.playlist });
+  else if (entry.kind === "artist") push("artistDetail", { artist: entry.artist });
+  else if (entry.kind === "album") push("albumDetail", { album: entry.album });
+  else if (entry.kind === "track") { nowPlaying.track = entry.track; nowPlaying.playing = true; nowPlaying.pos = 0; nowPlaying.contextLabel = "Liked Songs"; goto("nowplaying"); }
+  else if (entry.kind === "device") { DEVICES.forEach(d => d.active = (d.id === entry.device.id)); setStatus("transferred playback"); }
+  focus = "main";
+  render();
 }
 
 function renderOverlay() {
-  let existing = document.getElementById("overlay");
+  const existing = document.getElementById("overlay");
   if (existing) existing.remove();
-  if (mode !== "confirm") return;
+  let inner = null;
+  if (quickJump) {
+    const matches = quickJumpMatches();
+    const iconFor = { screen: "→", playlist: "☰", artist: "♪", album: "◆", track: "♫", device: "◧" };
+    const list = matches.length
+      ? matches.map((e, i) => row(i, iconFor[e.kind] || "", e.label, e.meta || "", i === quickJump.selected)).join("")
+      : `<div class="hint">no matches</div>`;
+    inner = `<div class="picker-box">
+      <div class="picker-title">Quick jump -- any playlist, track, artist, album, or device</div>
+      <div class="picker-filter">/ ${esc(quickJump.query)}<span class="cursor">&nbsp;</span></div>
+      <div class="picker-list">${list}</div>
+    </div>`;
+  } else if (confirmOverlay) {
+    const sev = confirmOverlay.severity;
+    inner = `<div class="modal-box sev-${sev}">
+      <div class="modal-msg sev-${sev}">${esc(confirmOverlay.message)}</div>
+      <div class="modal-hint"><span class="modal-btn" data-act="confirm-yes">y / Enter = confirm</span> &nbsp;&nbsp; <span class="modal-btn" data-act="confirm-no">n / Esc = cancel</span></div>
+    </div>`;
+  } else if (textPrompt) {
+    const before = esc(textPrompt.buf.slice(0, textPrompt.cursor));
+    const after = esc(textPrompt.buf.slice(textPrompt.cursor));
+    inner = `<div class="modal-box sev-neutral">
+      <div class="modal-title">${esc(textPrompt.title)}</div>
+      <div class="prompt-input">${before}<span class="cursor">&nbsp;</span>${after}</div>
+    </div>`;
+  } else if (picker) {
+    const label = p => p.name;
+    const pairs = pinnedFirst(filteredSorted(PLAYLISTS, picker.filter, label), pins.playlists, p => p.uri);
+    let list;
+    if (PLAYLISTS.length === 0) list = `<div class="hint">no playlists yet -- press c to create one from Your Playlists</div>`;
+    else if (pairs.length === 0) list = `<div class="hint">no matches</div>`;
+    else list = pairs.map(([, p], i) => row(i, pins.playlists.has(p.uri) ? "★" : "", p.name, `${p.tracks.length} tracks`, i === picker.selected)).join("");
+    inner = `<div class="picker-box">
+      <div class="picker-title">Add “${esc(picker.trackLabel)}” to…</div>
+      <div class="picker-filter">/ ${esc(picker.filter.query)}<span class="cursor">&nbsp;</span></div>
+      <div class="picker-list">${list}</div>
+    </div>`;
+  }
+  if (!inner) return;
   const div = document.createElement("div");
   div.id = "overlay";
   div.className = "modal-overlay";
-  div.innerHTML = `<div class="modal-box">
-    <div class="danger" style="margin-bottom:10px;">${esc(confirmMsg)}</div>
-    <div class="dim">y = confirm&nbsp;&nbsp;&nbsp;n / Esc = cancel</div>
-  </div>`;
+  div.innerHTML = inner;
   document.getElementById("shell").appendChild(div);
+  // Real mouse parity for overlays -- the banner claims "keyboard AND
+  // mouse both work here" but every overlay was keyboard-only until
+  // now: clicking a picker/quick-jump row activated nothing, clicking
+  // confirm's y/n text did nothing, and there was no click-outside-to-
+  // dismiss. `#overlay` is fully recreated every render, so binding
+  // fresh listeners here each time is safe (no leak to clean up).
+  div.addEventListener("click", (e) => {
+    if (e.target === div) { confirmOverlay = null; textPrompt = null; picker = null; quickJump = null; render(); return; }
+    const btn = e.target.closest("[data-act]");
+    if (btn && confirmOverlay) { btn.dataset.act === "confirm-yes" ? fireConfirm() : (confirmOverlay = null); render(); return; }
+    const rowEl = e.target.closest("[data-i]");
+    if (!rowEl) return;
+    const i = parseInt(rowEl.dataset.i, 10);
+    if (picker) { picker.selected = i; confirmAddToPicker(); }
+    else if (quickJump) { activateQuickJump(quickJumpMatches()[i]); }
+  });
 }
 
 /* ---------- input handling ---------- */
 
+// No more "never show truly empty" fallback -- that hack existed only
+// because there was no designed empty-results state yet. There is now,
+// so a query that genuinely matches nothing shows exactly that, which
+// matters: a real, previously-live-reported failure class (Dev Mode's
+// "Invalid limit" 400s) looks exactly like this from the UI's side, and
+// it deserves the same design scrutiny as the happy path.
 function doSearch(q) {
   const words = q.toLowerCase();
-  searchResults = Object.values(TRACKS).filter(t =>
+  search.results = Object.values(TRACKS).filter(t =>
     (t.title + " " + t.artist).toLowerCase().includes(words.split(" ")[0])
   );
-  if (searchResults.length === 0) searchResults = [TRACKS.listenDown, TRACKS.blue]; // never show truly empty in a preview
+  search.searched = true;
+  search.error = null;
+}
+
+/* ---------- overlay actions ---------- */
+
+function openConfirm(message, severity, action) { confirmOverlay = { message, severity, action }; }
+function fireConfirm() {
+  if (!confirmOverlay) return;
+  const action = confirmOverlay.action;
+  confirmOverlay = null;
+  action();
+}
+function openTextPrompt(title, initial, onSubmit) {
+  textPrompt = { title, buf: initial, cursor: initial.length, onSubmit };
+}
+function openPicker(track) {
+  picker = { trackUri: track.uri, trackLabel: `${track.artist} — ${track.title}`, selected: 0, filter: { query: "", cursor: 0 } };
+}
+function pickedPlaylist() {
+  const label = p => p.name;
+  const pairs = pinnedFirst(filteredSorted(PLAYLISTS, picker.filter, label), pins.playlists, p => p.uri);
+  return pairs[picker.selected] ? pairs[picker.selected][1] : null;
+}
+// Checks membership before adding rather than warning after -- a
+// would-be duplicate can be caught before it happens at all, unlike an
+// unwanted removal which is already real by the time you'd notice.
+function confirmAddToPicker() {
+  const target = pickedPlaylist();
+  const trackUri = picker.trackUri, trackLabel = picker.trackLabel;
+  picker = null;
+  if (!target) return;
+  const already = target.tracks.some(t => t.uri === trackUri);
+  const doAdd = () => { target.tracks.push(Object.values(TRACKS).find(t => t.uri === trackUri)); setStatus("added to playlist"); render(); };
+  if (already) {
+    openConfirm(`“${trackLabel}” is already in “${target.name}”. Add it again anyway?`, "warn", doAdd);
+    render();
+  } else {
+    doAdd();
+  }
+}
+
+function removeTrackAt(playlist, idx) {
+  const track = playlist.tracks[idx];
+  const occurrences = playlist.tracks.filter(t => t.uri === track.uri).length;
+  const message = occurrences > 1
+    ? `“${track.artist} — ${track.title}” appears ${occurrences} times in this playlist -- Spotify's API can only remove ALL copies at once, not a single one. Remove all ${occurrences}?`
+    : `Remove “${track.artist} — ${track.title}” from this playlist?`;
+  openConfirm(message, "danger", () => {
+    playlist.tracks = playlist.tracks.filter(t => t.uri !== track.uri);
+    setSel(Math.max(0, getSel() - 1));
+    setStatus("removed from playlist");
+    render();
+  });
+}
+function deletePlaylist(playlist) {
+  openConfirm(`Delete playlist “${playlist.name}”?`, "danger", () => {
+    PLAYLISTS = PLAYLISTS.filter(p => p.uri !== playlist.uri);
+    pins.playlists.delete(playlist.uri);
+    if (curScreen().screen === "playlistDetail" && curScreen().playlist.uri === playlist.uri) { pop(); focus = "sidebar"; }
+    setSel(Math.max(0, getSel() - 1));
+    setStatus("playlist deleted");
+    render();
+  });
+}
+
+// The one gated key in the app -- eligibility depends on filter/sort
+// state, and the reason is surfaced as a status message rather than a
+// blocking modal (this isn't destructive, just temporarily unavailable).
+function tryEnterMoveMode(playlist, filter) {
+  if (filter.editing || filter.query || filter.sortAlpha) { setStatus("clear the filter and turn off sort to reorder", true); render(); return; }
+  if (playlist.tracks.length < 2) return;
+  moveMode = { list: playlist.tracks, index: getSel(), start: getSel(), playlist };
+  render();
+}
+
+// "The selected track," resolved the same way across every track-
+// bearing screen -- pulled out once `a` and Shift+L both needed it.
+function selectedTrackOnScreen(t) {
+  if (t.screen === "likedSongs") return LIKED_SONGS[getSel()];
+  if (t.screen === "albumDetail") return t.album.tracks[getSel()];
+  if (t.screen === "queue") return QUEUE[getSel()];
+  if (t.screen === "playlistDetail") {
+    const pairs = pinnedFirst(filteredSorted(t.playlist.tracks, playlistFilter(t.playlist.uri), tr => tr.artist + " " + tr.title), pins.tracks, tr => tr.uri);
+    return pairs[getSel()] ? pairs[getSel()][1] : null;
+  }
+  return null;
+}
+
+function handleGlobalKeys(key) {
+  if (key === " ") { togglePlay(); return true; }
+  if (key === "n") { doNext(); return true; }
+  if (key === "p") { doPrev(); return true; }
+  if (key === "s") { toggleShuffle(); return true; }
+  if (key === "R") { toggleRepeat(); return true; }
+  if (key === "+") { nowPlaying.vol = Math.min(100, nowPlaying.vol + 10); render(); return true; }
+  if (key === "-") { nowPlaying.vol = Math.max(0, nowPlaying.vol - 10); render(); return true; }
+  if (key === "f") { if (curScreen().screen === "nowplaying") fullscreen = !fullscreen; else { fullscreen = true; goto("nowplaying"); } render(); return true; }
+  if (key === "l") { goto("library"); render(); return true; }
+  if (key === "c") { openTextPrompt("New playlist name", "", (name) => {
+      const p = { uri: "spotify:playlist:new" + Date.now(), name: name || "untitled", tracks: [] };
+      PLAYLISTS.push(p); setStatus("playlist created"); render();
+    }); render(); return true; }
+  return false;
 }
 
 document.addEventListener("keydown", (e) => {
   const key = e.key;
   const t = curScreen();
 
-  // ---- text input mode ----
-  if (mode === "input") {
-    if (key === "Escape") { mode = null; inputBuf = ""; render(); e.preventDefault(); return; }
-    if (key === "Enter") {
-      if (inputTarget === "search") { doSearch(inputBuf); goto("search"); }
-      if (inputTarget === "create") { PLAYLISTS.push({name: inputBuf || "untitled", tracks: []}); }
-      if (inputTarget === "rename") { t.playlist.name = inputBuf || t.playlist.name; }
-      mode = null; inputBuf = "";
-      render(); e.preventDefault(); return;
-    }
-    if (key === "Backspace") { inputBuf = inputBuf.slice(0,-1); render(); e.preventDefault(); return; }
-    if (key.length === 1) { inputBuf += key; render(); e.preventDefault(); return; }
+  // Interception order mirrors the real app exactly: confirm > prompt >
+  // picker > Tab > the q-confirms-quit gate > Sidebar-focus > Main-focus
+  // per-screen dispatch. Whichever of the first three is set owns the
+  // keypress completely -- nothing below it ever runs. Quick jump is a
+  // fourth overlay of the same family, checked first alongside them.
+  if (quickJump) {
+    const matches = quickJumpMatches();
+    if (key === "Escape") { quickJump = null; render(); }
+    else if (key === "ArrowUp") { quickJump.selected = Math.max(0, quickJump.selected - 1); render(); }
+    else if (key === "ArrowDown") { quickJump.selected = Math.min(Math.max(0, matches.length - 1), quickJump.selected + 1); render(); }
+    else if (key === "Backspace") { quickJump.query = quickJump.query.slice(0, -1); quickJump.selected = 0; render(); }
+    else if (key === "Enter") { activateQuickJump(matches[quickJump.selected]); }
+    else if (key.length === 1) { quickJump.query += key; quickJump.selected = 0; render(); }
+    e.preventDefault(); return;
+  }
+  // Works from literally anywhere, Search's query box included -- a
+  // Ctrl-modified key is unambiguous and never collides with typing,
+  // the same reasoning that already carves out Ctrl+→/Alt+→/Ctrl+↓ on
+  // Search specifically.
+  if (e.ctrlKey && key === "p" && !confirmOverlay && !textPrompt && !picker) {
+    quickJump = { query: "", cursor: 0, selected: 0 }; render(); e.preventDefault(); return;
+  }
+  if (confirmOverlay) {
+    if (key === "y" || key === "Enter") fireConfirm();
+    else if (key === "n" || key === "Escape") confirmOverlay = null;
+    render(); e.preventDefault(); return;
+  }
+  if (textPrompt) {
+    if (key === "Escape") { textPrompt = null; render(); e.preventDefault(); return; }
+    if (key === "Enter") { const onSubmit = textPrompt.onSubmit; const buf = textPrompt.buf; textPrompt = null; onSubmit(buf); e.preventDefault(); return; }
+    if (key === "Backspace") { textPrompt.buf = textPrompt.buf.slice(0, textPrompt.cursor - 1) + textPrompt.buf.slice(textPrompt.cursor); textPrompt.cursor = Math.max(0, textPrompt.cursor - 1); render(); e.preventDefault(); return; }
+    if (key === "ArrowLeft") { textPrompt.cursor = Math.max(0, textPrompt.cursor - 1); render(); e.preventDefault(); return; }
+    if (key === "ArrowRight") { textPrompt.cursor = Math.min(textPrompt.buf.length, textPrompt.cursor + 1); render(); e.preventDefault(); return; }
+    if (key.length === 1) { textPrompt.buf = textPrompt.buf.slice(0, textPrompt.cursor) + key + textPrompt.buf.slice(textPrompt.cursor); textPrompt.cursor++; render(); e.preventDefault(); return; }
     return;
   }
-
-  // ---- confirm mode ----
-  if (mode === "confirm") {
-    if (key === "y") { confirmAction(); mode = null; render(); }
-    if (key === "n" || key === "Escape") { mode = null; render(); }
-    e.preventDefault();
-    return;
+  if (picker) {
+    const count = () => filteredSorted(PLAYLISTS, picker.filter, p => p.name).length;
+    if (key === "Escape") { picker = null; render(); }
+    else if (key === "ArrowUp") { picker.selected = Math.max(0, picker.selected - 1); render(); }
+    else if (key === "ArrowDown") { picker.selected = Math.min(Math.max(0, count() - 1), picker.selected + 1); render(); }
+    else if (key === "ArrowLeft") { picker.filter.cursor = Math.max(0, picker.filter.cursor - 1); render(); }
+    else if (key === "ArrowRight") { picker.filter.cursor = Math.min(picker.filter.query.length, picker.filter.cursor + 1); render(); }
+    else if (key === "Backspace") { const q = picker.filter.query; picker.filter.query = q.slice(0, picker.filter.cursor - 1) + q.slice(picker.filter.cursor); picker.filter.cursor = Math.max(0, picker.filter.cursor - 1); picker.selected = 0; render(); }
+    else if (key === "Enter") { confirmAddToPicker(); }
+    else if (key.length === 1) { const q = picker.filter.query; picker.filter.query = q.slice(0, picker.filter.cursor) + key + q.slice(picker.filter.cursor); picker.filter.cursor++; picker.selected = 0; render(); }
+    e.preventDefault(); return;
   }
-
-  // ---- move mode ----
-  if (mode === "move") {
-    if (key === "ArrowUp" && moveIndex > 0) {
-      [moveList[moveIndex-1], moveList[moveIndex]] = [moveList[moveIndex], moveList[moveIndex-1]];
-      moveIndex--; setSel(moveIndex);
-    }
-    if (key === "ArrowDown" && moveIndex < moveList.length-1) {
-      [moveList[moveIndex+1], moveList[moveIndex]] = [moveList[moveIndex], moveList[moveIndex+1]];
-      moveIndex++; setSel(moveIndex);
-    }
-    if (key === "Enter" || key === "Escape") { mode = null; moveList = null; moveIndex = null; }
+  if (key === "Tab") { focus = focus === "sidebar" ? "main" : "sidebar"; render(); e.preventDefault(); return; }
+  // `q` asks first, same as every other destructive action -- except
+  // Search, where it's never a quit key at all (a literal character the
+  // query box needs, same standing exception as every other letter).
+  if (key === "q" && !(focus === "main" && t.screen === "search")) {
+    openConfirm("Quit spot-tui?", "neutral", () => { document.getElementById("main").innerHTML = `<div class="dim" style="padding:24px">bye.</div>`; });
     render(); e.preventDefault(); return;
   }
 
-  // ---- global keys (work regardless of focus) ----
-  if (key === "Tab") { focus = focus === "sidebar" ? "main" : "sidebar"; render(); e.preventDefault(); return; }
-  if (key === "q") { document.getElementById("main").innerHTML = line("bye.", "dim"); return; }
-  if (key === " ") { togglePlay(); e.preventDefault(); return; }
-  if (key === "n") { doNext(); return; }
-  if (key === "p") { doPrev(); return; }
-  if (key === "s") { toggleShuffle(); return; }
-  if (key === "R") { toggleRepeat(); return; }
-  if (key === "+" ) { nowPlaying.vol = Math.min(100, nowPlaying.vol+10); render(); return; }
-  if (key === "-") { nowPlaying.vol = Math.max(0, nowPlaying.vol-10); render(); return; }
-  if (key === "ArrowLeft") { nowPlaying.pos = Math.max(0, nowPlaying.pos-5); render(); return; }
-  if (key === "ArrowRight") { nowPlaying.pos = Math.min(nowPlaying.dur, nowPlaying.pos+5); render(); return; }
-  if (key === "f" && t.screen === "nowplaying") { fullscreen = !fullscreen; render(); return; }
-  if (key === "?") { goto("help"); focus = "main"; render(); return; }
-  if (key === "D") { goto("devices"); focus = "main"; render(); return; }
-  if (key === "l") { goto("library"); focus = "main"; render(); return; }
-  if (key === "/" && t.screen !== "search") { mode = "input"; inputTarget = "search"; inputBuf = ""; render(); return; }
-  if (key === "Escape") {
-    if (fullscreen) { fullscreen = false; render(); return; }
-    if (focus === "main") {
-      // Pop one level, and if that lands back at the root, hand focus
-      // to the sidebar in the same keystroke -- a separate second Esc
-      // just to reach the sidebar felt like one press too many.
-      if (stack.length > 1) pop();
-      if (stack.length === 1) focus = "sidebar";
-      render(); return;
-    }
-    return;
-  }
-
-  // ---- sidebar-focused navigation ----
+  // ---- sidebar-focused navigation (no `c` here -- verified: the real
+  // Sidebar has no create-playlist binding of its own, only Your
+  // Playlists does) ----
   if (focus === "sidebar") {
     const selectable = sidebarEntries().filter(x => x.type !== "divider" && x.type !== "section");
-    if (key === "ArrowUp") { sidebarSel = Math.max(0, sidebarSel-1); render(); return; }
-    if (key === "ArrowDown") { sidebarSel = Math.min(selectable.length-1, sidebarSel+1); render(); return; }
-    if (key === "Enter") { activateSidebarEntry(selectable[sidebarSel]); return; }
-    if (key === "c") { mode = "input"; inputTarget = "create"; inputBuf = ""; render(); return; }
-    return;
+    if (key === "ArrowUp") { sidebarSel = Math.max(0, sidebarSel - 1); render(); }
+    else if (key === "ArrowDown") { sidebarSel = Math.min(selectable.length - 1, sidebarSel + 1); render(); }
+    else if (key === "Enter" || key === "Right") { activateSidebarEntry(selectable[sidebarSel]); }
+    else if (key === "?") { push("help"); focus = "main"; render(); }
+    else if (key === "f") { fullscreen = true; goto("nowplaying"); render(); }
+    else if (key === "/") { openScreenFromSidebar("search"); focus = "main"; render(); }
+    else if (key === "P") {
+      const entry = selectable[sidebarSel];
+      if (entry && entry.type === "playlist") { const u = entry.playlist.uri; pins.playlists.has(u) ? pins.playlists.delete(u) : pins.playlists.add(u); render(); }
+    }
+    e.preventDefault(); return;
   }
 
-  // ---- contextual: list navigation (main pane only, focus === "main" from here down) ----
-  const listOf = {
-    library: 4,
-    likedSongs: LIKED_SONGS.length, savedAlbums: ALBUMS.length,
-    followedArtists: ARTISTS.length, yourPlaylists: PLAYLISTS.length,
-    search: searchResults.length, queue: QUEUE.length, devices: DEVICES.length,
-    artistDetail: t.name ? t.name.topTracks.length : 0,
-    albumDetail: t.album ? t.album.tracks.length : 0,
-    playlistDetail: t.playlist ? t.playlist.tracks.length : 0,
-    addToPlaylistPicker: PLAYLISTS.length,
-  };
-  const count = listOf[t.screen] || 0;
-  if (key === "ArrowUp" && count) { setSel(Math.max(0, getSel()-1)); render(); return; }
-  if (key === "ArrowDown" && count) { setSel(Math.min(count-1, getSel()+1)); render(); return; }
-
-  // ---- contextual: Enter ----
-  if (key === "Enter") {
-    if (t.screen === "library") {
-      const dest = ["likedSongs","savedAlbums","followedArtists","yourPlaylists"][getSel()];
-      push(dest); setSel(0);
-    } else if (t.screen === "likedSongs" || t.screen === "search" || t.screen === "queue") {
-      const list = t.screen === "likedSongs" ? LIKED_SONGS : t.screen === "search" ? searchResults : QUEUE;
-      nowPlaying.track = list[getSel()]; nowPlaying.playing = true; nowPlaying.pos = 0;
-      goto("nowplaying");
-    } else if (t.screen === "savedAlbums") {
-      push("albumDetail", {album: ALBUMS[getSel()]}); setSel(0);
-    } else if (t.screen === "followedArtists") {
-      push("artistDetail", {name: ARTISTS[getSel()]}); setSel(0);
-    } else if (t.screen === "yourPlaylists") {
-      push("playlistDetail", {playlist: PLAYLISTS[getSel()]}); setSel(0);
-    } else if (t.screen === "artistDetail") {
-      nowPlaying.track = t.name.topTracks[getSel()]; nowPlaying.playing = true; nowPlaying.pos = 0;
-      goto("nowplaying");
-    } else if (t.screen === "albumDetail") {
-      nowPlaying.track = t.album.tracks[getSel()]; nowPlaying.playing = true; nowPlaying.pos = 0;
-      goto("nowplaying");
-    } else if (t.screen === "playlistDetail") {
-      if (t.playlist.tracks.length) {
-        nowPlaying.track = t.playlist.tracks[getSel()]; nowPlaying.playing = true; nowPlaying.pos = 0;
-        goto("nowplaying");
-      }
-    } else if (t.screen === "addToPlaylistPicker") {
-      PLAYLISTS[getSel()].tracks.push(t.track);
-      pop();
-    } else if (t.screen === "devices") {
-      DEVICES.forEach((d,i) => d.active = (i === getSel()));
+  // ---- Main focus, per screen ----
+  if (t.screen === "search") {
+    if (key === "Escape") { pop(); focus = stack.length === 1 ? "sidebar" : focus; render(); }
+    else if (key === "Backspace") { search.query = search.query.slice(0, search.cursor - 1) + search.query.slice(search.cursor); search.cursor = Math.max(0, search.cursor - 1); search.results = []; search.searched = false; search.error = null; render(); }
+    else if (key === "ArrowLeft") { search.cursor = Math.max(0, search.cursor - 1); render(); }
+    else if (e.ctrlKey && key === "ArrowRight") { const r = search.results[getSel()]; if (r) { push("albumDetail", { album: ALBUMS.find(a => a.name === r.album) || { name: r.album, artist: r.artist, tracks: [r] } }); } render(); }
+    else if (e.altKey && key === "ArrowRight") { const r = search.results[getSel()]; if (r) { push("artistDetail", { artist: ARTISTS.find(a => a.name === r.artist) || { name: r.artist, genres: [], albums: [] } }); } render(); }
+    else if (key === "ArrowRight") { search.cursor = Math.min(search.query.length, search.cursor + 1); render(); }
+    else if (key === "ArrowUp") { setSel(Math.max(0, getSel() - 1)); render(); }
+    else if (e.ctrlKey && key === "ArrowDown") { const r = search.results[getSel()]; if (r) { openPicker(r); } render(); }
+    else if (key === "ArrowDown") { if (search.results.length) setSel(Math.min(search.results.length - 1, getSel() + 1)); render(); }
+    // Alt+Enter, not bare `!` -- every printable character on Search has
+    // to reach the query box with zero exceptions (that's the whole
+    // point of this screen), so the demo-error trigger every other
+    // fetchable screen uses had to become a modifier combo here instead,
+    // same reasoning as Ctrl+→/Alt+→/Ctrl+↓ already being modifier-only.
+    else if (e.altKey && key === "Enter") { search.error = "HTTP 400 Bad Request: Invalid limit"; search.results = []; render(); }
+    else if (key === "Enter") {
+      if (search.results.length === 0) { if (search.query.trim()) doSearch(search.query); }
+      else { const r = search.results[getSel()]; nowPlaying.track = r; nowPlaying.playing = true; nowPlaying.pos = 0; nowPlaying.contextLabel = "Search"; goto("nowplaying"); }
+      render();
+    } else if (key.length === 1) {
+      search.query = search.query.slice(0, search.cursor) + key + search.query.slice(search.cursor); search.cursor++; search.results = []; search.searched = false; search.error = null; render();
     }
+    e.preventDefault(); return;
+  }
+
+  if (moveMode) {
+    if (key === "ArrowUp" && moveMode.index > 0) {
+      const l = moveMode.list; [l[moveMode.index - 1], l[moveMode.index]] = [l[moveMode.index], l[moveMode.index - 1]];
+      moveMode.index--; setSel(moveMode.index);
+    } else if (key === "ArrowDown" && moveMode.index < moveMode.list.length - 1) {
+      const l = moveMode.list; [l[moveMode.index + 1], l[moveMode.index]] = [l[moveMode.index], l[moveMode.index + 1]];
+      moveMode.index++; setSel(moveMode.index);
+    } else if (key === "Enter") {
+      setStatus(moveMode.index === moveMode.start ? "unchanged" : "reordered"); moveMode = null;
+    } else if (key === "Escape") {
+      // Walks back to the start index -- only one track ever actually
+      // moved, so this exactly restores original order.
+      const l = moveMode.list; let i = moveMode.index;
+      while (i > moveMode.start) { [l[i - 1], l[i]] = [l[i], l[i - 1]]; i--; }
+      while (i < moveMode.start) { [l[i + 1], l[i]] = [l[i], l[i + 1]]; i++; }
+      setSel(moveMode.start); moveMode = null;
+    } else if (key === "g") {
+      // One-at-a-time nudging is O(distance) -- moving a track 49 slots
+      // takes 49 keystrokes, the single most quantifiable place this
+      // app is slower than a mouse drag in real Spotify. `g` jumps
+      // straight to a position instead, closing that gap without
+      // touching the reorder API (still one reorder_track call on
+      // confirm either way -- this only changes how many local swaps
+      // happen before that call).
+      const n = moveMode.list.length;
+      openTextPrompt(`Move to position (1-${n})`, String(moveMode.index + 1), (buf) => {
+        const target = Math.min(n, Math.max(1, parseInt(buf, 10) || (moveMode.index + 1))) - 1;
+        const [item] = moveMode.list.splice(moveMode.index, 1);
+        moveMode.list.splice(target, 0, item);
+        moveMode.index = target; setSel(target);
+        render();
+      });
+      render(); e.preventDefault(); return;
+    }
+    render(); e.preventDefault(); return;
+  }
+
+  const filterable = { likedSongs: filters.likedSongs, savedAlbums: filters.savedAlbums, followedArtists: filters.followedArtists, yourPlaylists: filters.yourPlaylists,
+                        playlistDetail: t.screen === "playlistDetail" ? playlistFilter(t.playlist.uri) : null }[t.screen];
+  if (filterable) {
+    const filter = filterable;
+    if (filter.editing) {
+      if (key === "Escape") { filter.editing = false; filter.query = ""; filter.cursor = 0; setSel(0); render(); e.preventDefault(); return; }
+      if (key === "Enter") { filter.editing = false; render(); e.preventDefault(); return; }
+      if (key === "Backspace") { filter.query = filter.query.slice(0, filter.cursor - 1) + filter.query.slice(filter.cursor); filter.cursor = Math.max(0, filter.cursor - 1); setSel(0); render(); e.preventDefault(); return; }
+      if (key === "ArrowLeft") { filter.cursor = Math.max(0, filter.cursor - 1); render(); e.preventDefault(); return; }
+      if (key === "ArrowRight") { filter.cursor = Math.min(filter.query.length, filter.cursor + 1); render(); e.preventDefault(); return; }
+      if (key.length === 1) { filter.query = filter.query.slice(0, filter.cursor) + key + filter.query.slice(filter.cursor); filter.cursor++; setSel(0); render(); e.preventDefault(); return; }
+    } else if (key === "Escape" && filter.query) { filter.query = ""; filter.cursor = 0; setSel(0); render(); e.preventDefault(); return; }
+    else if (key === "/") { filter.editing = true; filter.cursor = filter.query.length; render(); e.preventDefault(); return; }
+    else if (key === "o") { filter.sortAlpha = !filter.sortAlpha; render(); e.preventDefault(); return; }
+  }
+
+  // Cycles the 3 real LyricsState variants besides Synced that this
+  // preview otherwise never has a reason to render (Instrumental,
+  // NotFound, Plain/unsynced) -- same debug convention as forcing an
+  // error state elsewhere, applied to Now Playing specifically.
+  if (key === "!" && t.screen === "nowplaying") {
+    const order = ["synced", "plain", "instrumental", "notfound"];
+    lyricsDemoState = order[(order.indexOf(lyricsDemoState) + 1) % order.length];
+    render(); e.preventDefault(); return;
+  }
+  if (key === "!") { const keys = { likedSongs: "likedSongs", savedAlbums: "savedAlbums", followedArtists: "followedArtists", yourPlaylists: "yourPlaylists", queue: "queue", devices: "devices",
+      artistDetail: t.artist ? "artistDetail:" + t.artist.uri : null, albumDetail: t.album ? "albumDetail:" + t.album.name : null, playlistDetail: t.playlist ? "playlistDetail:" + t.playlist.uri : null }[t.screen];
+    if (keys) { forceRefetchAsError(keys); render(); } e.preventDefault(); return; }
+  if (key === "r" && t.screen === "devices") { visitedOnce.delete("devices"); ensureFetched("devices"); render(); return; }
+
+  if (t.screen === "nowplaying") {
+    if (key === "ArrowLeft") { nowPlaying.pos = Math.max(0, nowPlaying.pos - 5); render(); e.preventDefault(); return; }
+    if (key === "ArrowRight") { nowPlaying.pos = Math.min(nowPlaying.dur, nowPlaying.pos + 5); render(); e.preventDefault(); return; }
+    if (key === "ArrowUp") { nowPlaying.vol = Math.min(100, nowPlaying.vol + 10); render(); e.preventDefault(); return; }
+    if (key === "ArrowDown") { nowPlaying.vol = Math.max(0, nowPlaying.vol - 10); render(); e.preventDefault(); return; }
+    if (key === "Escape") { focus = "sidebar"; render(); return; }
+    if (key === "/") { openScreenFromSidebar("search"); render(); return; }
+    if (key === "a" && nowPlaying.track) { openPicker(nowPlaying.track); render(); return; }
+    if (key === "L" && nowPlaying.track) {
+      const tr = nowPlaying.track;
+      if (liked.has(tr.uri)) { liked.delete(tr.uri); setStatus("removed from Liked Songs"); }
+      else { liked.add(tr.uri); if (!LIKED_SONGS.some(x => x.uri === tr.uri)) LIKED_SONGS.unshift(tr); setStatus("added to Liked Songs"); }
+      render(); return;
+    }
+    if (handleGlobalKeys(key)) return;
+    return;
+  }
+  if (handleGlobalKeys(key)) return;
+
+  if (key === "Escape" || key === "ArrowLeft") {
+    if (stack.length > 1) pop(); if (stack.length === 1) focus = "sidebar"; render(); return;
+  }
+
+  const count = { library: 4, likedSongs: LIKED_SONGS.length, savedAlbums: ALBUMS.length, followedArtists: ARTISTS.length, yourPlaylists: PLAYLISTS.length,
+    queue: QUEUE.length, devices: DEVICES.length, artistDetail: t.artist ? t.artist.albums.length : 0,
+    albumDetail: t.album ? t.album.tracks.length : 0, playlistDetail: t.playlist ? t.playlist.tracks.length : 0 }[t.screen] || 0;
+  if (key === "ArrowUp" && count) { setSel(Math.max(0, getSel() - 1)); render(); return; }
+  if (key === "ArrowDown" && count) { setSel(Math.min(count - 1, getSel() + 1)); render(); return; }
+
+  const pureNavRight = key === "ArrowRight" && ["library", "savedAlbums", "followedArtists", "yourPlaylists", "artistDetail"].includes(t.screen);
+  if (key === "Enter" || pureNavRight) {
+    if (t.screen === "library") { push(["likedSongs", "savedAlbums", "followedArtists", "yourPlaylists"][getSel()]); }
+    else if (t.screen === "likedSongs") { const tr = LIKED_SONGS[getSel()]; nowPlaying.track = tr; nowPlaying.playing = true; nowPlaying.pos = 0; nowPlaying.contextLabel = "Liked Songs"; goto("nowplaying"); }
+    else if (t.screen === "savedAlbums") { push("albumDetail", { album: ALBUMS[getSel()] }); }
+    else if (t.screen === "followedArtists") { push("artistDetail", { artist: ARTISTS[getSel()] }); }
+    else if (t.screen === "yourPlaylists") { push("playlistDetail", { playlist: PLAYLISTS[getSel()] }); }
+    else if (t.screen === "artistDetail") { const albumName = t.artist.albums[getSel()]; push("albumDetail", { album: ALBUMS.find(a => a.name === albumName) || { name: albumName, artist: t.artist.name, tracks: [] } }); }
+    else if (t.screen === "albumDetail" && key === "Enter") { const tr = t.album.tracks[getSel()]; if (tr) { nowPlaying.track = tr; nowPlaying.playing = true; nowPlaying.pos = 0; nowPlaying.contextLabel = t.album.name; goto("nowplaying"); } }
+    else if (t.screen === "playlistDetail" && key === "Enter" && t.playlist.tracks.length) { const tr = t.playlist.tracks[getSel()]; nowPlaying.track = tr; nowPlaying.playing = true; nowPlaying.pos = 0; nowPlaying.contextLabel = t.playlist.name; goto("nowplaying"); }
+    else if (t.screen === "queue" && key === "Enter") { queueIndex = getSel(); nowPlaying.track = QUEUE[queueIndex]; nowPlaying.playing = true; nowPlaying.pos = 0; nowPlaying.contextLabel = "Queue"; goto("nowplaying"); }
+    else if (t.screen === "devices" && key === "Enter") { DEVICES.forEach((d, i) => d.active = (i === getSel())); setStatus("transferred playback"); }
     render(); return;
   }
 
-  // ---- contextual: a (add to playlist) ----
   if (key === "a") {
-    let track = null;
-    if (t.screen === "nowplaying") track = nowPlaying.track;
-    else if (t.screen === "search" && searchResults.length) track = searchResults[getSel()];
-    else if (t.screen === "likedSongs") track = LIKED_SONGS[getSel()];
-    else if (t.screen === "albumDetail") track = t.album.tracks[getSel()];
-    else if (t.screen === "artistDetail") track = t.name.topTracks[getSel()];
-    else if (t.screen === "queue") track = QUEUE[getSel()];
-    if (track) { push("addToPlaylistPicker", {track}); setSel(0); render(); }
+    const track = selectedTrackOnScreen(t);
+    if (track) { openPicker(track); render(); }
     return;
   }
-
-  // ---- contextual: c (create playlist) ----
-  if (key === "c" && (t.screen === "yourPlaylists" || t.screen === "addToPlaylistPicker")) {
-    mode = "input"; inputTarget = "create"; inputBuf = ""; render(); return;
+  // Real, currently-missing product gap: spot-tui has no way to like a
+  // track from inside the app at all today. Not wired on Search (every
+  // printable char there has to reach the query box, same standing
+  // exception a/c/v/d/r already have -- Shift+L would just type "L").
+  if (key === "L" && (t.screen === "likedSongs" || t.screen === "playlistDetail" || t.screen === "queue" || t.screen === "albumDetail")) {
+    const tr = selectedTrackOnScreen(t);
+    if (tr) {
+      if (liked.has(tr.uri)) {
+        liked.delete(tr.uri);
+        if (t.screen === "likedSongs") { LIKED_SONGS.splice(LIKED_SONGS.findIndex(x => x.uri === tr.uri), 1); setSel(Math.max(0, getSel() - 1)); }
+        setStatus("removed from Liked Songs");
+      } else {
+        liked.add(tr.uri);
+        if (!LIKED_SONGS.some(x => x.uri === tr.uri)) LIKED_SONGS.unshift(tr);
+        setStatus("added to Liked Songs");
+      }
+      render();
+    }
+    return;
   }
-
-  // ---- contextual: r (rename) ----
-  if (key === "r" && t.screen === "playlistDetail") {
-    mode = "input"; inputTarget = "rename"; inputBuf = t.playlist.name; render(); return;
+  if ((key === "v" || key === "V") && (t.screen === "likedSongs" || t.screen === "playlistDetail" || t.screen === "queue" || t.screen === "albumDetail")) {
+    const isArtist = key === "V" || e.shiftKey;
+    const list = t.screen === "likedSongs" ? LIKED_SONGS : t.screen === "queue" ? QUEUE : t.screen === "playlistDetail" ? t.playlist.tracks : null;
+    if (t.screen === "albumDetail") { push("artistDetail", { artist: ARTISTS.find(a => a.name === t.album.artist) || { name: t.album.artist, genres: [], albums: [] } }); render(); return; }
+    const tr = list[getSel()];
+    if (!tr) return;
+    if (isArtist) push("artistDetail", { artist: ARTISTS.find(a => a.name === tr.artist) || { name: tr.artist, genres: [], albums: [] } });
+    else push("albumDetail", { album: ALBUMS.find(a => a.name === tr.album) || { name: tr.album, artist: tr.artist, tracks: [tr] } });
+    render(); return;
   }
-  if (key === "r" && t.screen === "yourPlaylists" && PLAYLISTS.length) {
-    push("playlistDetail", {playlist: PLAYLISTS[getSel()]});
-    mode = "input"; inputTarget = "rename"; inputBuf = PLAYLISTS[getSel()].name; render(); return;
+  if (key === "F" && t.screen === "artistDetail") {
+    const u = t.artist.uri;
+    following.has(u) ? following.delete(u) : following.add(u);
+    setStatus(following.has(u) ? "following" : "unfollowed"); render(); return;
   }
-
-  // ---- contextual: d (delete/remove, confirms) ----
-  if (key === "d" && t.screen === "playlistDetail" && t.playlist.tracks.length) {
-    const idx = getSel();
-    confirmMsg = `Remove "${t.playlist.tracks[idx].title}" from ${t.playlist.name}?`;
-    confirmAction = () => { t.playlist.tracks.splice(idx,1); setSel(Math.max(0,getSel()-1)); };
-    mode = "confirm"; render(); return;
+  if (key === "S" && t.screen === "albumDetail") {
+    const n = t.album.name;
+    savedAlbumUris.has(n) ? savedAlbumUris.delete(n) : savedAlbumUris.add(n);
+    setStatus(savedAlbumUris.has(n) ? "saved to your library" : "removed from your library"); render(); return;
   }
-  if (key === "d" && t.screen === "yourPlaylists" && PLAYLISTS.length) {
-    const idx = getSel();
-    confirmMsg = `Delete playlist "${PLAYLISTS[idx].name}"? This cannot be undone.`;
-    confirmAction = () => { PLAYLISTS.splice(idx,1); setSel(Math.max(0,getSel()-1)); };
-    mode = "confirm"; render(); return;
+  if (key === "r" && t.screen === "playlistDetail") { openTextPrompt("Rename playlist", t.playlist.name, (name) => { if (name) t.playlist.name = name; setStatus("renamed"); render(); }); render(); return; }
+  if (key === "r" && t.screen === "yourPlaylists" && PLAYLISTS.length) { const p = PLAYLISTS[getSel()]; openTextPrompt("Rename playlist", p.name, (name) => { if (name) p.name = name; setStatus("renamed"); render(); }); render(); return; }
+  if (key === "d" && t.screen === "playlistDetail" && t.playlist.tracks.length) { removeTrackAt(t.playlist, getSel()); render(); return; }
+  if (key === "d" && t.screen === "yourPlaylists" && PLAYLISTS.length) { deletePlaylist(PLAYLISTS[getSel()]); render(); return; }
+  if ((key === "D") && t.screen === "playlistDetail") { deletePlaylist(t.playlist); render(); return; }
+  if (key === "P") {
+    if (t.screen === "yourPlaylists" && PLAYLISTS.length) { const u = PLAYLISTS[getSel()].uri; pins.playlists.has(u) ? pins.playlists.delete(u) : pins.playlists.add(u); render(); return; }
+    if (t.screen === "playlistDetail" && t.playlist.tracks.length) { const u = t.playlist.tracks[getSel()].uri; pins.tracks.has(u) ? pins.tracks.delete(u) : pins.tracks.add(u); render(); return; }
   }
-  if (key === "d" && t.screen === "queue" && QUEUE.length) {
-    const idx = getSel();
-    QUEUE.splice(idx,1); setSel(Math.max(0,getSel()-1)); render(); return;
-  }
-
-  // ---- contextual: m (move/reorder) ----
-  if (key === "m" && t.screen === "playlistDetail" && t.playlist.tracks.length > 1) {
-    mode = "move"; moveList = t.playlist.tracks; moveIndex = getSel(); render(); return;
-  }
-
-  // ---- contextual: f (follow toggle) ----
-  if (key === "f" && t.screen === "artistDetail") {
-    t.name.following = !t.name.following; render(); return;
-  }
+  if (key === "m" && t.screen === "playlistDetail") { tryEnterMoveMode(t.playlist, playlistFilter(t.playlist.uri)); return; }
 });
 
 /* ---------- mouse support (bonus on top of keys) ---------- */
@@ -762,12 +1643,34 @@ document.getElementById("sidebar").addEventListener("click", (e) => {
 });
 
 document.getElementById("main").addEventListener("click", (e) => {
+  // Click-to-seek on the progress gauge -- previously keyboard-only
+  // (±5s via ←/→), unlike real Spotify's own clickable scrubber.
+  const gauge = e.target.closest(".gauge-track");
+  if (gauge && nowPlaying.track) {
+    const rect = gauge.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    nowPlaying.pos = Math.round(frac * nowPlaying.dur);
+    render();
+    return;
+  }
   const row = e.target.closest("[data-i]");
-  if (!row || mode) return;
+  if (!row || confirmOverlay || textPrompt || picker) return;
   focus = "main";
   setSel(parseInt(row.dataset.i, 10));
   render();
 });
+// Scroll-to-adjust-volume over the playback bar or the Now Playing
+// gauge -- real Spotify's volume slider is draggable; a scroll wheel is
+// the closest mouse-native equivalent for a bar with no drag handle.
+function wheelVolume(e) {
+  e.preventDefault();
+  nowPlaying.vol = Math.max(0, Math.min(100, nowPlaying.vol + (e.deltaY < 0 ? 5 : -5)));
+  render();
+}
+document.getElementById("playbar").addEventListener("wheel", wheelVolume, { passive: false });
+document.getElementById("main").addEventListener("wheel", (e) => {
+  if (e.target.closest(".gauge-track") || e.target.closest(".np-side")) wheelVolume(e);
+}, { passive: false });
 
 document.getElementById("playbar").addEventListener("click", (e) => {
   const btn = e.target.closest("[data-act]");

@@ -678,6 +678,26 @@ pub enum ConfirmAction {
     Quit,
 }
 
+/// Derived from the variant rather than stored as its own field on
+/// `PendingConfirm` -- severity is a deterministic fact about *which*
+/// action this is, not independent state, so there's nothing to keep in
+/// sync at each of the 4 construction call sites.
+enum ConfirmSeverity {
+    Danger,
+    Warn,
+    Neutral,
+}
+
+impl ConfirmAction {
+    fn severity(&self) -> ConfirmSeverity {
+        match self {
+            ConfirmAction::DeletePlaylist(_) | ConfirmAction::RemoveTrack { .. } => ConfirmSeverity::Danger,
+            ConfirmAction::AddTrackAnyway { .. } => ConfirmSeverity::Warn,
+            ConfirmAction::Quit => ConfirmSeverity::Neutral,
+        }
+    }
+}
+
 /// The add-to-playlist picker (`a`). Lists `app.library.playlists`,
 /// pinned-first -- same ordering Your Playlists and the Sidebar already
 /// use. No in-picker filter/sort in this pass; the list is short enough
@@ -1083,6 +1103,12 @@ mod filter_cursor_tests {
 /// (not RGB) so it renders correctly over plain tmux-256color, not just
 /// true-color terminals.
 const ACCENT: Color = Color::Indexed(35); // a spotify-adjacent green
+/// Confirm-overlay severity tier for a heads-up that's easy to undo
+/// (e.g. adding a duplicate track) -- distinct from `Color::Red`
+/// (irreversible: delete playlist, remove track) so the border color
+/// alone signals how carefully to read the message before answering,
+/// instead of every confirm using the same red regardless of stakes.
+const WARN: Color = Color::Indexed(214); // amber, same 256-color-safe reasoning as ACCENT
 
 /// `mm:ss`, minutes uncapped (a >59min track just shows e.g. "61:05"
 /// rather than growing an hours field nobody needs here).
@@ -1186,10 +1212,23 @@ pub struct AppState {
     pub track_title: Option<String>,
     pub track_artist: Option<String>,
     pub track_album: Option<String>,
+    /// Set alongside the three fields above, at the same `PlayerEvent::
+    /// TrackChanged` handler -- lets `render_art` know which track a
+    /// cached `StatefulProtocol` cover image actually belongs to, since
+    /// artist+title alone isn't a reliable cache key (two different
+    /// tracks can share both).
+    pub current_track_uri: Option<String>,
+    /// What list/screen the currently-playing track was started from --
+    /// "Liked Songs", a playlist's name, "Search", an album's name. Set
+    /// at every existing "start playback" call site alongside the
+    /// `LoadRequest`/`spirc.load` call, never a new one. Display-only:
+    /// `n`/`p` skip within whatever context Spotify itself is already
+    /// using and don't touch this field, so it correctly persists across
+    /// a skip and only changes on the next deliberate play action.
+    pub context_label: Option<String>,
     pub lyrics: LyricsState,
     pub current_line: Option<usize>,
     pub fullscreen: bool,
-    pub context_lines: usize,
     /// `None` = no track loaded yet (device is connected regardless --
     /// this doesn't mean the Connect session is down). `Some(true)`
     /// = playing, `Some(false)` = paused. Distinguishing these explicitly
@@ -1213,6 +1252,22 @@ pub struct AppState {
     pub album_detail: Option<AlbumDetailState>,
     pub pinned_playlists: std::collections::HashSet<String>,
     pub pinned_tracks: std::collections::HashSet<String>,
+    /// Which playlists are already known to contain which tracks --
+    /// populated only from track lists this app fetched for some other
+    /// reason (opening Playlist Detail, the picker's own pre-add
+    /// duplicate check), plus an optimistic write-through whenever a
+    /// track is actually added to or removed from a playlist through
+    /// this app (the same "trust a local update, not a refetch, to
+    /// reflect a just-completed write" lesson `bump_track_count` already
+    /// established -- Spotify's own write-propagation lag proved a
+    /// refetch unreliable for exactly this once already this session).
+    /// Deliberately incomplete: a missing entry means "not known," never
+    /// "confirmed absent" -- the picker's marker only ever makes a
+    /// positive claim. Never consulted for the real duplicate check
+    /// before an add, which stays a live fetch; a stale cache saying
+    /// "already in it" must never suppress a legitimate add. Session-
+    /// only, not persisted to disk (unlike pins).
+    pub playlist_membership: std::collections::HashMap<String, std::collections::HashSet<String>>,
     /// Phase 5's transient overlays -- see the doc comment above
     /// `TextPrompt` for why these are sibling `Option`s here rather than
     /// `Screen` stack variants. Checked in this order (confirm gates
@@ -1262,9 +1317,89 @@ pub struct ScrollState {
     pub album_detail: ListState,
 }
 
-pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState) {
+/// Real album art via a terminal graphics protocol, threaded through
+/// `render` the same way `ScrollState` is and for the same reason: it's
+/// mutable render-side cache, not application state, and nesting it
+/// inside `AppState` would fight the borrow checker the same way
+/// `ScrollState`'s own doc comment already explains.
+///
+/// `picker` is populated once at startup (`main.rs`) if the terminal's
+/// capability query (possibly overridden -- see that call site) reports
+/// a real graphics protocol; `None` means "no real protocol available or
+/// detection failed," in which case `render_art` always uses the hashed
+/// placeholder and never touches the fields below at all.
+///
+/// `cover_image` holds the currently-playing track's *decoded* cover
+/// (cheap to keep, no network/decode cost to reuse) plus the track uri
+/// it belongs to, set once per track (`main.rs`, off the render path).
+/// `sized_covers` is a small cache of already resize-encoded
+/// `StatefulProtocol`s, one per distinct `(track uri, width, height)`
+/// this app has actually rendered at -- built lazily in `render_art`,
+/// not eagerly. This two-level design (decode once, encode once per
+/// size) exists because a single shared `StatefulProtocol` re-encodes,
+/// and on Kitty fully *re-transmits*, the whole image every time its
+/// render `Rect`'s cell size changes (confirmed by reading
+/// `ratatui-image`'s own Kitty protocol source) -- since the compact
+/// hero and the fullscreen layouts use different art sizes by design,
+/// a single shared protocol meant every `f` toggle forced a full
+/// re-transmit, reported live as visible lag and display corruption
+/// under rapid toggling. Caching one encoded protocol per size actually
+/// seen means toggling between a stable, already-visited set of sizes
+/// (the normal case) never re-triggers that cost after the first visit
+/// to each size.
+#[derive(Default)]
+pub struct ImageState {
+    pub picker: Option<ratatui_image::picker::Picker>,
+    pub cover_image: Option<(String, image::DynamicImage)>,
+    pub sized_covers: Vec<(String, u16, u16, ratatui_image::protocol::StatefulProtocol)>,
+}
+
+/// How many distinct `(track, size)` encoded protocols `ImageState`
+/// keeps at once -- comfortably more than the handful of distinct art
+/// sizes one session realistically produces (compact, fullscreen
+/// two-pane, fullscreen narrow-stacked), so eviction is rare in
+/// practice, not a tight budget being constantly hit.
+const SIZED_COVER_CACHE_CAP: usize = 4;
+
+const STARTUP_SPINNER: [char; 10] = ['\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}', '\u{2827}', '\u{2807}', '\u{280F}'];
+
+/// The very first thing drawn on a cold start, while `connect_spirc()` is
+/// still resolving in the background -- previously this window was a
+/// blank alternate-screen with zero feedback (the whole render loop was
+/// blocked behind `connect_spirc().await`, which takes several real
+/// seconds: AP resolution, auth, first track load). Reported live as a
+/// separate, related bug: the very first album-art render after a cold
+/// start would show completely blank (skipping to another track and back
+/// fixed it), most likely a real terminal-side race -- Ghostty's own
+/// kitty-graphics subsystem not yet ready for the first image placement
+/// immediately after entering the alternate screen. Showing this
+/// animation for a guaranteed minimum duration (`main.rs`'s
+/// `STARTUP_MIN_VISIBLE`) turns an unexplained blank wait into a
+/// deliberate, visible one, and gives that subsystem a real window to
+/// finish initializing before the first real frame (with real album art)
+/// ever gets drawn.
+pub fn render_startup(frame: &mut Frame, tick: usize) {
+    let area = frame.area();
+    let spinner = STARTUP_SPINNER[tick % STARTUP_SPINNER.len()];
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new("spot-tui").alignment(Alignment::Center).style(Style::default().add_modifier(Modifier::BOLD).fg(ACCENT)),
+        rows[1],
+    );
+    frame.render_widget(
+        Paragraph::new(format!("{spinner} connecting to spotify\u{2026}"))
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray)),
+        rows[2],
+    );
+}
+
+pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState, images: &mut ImageState) {
     if app.fullscreen && *app.nav.top() == Screen::NowPlaying {
-        render_fullscreen(frame, app);
+        render_fullscreen(frame, app, images);
         render_overlays(frame, app, &mut scroll.playlist_picker);
         return;
     }
@@ -1292,7 +1427,7 @@ pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState) {
 
     match app.nav.top() {
         Screen::Search => render_search(frame, app, &mut scroll.search, main_area),
-        Screen::NowPlaying => render_compact(frame, app, main_area),
+        Screen::NowPlaying => render_compact(frame, app, images, main_area),
         Screen::Library => render_library_home(frame, app, main_area),
         Screen::LikedSongs => render_list_screen(
             frame,
@@ -1405,6 +1540,20 @@ fn wrapped_line_count(text: &str, width: u16) -> u16 {
     lines.max(1)
 }
 
+/// Wraps a `Fetch::Failed` message in a bordered box instead of a bare
+/// line of text -- designed as its own state (per fable-ui-design), not
+/// a stripped-down list. A real 400 was this project's single most-
+/// repeated live bug class; it deserves to be legible, not just present.
+fn render_fetch_error(frame: &mut Frame, area: Rect, message: &str) {
+    frame.render_widget(
+        Paragraph::new(format!("failed to load: {message}"))
+            .style(Style::default().fg(Color::Red))
+            .wrap(Wrap { trim: true })
+            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Red))),
+        area,
+    );
+}
+
 fn render_confirm_overlay(frame: &mut Frame, confirm: &PendingConfirm) {
     let frame_area = frame.area();
     // Fixed at a max of 60 cols with no wrapping originally -- fine for
@@ -1418,12 +1567,18 @@ fn render_confirm_overlay(frame: &mut Frame, confirm: &PendingConfirm) {
     let inner_width = width.saturating_sub(2);
     let height = (wrapped_line_count(&confirm.message, inner_width) + 2).min(frame_area.height);
     let area = centered_rect(frame_area, width, height);
+    let color = match confirm.action.severity() {
+        ConfirmSeverity::Danger => Color::Red,
+        ConfirmSeverity::Warn => WARN,
+        ConfirmSeverity::Neutral => ACCENT,
+    };
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(confirm.message.clone())
             .alignment(Alignment::Center)
+            .style(Style::default().fg(color))
             .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Red))),
+            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(color))),
         area,
     );
 }
@@ -1461,6 +1616,45 @@ mod confirm_overlay_tests {
 /// the picker's first version built its rows as a plain `Paragraph`,
 /// which never scrolls at all, so a playlist past the visible height was
 /// simply unreachable (reported live).
+/// Whether `playlist_uri` is known to already contain `track_uri`, per
+/// `AppState::playlist_membership`'s own doc comment on why "unknown" is
+/// a real, distinct third answer here, not just "no" -- an incomplete
+/// cache must never claim a track is confirmed absent from a playlist
+/// nobody's looked inside yet this session.
+fn playlist_has_track(
+    membership: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+    playlist_uri: &str,
+    track_uri: &str,
+) -> bool {
+    membership.get(playlist_uri).is_some_and(|tracks| tracks.contains(track_uri))
+}
+
+#[cfg(test)]
+mod playlist_has_track_tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn known_member_returns_true() {
+        let mut membership = HashMap::new();
+        membership.insert("p1".to_string(), HashSet::from(["t1".to_string()]));
+        assert!(playlist_has_track(&membership, "p1", "t1"));
+    }
+
+    #[test]
+    fn known_playlist_without_this_track_returns_false_not_a_confirmed_claim() {
+        let mut membership = HashMap::new();
+        membership.insert("p1".to_string(), HashSet::from(["t2".to_string()]));
+        assert!(!playlist_has_track(&membership, "p1", "t1"));
+    }
+
+    #[test]
+    fn never_checked_playlist_returns_false() {
+        let membership = HashMap::new();
+        assert!(!playlist_has_track(&membership, "p1", "t1"));
+    }
+}
+
 fn render_playlist_picker_overlay(
     frame: &mut Frame,
     app: &AppState,
@@ -1485,7 +1679,7 @@ fn render_playlist_picker_overlay(
             frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
         }
         Fetch::Failed(e) => {
-            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), chunks[1]);
+            render_fetch_error(frame, chunks[1], e);
         }
         Fetch::Ready(items) if items.is_empty() => {
             frame.render_widget(Paragraph::new("no playlists yet -- press c to create one"), chunks[1]);
@@ -1493,9 +1687,21 @@ fn render_playlist_picker_overlay(
         Fetch::Ready(items) => {
             let ordered =
                 pinned_first(filtered_sorted(items, &picker.filter, &label), &app.pinned_playlists, |p| p.uri.as_str());
+            // Two fixed marker columns, never overlapping: pin first
+            // (unchanged), membership second. The membership marker only
+            // ever makes a *positive* claim -- "known absent" and "never
+            // checked" both render blank, so an incomplete cache can
+            // never state something false. Plain text, not a styled
+            // `Span` -- `render_display_list` already colors the whole
+            // selected row ACCENT+BOLD, so this inherits that for free
+            // instead of needing its own color (and risking the same
+            // pin-marker-vs-selection clash already fixed once this
+            // session by making selection win).
             let pin_label = |p: &crate::api::library::PlaylistSummary| {
-                let marker = if app.pinned_playlists.contains(&p.uri) { "* " } else { "  " };
-                format!("{marker}{}", label(p))
+                let pin = if app.pinned_playlists.contains(&p.uri) { "*" } else { " " };
+                let member =
+                    if playlist_has_track(&app.playlist_membership, &p.uri, &picker.track_uri) { "\u{2713}" } else { " " };
+                format!("{pin}{member} {}", label(p))
             };
             render_display_list(
                 frame,
@@ -1769,7 +1975,7 @@ fn render_playlist_detail(frame: &mut Frame, app: &AppState, list_state: &mut Li
             frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
         }
         Fetch::Failed(e) => {
-            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), chunks[1]);
+            render_fetch_error(frame, chunks[1], e);
         }
         Fetch::Ready(items) => {
             // Move-mode intentionally does NOT bubble pinned tracks to the
@@ -1824,7 +2030,7 @@ fn render_your_playlists(frame: &mut Frame, app: &AppState, list_state: &mut Lis
             frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
         }
         Fetch::Failed(e) => {
-            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), chunks[1]);
+            render_fetch_error(frame, chunks[1], e);
         }
         Fetch::Ready(items) => {
             let display = pinned_first(
@@ -1869,7 +2075,7 @@ fn render_queue(frame: &mut Frame, app: &AppState, list_state: &mut ListState, a
             frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
         }
         Fetch::Failed(e) => {
-            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), chunks[1]);
+            render_fetch_error(frame, chunks[1], e);
         }
         Fetch::Ready(summary) => {
             let now_playing = match &summary.currently_playing {
@@ -1902,7 +2108,7 @@ fn render_devices(frame: &mut Frame, app: &AppState, list_state: &mut ListState,
             frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
         }
         Fetch::Failed(e) => {
-            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), chunks[1]);
+            render_fetch_error(frame, chunks[1], e);
         }
         Fetch::Ready(items) => {
             let label = |d: &crate::api::devices::DeviceSummary| {
@@ -1935,7 +2141,7 @@ fn render_artist_detail(frame: &mut Frame, app: &AppState, list_state: &mut List
         }
         Fetch::Failed(e) => {
             frame.render_widget(Paragraph::new("Artist").style(Style::default().add_modifier(Modifier::BOLD)), chunks[0]);
-            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), chunks[1]);
+            render_fetch_error(frame, chunks[1], e);
         }
         Fetch::Ready(artist) => {
             let genres = if artist.genres.is_empty() { String::new() } else { format!("  ({})", artist.genres.join(", ")) };
@@ -1971,7 +2177,7 @@ fn render_album_detail(frame: &mut Frame, app: &AppState, list_state: &mut ListS
         }
         Fetch::Failed(e) => {
             frame.render_widget(Paragraph::new("Album").style(Style::default().add_modifier(Modifier::BOLD)), chunks[0]);
-            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), chunks[1]);
+            render_fetch_error(frame, chunks[1], e);
         }
         Fetch::Ready(album) => {
             frame.render_widget(
@@ -2013,7 +2219,7 @@ fn render_list_screen<T>(
             frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
         }
         Fetch::Failed(e) => {
-            frame.render_widget(Paragraph::new(format!("failed to load: {e}")), chunks[1]);
+            render_fetch_error(frame, chunks[1], e);
         }
         Fetch::Ready(items) => {
             let display = filtered_sorted(items, filter, &label);
@@ -2297,15 +2503,31 @@ fn progress_gauge(app: &AppState) -> Gauge<'static> {
     } else {
         ACCENT
     };
-    Gauge::default()
-        .gauge_style(Style::default().fg(color))
-        .label("")
-        .ratio(progress_ratio(app))
+    Gauge::default().gauge_style(Style::default().fg(color)).label("").ratio(progress_ratio(app))
+}
+
+/// Same gauge, with a border -- used only by the fullscreen layouts
+/// (which have a whole extra row to spare for it), not the compact view.
+/// At low progress (a song's first few seconds) an unbordered gauge is
+/// almost entirely its own background color, which reads as "a tiny
+/// colored square" with no visible indication of where the bar actually
+/// ends. The border always outlines the full capsule regardless of how
+/// little of it is filled.
+fn progress_gauge_bordered(app: &AppState) -> Gauge<'static> {
+    progress_gauge(app).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)))
 }
 
 fn body_lines(app: &AppState) -> Vec<Line<'static>> {
     match &app.lyrics {
-        LyricsState::Idle => vec![Line::from("ready \u{2014} press / to search\u{2026}")],
+        // `header()` (this screen's title line, and the persistent
+        // playback bar's idle text) already carries the "press / to
+        // search" instruction -- this used to repeat the identical
+        // sentence here too, so an idle Now Playing screen showed it
+        // twice in the same frame. This says something lyrics-area-
+        // appropriate instead, matching the tone of the other
+        // non-synced states below (e.g. `SessionEnded`'s own distinct
+        // line) rather than duplicating the header's.
+        LyricsState::Idle => vec![Line::from("nothing playing yet")],
         LyricsState::SessionEnded => vec![
             Line::from("session disconnected"),
             Line::from("restart spot-tui to reconnect"),
@@ -2319,33 +2541,446 @@ fn body_lines(app: &AppState) -> Vec<Line<'static>> {
                 .chain(text.lines().map(|l| Line::from(l.to_string())))
                 .collect()
         }
+        // Shows the whole sheet, not a windowed few lines around the
+        // current one -- matches official Spotify's own default lyrics
+        // view. `render_now_playing_hero`/`render_fullscreen_hero` are
+        // responsible for scrolling the viewport to keep the current
+        // line visible (see `center_current_line`); this function just
+        // decides what every line looks like, not which ones show.
+        // A blank line follows every real one -- ratatui packs lines
+        // edge to edge by default, which read as cramped next to the
+        // reference's generous line height. Each real line occupies 2
+        // rendered rows now, so `current_body_line_row` doubles the
+        // current-line index to match when it centers the viewport.
         LyricsState::Synced(lines) => {
             if lines.is_empty() {
                 return vec![Line::from("no lyrics found")];
             }
             let current = app.current_line.unwrap_or(0);
-            let start = current.saturating_sub(app.context_lines);
-            let end = (current + app.context_lines + 1).min(lines.len());
-            (start..end)
-                .map(|i| {
-                    let text = lines[i].text.clone();
-                    let text = if text.is_empty() { "\u{266a}".to_string() } else { text };
-                    if i == current {
-                        Line::from(Span::styled(
-                            text,
-                            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-                        ))
-                    } else {
-                        Line::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
-                    }
-                })
-                .collect()
+            let mut out = Vec::with_capacity(lines.len() * 2);
+            for (i, line) in lines.iter().enumerate() {
+                let text = if line.text.is_empty() { "\u{266a}".to_string() } else { line.text.clone() };
+                let styled = if i == current {
+                    Line::from(Span::styled(text, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))
+                } else {
+                    Line::from(Span::styled(text, Style::default().fg(lyric_tier_color(i.abs_diff(current)))))
+                };
+                out.push(styled);
+                out.push(Line::from(""));
+            }
+            out
         }
+    }
+}
+
+/// The 4-tier fade by distance from the current line -- `Color::DarkGray`
+/// alone read as ~1.4:1 contrast against this app's near-black
+/// background, functionally unreadable for a screen built to show the
+/// whole sheet, not just the current line. Used by every `body_lines`
+/// caller, compact and fullscreen alike, so they can't drift apart.
+fn lyric_tier_color(distance: usize) -> Color {
+    match distance {
+        0 => ACCENT,
+        1 => Color::White,
+        2..=3 => Color::Gray,
+        _ => Color::DarkGray,
+    }
+}
+
+/// Only `Synced` has a real "current line" to center on -- every other
+/// `LyricsState` (idle/instrumental/not-found/plain/loading) has no
+/// notion of a current line at all, so they always render from the top.
+/// `*2`: `body_lines` interleaves a blank spacer after every real line,
+/// so the current line's actual row in the rendered `Vec` is twice its
+/// index into the raw synced-lyrics data.
+fn current_body_line_row(app: &AppState) -> Option<usize> {
+    match &app.lyrics {
+        LyricsState::Synced(lines) if !lines.is_empty() => Some(app.current_line.unwrap_or(0) * 2),
+        _ => None,
+    }
+}
+
+/// A `Line`'s real on-screen height once `Paragraph`'s own `Wrap` gets to
+/// it -- 1 for a blank spacer (nothing to wrap), otherwise the same
+/// greedy word-wrap `wrapped_line_count` already uses to size the
+/// confirm overlay. Needed because `Paragraph::scroll`'s `y` counts
+/// *wrapped* rows, not logical `Line`s (confirmed by reading
+/// `ratatui-widgets`' `Paragraph::render_paragraph`: "the scroll offset
+/// is applied after the text is wrapped") -- a centering formula that
+/// assumes 1 row per `Line` silently drifts further off-center every
+/// time an earlier line actually wraps to more than one row, which is
+/// exactly what a long lyric line in a narrower pane does. Reported
+/// live as the current line reading progressively lower down the screen
+/// the further into the song it got -- each additional wrapped line
+/// above it added rows this function wasn't accounting for.
+fn line_row_height(line: &Line<'static>, width: u16) -> usize {
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    if text.trim().is_empty() { 1 } else { wrapped_line_count(&text, width) as usize }
+}
+
+/// The current line's own vertical middle, in real wrapped-row units
+/// (`line_row_height`), counting from the top of `lines` -- shared by
+/// both `center_current_line` (fullscreen) and `top_anchored_offset`
+/// (compact), so they can't drift apart on the wrap-awareness fix even
+/// though they anchor to different screen positions.
+fn anchor_row_of(lines: &[Line<'static>], current_row: usize, width: u16) -> usize {
+    let heights: Vec<usize> = lines.iter().map(|l| line_row_height(l, width)).collect();
+    let rows_before_current: usize = heights[..current_row.min(heights.len())].iter().sum();
+    let current_height = heights.get(current_row).copied().unwrap_or(1);
+    rows_before_current + current_height / 2
+}
+
+fn total_row_height(lines: &[Line<'static>], width: u16) -> usize {
+    lines.iter().map(|l| line_row_height(l, width)).sum()
+}
+
+/// Pads `lines` with `viewport_height / 2` blank rows above and below,
+/// and returns the scroll offset that puts the current line's own
+/// vertical middle at the exact vertical middle of the viewport --
+/// measured in real wrapped rows (`anchor_row_of`), not logical `Line`
+/// count, so it stays correct however many of the preceding lines
+/// happen to wrap. A plain clamped scroll offset (`ideal =
+/// current.saturating_sub(half); ideal.min(total - viewport)`) can't
+/// center at either edge of the sheet either -- there's no real content
+/// to scroll into above line 0 or below the last line, so a song's
+/// opening (or closing) line rendered pinned to the top (or bottom)
+/// instead of centered, also reported live. Padding with real blank
+/// rows gives the offset somewhere to scroll into even there, so the
+/// current line centers unconditionally, including a song's first and
+/// last line and a current line that itself wraps to more than one row.
+/// Fullscreen only -- see `top_anchored_offset` for the compact view,
+/// which was explicitly asked *not* to center this way.
+fn center_current_line(
+    lines: Vec<Line<'static>>,
+    current_row: Option<usize>,
+    viewport_height: u16,
+    width: u16,
+) -> (Vec<Line<'static>>, u16) {
+    let Some(current_row) = current_row else {
+        // No current line to anchor on -- this is a short status message
+        // (Loading/"fetching lyrics...", Idle, Instrumental, NotFound,
+        // SessionEnded), not a lyric sheet. It still renders through this
+        // same fullscreen paragraph, so it needs the same vertical-center
+        // treatment real lyrics get here, rather than sitting pinned to
+        // the pane's top edge -- reported live ("loading lyrics text is
+        // so high - center it like the actual lyrics").
+        let total_rows = total_row_height(&lines, width);
+        let pad_top = (viewport_height as usize).saturating_sub(total_rows) / 2;
+        let mut padded = Vec::with_capacity(lines.len() + pad_top);
+        padded.extend(std::iter::repeat_with(|| Line::from("")).take(pad_top));
+        padded.extend(lines);
+        return (padded, 0);
+    };
+    let anchor_row = anchor_row_of(&lines, current_row, width);
+    let total_rows = total_row_height(&lines, width);
+
+    let half = (viewport_height / 2) as usize;
+    let mut padded = Vec::with_capacity(lines.len() + half * 2);
+    padded.extend(std::iter::repeat_with(|| Line::from("")).take(half));
+    padded.extend(lines);
+    padded.extend(std::iter::repeat_with(|| Line::from("")).take(half));
+
+    let padded_total_rows = total_rows + half * 2;
+    let max_offset = padded_total_rows.saturating_sub(viewport_height as usize);
+    let offset = anchor_row.min(max_offset) as u16;
+    (padded, offset)
+}
+
+/// The compact (non-fullscreen) Now Playing view's lyrics scroll: keeps
+/// a couple of already-seen lines visible above the current one instead
+/// of forcing it to the vertical middle the way `center_current_line`
+/// does -- explicitly asked for over centering ("in now playing have it
+/// at the top, not middle"), since centering there ate a large, fixed
+/// share of an already-small pane with blank padding on every render,
+/// which is what made the actually-rendered lyric text read as smaller
+/// even though nothing about its size had changed. No padding here:
+/// unlike the fullscreen view, "settle at the top" (song start) and
+/// "settle at the bottom" (song end, once there's more sheet than fits)
+/// are both already correct, ordinary scrolling behavior, the same as
+/// every other list in this app -- there's nothing to fabricate.
+fn top_anchored_offset(lines: &[Line<'static>], current_row: Option<usize>, viewport_height: u16, width: u16) -> u16 {
+    const TOP_MARGIN: usize = 2;
+    let Some(current_row) = current_row else { return 0 };
+    let anchor_row = anchor_row_of(lines, current_row, width);
+    let total_rows = total_row_height(lines, width);
+    let max_offset = total_rows.saturating_sub(viewport_height as usize);
+    anchor_row.saturating_sub(TOP_MARGIN).min(max_offset) as u16
+}
+
+#[cfg(test)]
+mod center_current_line_tests {
+    use super::*;
+
+    fn lines(n: usize) -> Vec<Line<'static>> {
+        (0..n).map(|i| Line::from(i.to_string())).collect()
+    }
+
+    fn line_text(l: &Line<'static>) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn no_current_row_vertically_centers_a_short_status_message() {
+        // 10-row viewport, 5-row message -- pad_top = (10 - 5) / 2 = 2.
+        let (out, offset) = center_current_line(lines(5), None, 10, 80);
+        assert_eq!(out.len(), 2 + 5);
+        assert_eq!(offset, 0);
+        assert_eq!(line_text(&out[0]), "");
+        assert_eq!(line_text(&out[2]), "0");
+    }
+
+    #[test]
+    fn no_current_row_with_a_message_taller_than_the_viewport_pads_nothing() {
+        let (out, offset) = center_current_line(lines(20), None, 10, 80);
+        assert_eq!(out.len(), 20);
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn the_very_first_line_still_centers_via_top_padding() {
+        // viewport 10, half = 5 -- 5 blank rows padded above line 0 means
+        // scrolling 0 rows still puts line 0 at screen row 5, dead center.
+        let (out, offset) = center_current_line(lines(40), Some(0), 10, 80);
+        assert_eq!(offset, 0);
+        assert_eq!(out.len(), 40 + 5 + 5);
+        assert_eq!(out[5].spans[0].content.as_ref(), "0");
+    }
+
+    #[test]
+    fn the_very_last_line_still_centers_via_bottom_padding() {
+        let (out, offset) = center_current_line(lines(40), Some(39), 10, 80);
+        // padded index of line 39 is 5 (top pad) + 39 = 44; centering
+        // needs it at screen row 5, so offset = 44 - 5 = 39.
+        assert_eq!(offset, 39);
+        let screen_row = 44 - offset as usize;
+        assert_eq!(screen_row, 5);
+        assert_eq!(out[44].spans[0].content.as_ref(), "39");
+    }
+
+    #[test]
+    fn a_middle_line_centers_at_the_viewport_midpoint() {
+        // padded index of line 20 is 5 (top pad) + 20 = 25; offset 20
+        // puts it at screen row 5, dead center of a 10-row viewport.
+        let (_, offset) = center_current_line(lines(40), Some(20), 10, 80);
+        assert_eq!(offset, 20);
+        assert_eq!(25 - offset as usize, 5);
+    }
+
+    #[test]
+    fn a_wrapped_earlier_line_does_not_push_the_current_line_off_center() {
+        // "one two three four five" greedy-wraps to 3 rows at width 10.
+        // A Line-count-based offset (the old bug) would put line 1's
+        // anchor at row 1; the real wrapped anchor is row 3 (after the
+        // 3 wrapped rows line 0 actually consumes).
+        let lines = vec![Line::from("one two three four five"), Line::from("current")];
+        let (_, offset) = center_current_line(lines, Some(1), 10, 10);
+        assert_eq!(offset, 3);
+    }
+
+    #[test]
+    fn a_current_line_that_itself_wraps_anchors_at_its_own_middle() {
+        // "current line" (12 chars) wraps to 2 rows against width 6;
+        // anchoring at its top row (old behavior) would sit it half a
+        // row high of true center -- anchor should land mid-way through
+        // its own wrapped block instead.
+        let lines = vec![Line::from("current line")];
+        let (_, offset) = center_current_line(lines, Some(0), 10, 6);
+        // current_height = wrapped_line_count("current line", 6) = 2;
+        // anchor_row = 0 + 2/2 = 1.
+        assert_eq!(offset, 1);
+    }
+}
+
+#[cfg(test)]
+mod top_anchored_offset_tests {
+    use super::*;
+
+    fn lines(n: usize) -> Vec<Line<'static>> {
+        (0..n).map(|i| Line::from(i.to_string())).collect()
+    }
+
+    #[test]
+    fn no_current_row_is_zero() {
+        assert_eq!(top_anchored_offset(&lines(5), None, 10, 80), 0);
+    }
+
+    #[test]
+    fn a_song_s_opening_line_stays_pinned_to_the_actual_top() {
+        // No padding, no forced centering -- current row 0 needs no
+        // scroll at all, unlike `center_current_line`'s offset 0 which
+        // only reads as centered because of the padding it adds.
+        assert_eq!(top_anchored_offset(&lines(40), Some(0), 10, 80), 0);
+    }
+
+    #[test]
+    fn a_middle_line_keeps_a_small_margin_of_context_above_it() {
+        // anchor_row = 20; margin 2 -- offset settles 2 rows short of
+        // the current line, not at the viewport's vertical middle.
+        assert_eq!(top_anchored_offset(&lines(40), Some(20), 10, 80), 18);
+    }
+
+    #[test]
+    fn near_the_end_clamps_to_the_real_bottom_not_past_it() {
+        // total 40, viewport 10 -- max_offset 30. anchor_row 39 minus
+        // margin 2 = 37, clamped down to 30 (ordinary scroll-to-end).
+        assert_eq!(top_anchored_offset(&lines(40), Some(39), 10, 80), 30);
     }
 }
 
 const ART_MIN_WIDTH: u16 = 14;
 const ART_MAX_WIDTH: u16 = 26;
+/// The compact hero's gauge sits beside the art in the (usually much
+/// wider) text column, unlike the fullscreen layouts' gauge, which
+/// shares the same narrow column as the art and is already
+/// `capsule_row`-matched to it. Left unconstrained, a bordered gauge
+/// there stretches to the full text-column width on a wide terminal --
+/// mostly empty bordered space -- reported live as "stretches for so
+/// long in empty space." Capped at a fixed, modest width instead of
+/// matching the art (the two aren't stacked in the same column here, so
+/// there's no natural width to match).
+const COMPACT_GAUGE_MAX_WIDTH: u16 = 44;
+
+/// The real per-cell pixel size, for sizing an art card to an actual
+/// pixel square instead of guessing a fixed ratio. Reads
+/// `Picker::font_size()` directly -- `main.rs` corrects that stored
+/// value once at startup (via the same OS `window_size` ioctl this
+/// function used to call itself) specifically so this and
+/// `ratatui-image`'s own internal image encoder agree on the same real
+/// cell size; calling the ioctl again independently here, after that
+/// fix, is exactly what caused the two to *disagree* the first time
+/// this bug was chased (this app's layout math using one freshly-
+/// queried value while the encoder kept using `Picker`'s own separate,
+/// uncorrected one) -- confirmed live as a visibly pixelated card, the
+/// transmitted image encoded at a different, lower resolution than the
+/// cells this app's math stretched it across. One corrected value, read
+/// from one place, fixes both. Falls back to a flat 2:1 guess only when
+/// there's no real `Picker` at all (no graphics protocol in use).
+fn real_cell_size(picker: Option<&ratatui_image::picker::Picker>) -> (u16, u16) {
+    match picker.map(|p| p.font_size()) {
+        Some(font) if font.width > 0 && font.height > 0 => (font.width, font.height),
+        _ => (1, 2),
+    }
+}
+
+/// `render_art` always wraps the image in `Borders::ALL`, which removes
+/// exactly 1 cell per side (2 total) from both width and height before
+/// the image itself ever gets drawn. That flat cell subtraction removes
+/// a *different number of real pixels* on each axis whenever a cell
+/// isn't exactly square (which real fonts never are) -- taller cells
+/// mean the 2 rows taken for the border cost more real vertical pixels
+/// than the 2 columns cost horizontally. The smaller the card, the
+/// larger that skew is as a fraction of the whole: negligible on
+/// fullscreen's 50-70-cell-wide cards, but large enough on the compact
+/// hero's much smaller `ART_MAX_WIDTH = 26` card to read as a real,
+/// reported gap on one side once the image (still correctly square in
+/// itself, since `Resize::Scale` never distorts it) didn't fill the
+/// remaining space. Squaring the *inner*, post-border region -- not the
+/// outer card size -- and only then adding the border back is what
+/// actually keeps the finished, bordered card itself square.
+const ART_BORDER_CELLS: u16 = 2;
+
+/// Pure square-sizing math, given an already-known real cell pixel size
+/// (`real_cell_size`) -- kept separate from that detection so this part
+/// stays a plain, environment-free function to unit test. Returns the
+/// *outer* (pre-border) height needed so that the card's inner,
+/// post-border region is a true pixel square -- see `ART_BORDER_CELLS`.
+fn square_height_cells(width_cells: u16, cell_size: (u16, u16)) -> u16 {
+    let (cell_w, cell_h) = cell_size;
+    if cell_h == 0 {
+        return (width_cells / 2).max(1);
+    }
+    let inner_width = width_cells.saturating_sub(ART_BORDER_CELLS).max(1);
+    let inner_height = ((inner_width as u32 * cell_w as u32) / cell_h as u32).max(1) as u16;
+    inner_height + ART_BORDER_CELLS
+}
+
+/// The inverse of `square_height_cells`, for the one call site that
+/// picks a height first and needs the matching square width (the
+/// narrow-terminal fullscreen fallback). Same border-aware math, mirrored.
+fn square_width_cells(height_cells: u16, cell_size: (u16, u16)) -> u16 {
+    let (cell_w, cell_h) = cell_size;
+    if cell_w == 0 {
+        return (height_cells * 2).max(1);
+    }
+    let inner_height = height_cells.saturating_sub(ART_BORDER_CELLS).max(1);
+    let inner_width = ((inner_height as u32 * cell_h as u32) / cell_w as u32).max(1) as u16;
+    inner_width + ART_BORDER_CELLS
+}
+
+#[cfg(test)]
+mod square_cells_tests {
+    use super::*;
+
+    #[test]
+    fn zero_cell_dimension_falls_back_to_the_2_to_1_approximation() {
+        assert_eq!(square_height_cells(26, (0, 0)), 13);
+        assert_eq!(square_width_cells(13, (0, 0)), 26);
+    }
+
+    #[test]
+    fn exact_2_to_1_cell_size_still_needs_one_extra_row_for_the_border() {
+        // Naive flat math (26/2) says 13, but that's the *inner* square's
+        // height -- the outer, bordered card needs 2 more cells of
+        // height than a naive width/2 would suggest, then squared
+        // against the inner width (24, not 26): 24*8/16 = 12, +2 border
+        // rows = 14.
+        assert_eq!(square_height_cells(26, (8, 16)), 14);
+    }
+
+    #[test]
+    fn a_taller_real_cell_needs_fewer_rows_for_the_same_square() {
+        // 8x18 (2.25:1) is taller-per-cell than the flat 2:1 fallback
+        // assumes -- fewer rows are needed to reach the same real-pixel
+        // width.
+        let height = square_height_cells(26, (8, 18));
+        assert!(height < 13, "expected fewer than the 2:1 fallback's 13 rows, got {height}");
+    }
+
+    #[test]
+    fn a_wider_real_cell_needs_more_rows_for_the_same_square() {
+        // 8x12 (1.5:1) is wider-per-cell (relatively) than the flat 2:1
+        // fallback assumes -- more rows are needed, not fewer. This is
+        // the actual shape of the live-reported bug: a wrongly-trusted
+        // font size closer to this end of the ratio than assumed is
+        // what left the card too wide (too few rows) relative to a true
+        // square.
+        let height = square_height_cells(26, (8, 12));
+        assert!(height > 13, "expected more than the 2:1 fallback's 13 rows, got {height}");
+    }
+
+    #[test]
+    fn the_inner_post_border_region_is_the_true_square_not_the_outer_card() {
+        // The actual property this fix exists for: it's the *inner*
+        // (post-border) region that must be a real pixel square, not
+        // the outer card -- verified directly here rather than only
+        // indirectly through the exact-2:1 case above.
+        let cell = (8u32, 20u32); // 2.5:1, deliberately not exactly 2:1
+        let outer_width = 26u16;
+        let outer_height = square_height_cells(outer_width, (cell.0 as u16, cell.1 as u16));
+        let inner_width = (outer_width - ART_BORDER_CELLS) as u32;
+        let inner_height = (outer_height - ART_BORDER_CELLS) as u32;
+        let (inner_w_px, inner_h_px) = (inner_width * cell.0, inner_height * cell.1);
+        assert!(
+            inner_w_px.abs_diff(inner_h_px) <= cell.1,
+            "inner region not square: {inner_w_px}px wide vs {inner_h_px}px tall"
+        );
+    }
+
+    #[test]
+    fn square_width_cells_round_trips_within_integer_rounding_slack() {
+        // Two floor-divisions in a row (width->height, then height back
+        // to width) can lose at most a couple of cells to truncation --
+        // not an exact inverse, but close enough that the resulting card
+        // still reads as square, which is all this is for.
+        let width = 26;
+        let height = square_height_cells(width, (8, 18));
+        let round_tripped = square_width_cells(height, (8, 18));
+        assert!(
+            width.abs_diff(round_tripped) <= 2,
+            "expected {round_tripped} to be within 2 cells of the original {width}"
+        );
+    }
+}
 
 fn hash_bytes(s: &str) -> u32 {
     let mut h: u32 = 5381;
@@ -2377,22 +3012,214 @@ fn monogram(artist: &str, album: &str) -> String {
     format!("{}{}", first_upper(artist), first_upper(album))
 }
 
-fn render_art_block(frame: &mut Frame, artist: &str, album: &str, area: Rect) {
-    let bg = art_color(artist, album);
-    frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
+/// A visible frame around the fill, not a borderless rectangle -- reads
+/// as a distinct thumbnail card sitting on the pane background, closer
+/// to the reference's crisp album-art card, instead of the color block
+/// blending into whatever's behind it with no edge at all.
+/// A fixed-width strip horizontally centered within a wider one. Applied
+/// to two rows of the *same* parent column (the art card's row and the
+/// progress gauge's row), it returns byte-identical x/width for both --
+/// the actual fix for the gauge stretching to the full column while the
+/// art card above it stayed narrow: they were computing their own
+/// centering independently before, which is how the two drifted apart.
+fn capsule_row(area: Rect, width: u16) -> Rect {
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(width), Constraint::Min(0)])
+        .split(area)[1]
+}
+
+#[cfg(test)]
+mod capsule_row_tests {
+    use super::*;
+
+    #[test]
+    fn the_gauge_capsule_lands_on_the_same_columns_as_the_art_card() {
+        let column = Rect::new(3, 0, 100, 40);
+        let art = capsule_row(Rect { y: 2, height: 20, ..column }, 44);
+        let gauge = capsule_row(Rect { y: 26, height: 1, ..column }, 44);
+        assert_eq!((art.x, art.width), (gauge.x, gauge.width));
+    }
+}
+
+/// Scales `image` up just enough that it fully covers a `target_w` x
+/// `target_h` box (never leaves either axis short), then center-crops
+/// whatever overflows on the other axis -- CSS `background-size: cover`,
+/// not `contain`. See `render_art`'s own doc comment on this call site for
+/// why: `ratatui-image`'s `Resize::Scale`/`Fit` both *fit within* their
+/// target (confirmed by reading its `resize_pixels`), so any mismatch
+/// between an integer terminal-cell count and the real pixel square it's
+/// meant to approximate always showed up as a blank letterboxed gap, never
+/// distortion. Doing the crop ourselves, before `ratatui-image` ever sees
+/// the image, means there's no aspect mismatch left for it to mishandle.
+fn cover_crop(image: &image::DynamicImage, target_w: u32, target_h: u32) -> image::DynamicImage {
+    let (target_w, target_h) = (target_w.max(1), target_h.max(1));
+    let (src_w, src_h) = (image.width().max(1), image.height().max(1));
+    let scale = (target_w as f64 / src_w as f64).max(target_h as f64 / src_h as f64);
+    let scaled_w = ((src_w as f64 * scale).ceil() as u32).max(target_w);
+    let scaled_h = ((src_h as f64 * scale).ceil() as u32).max(target_h);
+    let scaled = image.resize_exact(scaled_w, scaled_h, image::imageops::FilterType::Lanczos3);
+    let x = (scaled_w - target_w) / 2;
+    let y = (scaled_h - target_h) / 2;
+    scaled.crop_imm(x, y, target_w, target_h)
+}
+
+#[cfg(test)]
+mod cover_crop_tests {
+    use super::*;
+
+    fn image(w: u32, h: u32) -> image::DynamicImage {
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(w, h))
+    }
+
+    #[test]
+    fn a_square_source_into_a_wider_target_fills_it_exactly() {
+        let out = cover_crop(&image(640, 640), 24, 10);
+        assert_eq!((out.width(), out.height()), (24, 10));
+    }
+
+    #[test]
+    fn a_square_source_into_a_taller_target_fills_it_exactly() {
+        let out = cover_crop(&image(640, 640), 10, 24);
+        assert_eq!((out.width(), out.height()), (10, 24));
+    }
+
+    #[test]
+    fn an_already_matching_aspect_ratio_still_produces_the_exact_target_size() {
+        let out = cover_crop(&image(400, 400), 20, 20);
+        assert_eq!((out.width(), out.height()), (20, 20));
+    }
+
+    #[test]
+    fn a_target_larger_than_the_source_upscales_rather_than_leaving_a_gap() {
+        let out = cover_crop(&image(10, 10), 100, 40);
+        assert_eq!((out.width(), out.height()), (100, 40));
+    }
+
+    #[test]
+    fn a_wide_source_into_a_square_target_still_fills_it_exactly() {
+        let out = cover_crop(&image(1000, 200), 30, 30);
+        assert_eq!((out.width(), out.height()), (30, 30));
+    }
+}
+
+/// Draws the card border once, then dispatches to a real rendered cover
+/// image (`images.cover`, when it's actually built for the track
+/// currently playing) or the hashed-color monogram placeholder --
+/// exactly one of the two ever renders into `inner`, never both. Falling
+/// back to the placeholder is a complete, good-looking state on its own
+/// (not a degraded one), covering every non-error-worthy reason a real
+/// image might not be showing yet: no real graphics protocol on this
+/// terminal, no cover fetched yet for this track, or the fetch/decode
+/// itself failing.
+fn render_art(frame: &mut Frame, app: &AppState, images: &mut ImageState, artist: &str, album: &str, area: Rect) {
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let text_style = Style::default().bg(bg).fg(Color::White).add_modifier(Modifier::BOLD);
-    let top_pad = area.height / 2;
-    let mut lines: Vec<Line> = (0..top_pad).map(|_| Line::from("")).collect();
-    lines.push(Line::from(monogram(artist, album)));
-    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center).style(text_style), area);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let current_uri = app.current_track_uri.as_deref();
+    let cover = images
+        .cover_image
+        .as_ref()
+        .filter(|(uri, _)| Some(uri.as_str()) == current_uri)
+        .map(|(uri, image)| (uri.clone(), image.clone()));
+
+    if let (Some(picker), Some((uri, image))) = (images.picker.clone(), cover) {
+        let cached = images
+            .sized_covers
+            .iter_mut()
+            .find(|(u, w, h, _)| *u == uri && *w == inner.width && *h == inner.height);
+
+        let proto = if let Some((_, _, _, proto)) = cached {
+            proto
+        } else {
+            // Round 9 of the art-card sizing saga: three fixes in a row
+            // (font-size source, border-thickness math, centering) each
+            // addressed a real, verified defect, and the compact hero's
+            // border still doesn't tightly match the image. Rather than
+            // guess a 4th number, log every real value that feeds the
+            // square math -- exactly once per distinct size this cache
+            // actually builds for, not every frame -- so the next real
+            // run gives actual numbers to compare against what a true
+            // square needs, instead of another screenshot to eyeball.
+            let cell = real_cell_size(Some(&picker));
+            // `log::debug!` would be silently dropped -- this app's own
+            // env_logger filter (`main.rs`) is `"info,librespot=debug"`,
+            // base level `info`, not `debug`, for anything outside the
+            // librespot crates. Using `info!` here is what actually
+            // makes this diagnostic show up in the log file at all.
+            log::info!(
+                "art size: area={area:?} inner={inner:?} cell_size={cell:?} image_native=({}, {})",
+                image.width(),
+                image.height()
+            );
+            // Nine rounds of tuning `art_width`/`art_height`'s cell-count
+            // math (font-size source, border-thickness, centering) each
+            // fixed a real defect, but the border still doesn't tightly
+            // hug the image -- confirmed from this exact log line: a
+            // 24x10-cell inner region at an 18x40px cell is 432x400 real
+            // pixels, an unavoidable ~8% mismatch no integer cell count
+            // can close (24 cells can't split evenly into a 40px-tall
+            // grid the way 400/18 would need). `Resize::Scale` (below,
+            // previously) *fits within* whatever target it's given
+            // (confirmed by reading `resize_pixels`: both `Fit` and
+            // `Scale` call `image.resize`, which never overflows its
+            // target) -- so any such mismatch was never going to do
+            // anything but letterbox. Fixed at the root instead of
+            // tuning the cell math further: `cover_crop` pre-scales and
+            // center-crops the image to the *exact* real pixel size this
+            // cell region will occupy, before `ratatui-image` ever sees
+            // it -- no cell-to-pixel rounding left for it to get wrong.
+            let target_w = inner.width as u32 * cell.0.max(1) as u32;
+            let target_h = inner.height as u32 * cell.1.max(1) as u32;
+            let image = cover_crop(&image, target_w, target_h);
+            if images.sized_covers.len() >= SIZED_COVER_CACHE_CAP {
+                images.sized_covers.remove(0);
+            }
+            let built = picker.new_resize_protocol(image);
+            images.sized_covers.push((uri, inner.width, inner.height, built));
+            &mut images.sized_covers.last_mut().unwrap().3
+        };
+
+        // `Resize::Crop` was tried here on the theory that, since
+        // `cover_crop` above already pre-sizes the image exactly, `Crop`
+        // would be a pure no-op -- reported live as visibly pixelated
+        // instead. `Crop`'s own doc comment names the actual reason: it
+        // exists for terminals where "overdrawing characters over
+        // graphics" needs avoiding (its example is Alacritty's sixel
+        // branch), which implies a different, less precise transmission
+        // path than `Scale` -- not the "no-op on an already-correct
+        // image" behavior assumed here. Reverted to `Resize::Scale`,
+        // proven pixelation-free across every prior round of this saga;
+        // `cover_crop`'s pre-sizing (the part that actually fixed the
+        // gap) is unaffected by this revert.
+        let widget = ratatui_image::StatefulImage::default().resize(ratatui_image::Resize::Scale(None));
+        frame.render_stateful_widget(widget, inner, proto);
+        return;
+    }
+
+    render_art_placeholder(frame, artist, album, inner);
 }
 
-fn render_compact(frame: &mut Frame, app: &AppState, area: Rect) {
+fn render_art_placeholder(frame: &mut Frame, artist: &str, album: &str, inner: Rect) {
+    let bg = art_color(artist, album);
+    frame.render_widget(Block::default().style(Style::default().bg(bg)), inner);
+    let text_style = Style::default().bg(bg).fg(Color::White).add_modifier(Modifier::BOLD);
+    let top_pad = inner.height / 2;
+    let mut lines: Vec<Line> = (0..top_pad).map(|_| Line::from("")).collect();
+    lines.push(Line::from(monogram(artist, album)));
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center).style(text_style), inner);
+}
+
+fn render_compact(frame: &mut Frame, app: &AppState, images: &mut ImageState, area: Rect) {
     match (&app.track_artist, &app.track_title) {
-        (Some(artist), Some(title)) => render_now_playing_hero(frame, app, artist, title, area),
+        (Some(artist), Some(title)) => render_now_playing_hero(frame, app, images, artist, title, area),
         _ => render_now_playing_idle(frame, app, area),
     }
 }
@@ -2420,18 +3247,48 @@ fn render_now_playing_idle(frame: &mut Frame, app: &AppState, area: Rect) {
 /// app, and lyrics still need to be the dominant use of vertical space
 /// (calibrating density to what this screen is actually for, not
 /// maximizing decoration).
-fn render_now_playing_hero(frame: &mut Frame, app: &AppState, artist: &str, title: &str, area: Rect) {
-    let hero_height = (area.height / 2).clamp(6, 11).min(area.height);
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(hero_height), Constraint::Length(1), Constraint::Min(1)])
-        .split(area);
-
+fn render_now_playing_hero(
+    frame: &mut Frame,
+    app: &AppState,
+    images: &mut ImageState,
+    artist: &str,
+    title: &str,
+    area: Rect,
+) {
     // Below ART_MIN_WIDTH the block would crush the monogram illegibly --
     // in a narrow pane, skip the art entirely rather than render
     // something unreadable just to say there's art.
     let art_width = (area.width / 4).clamp(ART_MIN_WIDTH, ART_MAX_WIDTH);
     let show_art = area.width >= art_width + 24;
+    // A real pixel square, not a flat "half as tall as wide" guess --
+    // see `square_height_cells`'s own doc comment for why that flat
+    // assumption produced a card reported live as visibly too tall.
+    let art_height = square_height_cells(art_width, real_cell_size(images.picker.as_ref()));
+
+    // +2 over the original 6-11 clamp: the gauge row grew from
+    // `Length(1)` to `Length(3)` below (a border, requested live to
+    // match the fullscreen views' already-bordered gauge) and needs the
+    // 2 extra rows of slack. `.max(art_height + 2)`, not just
+    // `.max(art_height)`: the art column below splits into
+    // `[Min(1), Length(art_height), Min(1)]` to center the card --
+    // a real, log-confirmed bug (not assumed) was `hero_height` only
+    // ever guaranteeing *exactly* `art_height`, leaving zero room for
+    // those two spacers; ratatui's layout solver then shrank the
+    // `Length(art_height)` allocation by 1 to make room for them,
+    // silently handing `render_art` a card one row short of the square
+    // it asked for (confirmed directly from the `"art size"` diagnostic
+    // log: computed `art_height` was 12, actually-rendered `area.height`
+    // was 11). `+2` reserves the spacers' own minimum up front instead.
+    // Clamp floor raised 8 -> 9: `meta_chunks` below now needs 9 rows
+    // minimum (its leading spacer grew to `Length(2)`, see that comment),
+    // and a `hero_height` that's too short for its own content would
+    // reproduce the exact same silent-shrink failure mode named above,
+    // just against `meta_chunks` instead of the art column this time.
+    let hero_height = (area.height / 2).clamp(9, 13).max(art_height + 2).min(area.height);
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(hero_height), Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
 
     let hero_cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -2443,24 +3300,86 @@ fn render_now_playing_hero(frame: &mut Frame, app: &AppState, artist: &str, titl
         .split(outer[0]);
 
     let album = app.track_album.as_deref().unwrap_or(title);
+    let mut art_top_row: Option<u16> = None;
     let meta_area = if show_art {
-        render_art_block(frame, artist, album, hero_cols[0]);
+        // The art column reserves `hero_height` rows (matching the text
+        // column beside it), but the card itself only ever needs
+        // `art_height` of them to stay square -- rendering into the
+        // whole column would hand `render_art`/`Resize::Scale` a taller-
+        // than-square target, and while `Scale` still preserves the
+        // image's own aspect (it won't distort), it does leave a blank
+        // gap on one side to do it, right back to the shape of bug
+        // `Resize::Scale` was originally introduced to fix.
+        //
+        // Top margin is a fixed `Length(1)`, not `Min(1)` on both ends --
+        // a symmetric top+bottom `Min(1)` split centers the card within
+        // `hero_height`, but `meta_chunks` below starts its own content
+        // (the title) after a *fixed* one-row spacer regardless of
+        // `hero_height`'s leftover slack. Whenever the two didn't agree
+        // (any time `hero_height` exceeded `art_height + 2`, which is
+        // the common case once the 8-13 row clamp binds), the card's
+        // computed centering offset and the title's fixed offset drifted
+        // apart -- reported live as "the song name still not aligned
+        // with top of the frame". Matching this column's own top margin
+        // to the text column's fixed spacer keeps both starting at the
+        // exact same row, by construction, regardless of `hero_height`.
+        let art_area = Layout::default()
+            .constraints([Constraint::Length(1), Constraint::Length(art_height), Constraint::Min(1)])
+            .split(hero_cols[0])[1];
+        art_top_row = Some(art_area.y);
+        render_art(frame, app, images, artist, album, art_area);
         hero_cols[1]
     } else {
         hero_cols[0]
     };
 
+    // Round 9 put the title on the *same* row as the art border's own top
+    // edge (`Length(1)` spacer, matching the art column's own), confirmed
+    // live via the diagnostic below to actually land on the identical row
+    // -- and still reported as visibly misaligned. Root cause, reasoned
+    // out rather than guessed further: Unicode box-drawing corner
+    // characters (the border's `┌`) render their ink starting from the
+    // *vertical center* of their cell, not the top -- that's what makes
+    // stacked box-drawing rows connect seamlessly. Regular text glyphs
+    // sit near the top of their cell. So even on the *identical* buffer
+    // row, the border's visible line sits at that row's middle while the
+    // title's visible glyph-top sits near that row's top -- the title
+    // reads as floating above the border line no matter what row it's
+    // on, because the two kinds of glyph don't align to the same point
+    // within a shared cell. Asked directly which side of that gap is
+    // preferred, since eliminating it entirely isn't reachable at
+    // integer-row granularity (the border's true visual position sits
+    // *between* two text rows, not on either one): the leading spacer
+    // grew from `Length(1)` to `Length(2)`, moving the title one row
+    // *below* the border line -- lining up with where the art's actual
+    // pixel content starts (`inner.y`, one row below the border) instead
+    // of the border line's own row.
     let meta_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // spacer
+            Constraint::Length(2), // spacer (one extra row -- see above)
             Constraint::Length(1), // title
             Constraint::Length(1), // artist -- album
             Constraint::Length(1), // spacer
             Constraint::Length(1), // icon + time + vol
-            Constraint::Length(1), // gauge
+            Constraint::Length(3), // gauge (bordered -- matches the fullscreen views)
         ])
         .split(meta_area);
+
+    if let Some(art_row) = art_top_row {
+        let title_row = meta_chunks[1].y;
+        thread_local! {
+            static LAST_LOGGED: std::cell::Cell<Option<(u16, u16)>> = const { std::cell::Cell::new(None) };
+        }
+        let pair = (art_row, title_row);
+        let changed = LAST_LOGGED.with(|c| c.replace(Some(pair)) != Some(pair));
+        if changed {
+            log::info!(
+                "hero alignment: art_top_row={art_row} title_row={title_row} (one_below_border={})",
+                title_row == art_row + 1
+            );
+        }
+    }
 
     frame.render_widget(
         Paragraph::new(truncate_ellipsis(title, meta_area.width as usize))
@@ -2476,20 +3395,30 @@ fn render_now_playing_hero(frame: &mut Frame, app: &AppState, artist: &str, titl
             .style(Style::default().fg(Color::DarkGray)),
         meta_chunks[2],
     );
+    if let Some(label) = &app.context_label {
+        frame.render_widget(
+            Paragraph::new(truncate_ellipsis(&format!("Playing from {label}"), meta_area.width as usize))
+                .style(Style::default().fg(Color::DarkGray)),
+            meta_chunks[3],
+        );
+    }
     frame.render_widget(
         Paragraph::new(format!("{} {}   {}", playing_icon(app), time_readout(app), volume_readout(app))),
         meta_chunks[4],
     );
-    frame.render_widget(progress_gauge(app), meta_chunks[5]);
+    let gauge_area = Rect { width: meta_chunks[5].width.min(COMPACT_GAUGE_MAX_WIDTH), ..meta_chunks[5] };
+    frame.render_widget(progress_gauge_bordered(app), gauge_area);
 
     frame.render_widget(Block::default().borders(Borders::TOP), outer[1]);
-    frame.render_widget(Paragraph::new(body_lines(app)).wrap(Wrap { trim: true }), outer[2]);
+    let lines = body_lines(app);
+    let offset = top_anchored_offset(&lines, current_body_line_row(app), outer[2].height, outer[2].width);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }).scroll((offset, 0)), outer[2]);
 }
 
-fn render_fullscreen(frame: &mut Frame, app: &AppState) {
+fn render_fullscreen(frame: &mut Frame, app: &AppState, images: &mut ImageState) {
     let area = frame.area();
     match (&app.track_artist, &app.track_title) {
-        (Some(artist), Some(title)) => render_fullscreen_hero(frame, app, artist, title, area),
+        (Some(artist), Some(title)) => render_fullscreen_hero(frame, app, images, artist, title, area),
         _ => render_fullscreen_idle(frame, app, area),
     }
 }
@@ -2513,52 +3442,8 @@ fn render_fullscreen_idle(frame: &mut Frame, app: &AppState, area: Rect) {
     );
 }
 
-/// The most immersive treatment: a large, centered art block above the
-/// same bold-centered title/transport/lyrics fullscreen already had.
-fn render_fullscreen_hero(frame: &mut Frame, app: &AppState, artist: &str, title: &str, area: Rect) {
-    let art_height = (area.height / 3).clamp(8, 16);
-    let art_width = (art_height * 2).clamp(20, 44);
-    let show_art = area.height > art_height + 8 && area.width > art_width + 4;
-
-    let text_rows = [
-        Constraint::Length(1), // title
-        Constraint::Length(1), // icon + time + vol
-        Constraint::Length(1), // progress gauge
-        Constraint::Length(1), // spacer
-        Constraint::Min(1),    // lyrics
-    ];
-    let chunks = if show_art {
-        let mut c = vec![Constraint::Length(art_height), Constraint::Length(1)];
-        c.extend(text_rows);
-        Layout::default().direction(Direction::Vertical).constraints(c).split(area)
-    } else {
-        Layout::default().direction(Direction::Vertical).constraints(text_rows).split(area)
-    };
-    let base = if show_art { 2 } else { 0 };
-
-    if show_art {
-        let album = app.track_album.as_deref().unwrap_or(title);
-        let art_row = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(1), Constraint::Length(art_width), Constraint::Min(1)])
-            .split(chunks[0]);
-        render_art_block(frame, artist, album, art_row[1]);
-    }
-
-    frame.render_widget(
-        Paragraph::new(truncate_ellipsis(title, area.width as usize))
-            .alignment(Alignment::Center)
-            .style(Style::default().add_modifier(Modifier::BOLD)),
-        chunks[base],
-    );
-    frame.render_widget(
-        Paragraph::new(format!("{} {}   {}", playing_icon(app), time_readout(app), volume_readout(app)))
-            .alignment(Alignment::Center),
-        chunks[base + 1],
-    );
-    frame.render_widget(progress_gauge(app), chunks[base + 2]);
-
-    let lines: Vec<Line> = body_lines(app)
+fn bold_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    lines
         .into_iter()
         .map(|l| {
             Line::from(
@@ -2568,10 +3453,362 @@ fn render_fullscreen_hero(frame: &mut Frame, app: &AppState, artist: &str, title
                     .collect::<Vec<_>>(),
             )
         })
-        .collect();
+        .collect()
+}
+
+/// The most immersive treatment: art + song info on one half, the full
+/// lyric sheet on the other, no divider between them -- replacing the
+/// previous single stacked column (which `render_fullscreen_hero_stacked`
+/// below still covers, as the fallback for a terminal too narrow to split).
+fn render_fullscreen_hero(
+    frame: &mut Frame,
+    app: &AppState,
+    images: &mut ImageState,
+    artist: &str,
+    title: &str,
+    area: Rect,
+) {
+    // A true even split, no divider column between them -- art+info and
+    // lyrics each get half, not art squeezed into a narrow fixed sidebar
+    // with the rest handed to lyrics by default.
+    let can_split = area.width >= 60 && area.height >= 10;
+    if !can_split {
+        render_fullscreen_hero_stacked(frame, app, images, artist, title, area);
+        return;
+    }
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    // Sized off the column's own width first, height derived from that --
+    // the previous version did the opposite (`art_width = art_height*2`,
+    // with `art_height` itself just half the pane's height), which on a
+    // wide fullscreen column left a large, unfilled gutter on both sides
+    // of the art card no matter how tall the terminal was -- reported
+    // live as "the left side... looks empty." Deriving width from the
+    // column directly fills far more of it; height still follows width
+    // at the same 2:1 ratio the stacked fallback uses (a terminal cell
+    // is roughly twice as tall as it is wide, so this is what reads as
+    // a visually square card).
+    //
+    // Two flat-cap attempts both failed for the same underlying reason:
+    // a fixed cell ceiling only looks right at one specific terminal
+    // height. 70 cols / 35 rows was tuned for a solid-color placeholder
+    // and, once Phase 11 started rendering a real photo there, consumed
+    // nearly the entire column on a normal terminal, squeezing the
+    // fixed content below to nothing ("still not completely right").
+    // 50 cols / 20 rows fixed that squeeze but then read as too small
+    // ("shrunk") on a taller terminal, where 20 rows is a shrinking
+    // fraction of the available height the taller the terminal gets --
+    // a flat cap can't scale with the pane, by definition.
+    //
+    // Fixed properly this time: height is the *lesser* of two numbers
+    // that each answer a different question, instead of one flat
+    // ceiling trying to answer both. `ideal_height` keeps the card
+    // visually square against whatever width the column produced ("how
+    // tall should a square card of this width be"). `height_budget` is
+    // 75% of the vertical room actually left after the 8 fixed rows
+    // below the card ("how tall can the card get before the fixed
+    // content below it, and both breathing-room spacers, get squeezed
+    // out") -- the other 25% covers those two `Min(1)` spacers plus
+    // slack. Taking the smaller of the two means: on a short terminal,
+    // `height_budget` is the binding constraint and the card shrinks to
+    // fit safely (this round's original goal); on a tall terminal,
+    // `ideal_height` is the binding constraint and the card simply stays
+    // a natural, width-matched square instead of an arbitrarily tiny
+    // fixed size ("shrunk" complaint, now fixed by not having a flat
+    // ceiling at all).
+    let art_width_candidate = cols[0].width.saturating_sub(8).clamp(20, 70);
+    let cell_size = real_cell_size(images.picker.as_ref());
+    let ideal_height = square_height_cells(art_width_candidate, cell_size);
+    let max_safe_height = area.height.saturating_sub(8);
+    let height_budget = ((max_safe_height as f32) * 0.75) as u16;
+    // A real bug from an unconditional `.max(10)` here, caught live: on
+    // a short enough terminal, `height_budget` (already `<= max_safe_height`
+    // by construction, since it's 75% of it) could fall under 10, but
+    // the old floor forced `art_height` back up to 10 regardless --
+    // pushing `art_height + 8` past `area.height` and starving the
+    // fixed title/artist/transport rows below it of any space at all
+    // (ratatui's layout solver dropped them to zero height under the
+    // resulting pressure, so they silently disappeared rather than just
+    // looking cramped). The floor now aims for 10 only when the terminal
+    // actually has that much room to give.
+    let floor = 10.min(max_safe_height);
+    let effective_ceiling = height_budget.max(floor);
+    // The real bug the diagnostic log confirmed: previously `art_height`
+    // alone was clamped down to `height_budget` whenever the terminal
+    // didn't have room for a true square at `art_width_candidate`, but
+    // `art_width` never shrank to match -- producing a card that was
+    // *shorter* than square without ever becoming *narrower* to match,
+    // i.e. not a square at all (logged live: 70x30 cells at an 18x40px
+    // cell came out 1224x1120 real pixels, 9% wider than tall). Fixed by
+    // re-deriving width from the constrained height with
+    // `square_width_cells` (already built for Phase 11's own narrow-
+    // stacked fallback) whenever height ends up being the limiting
+    // dimension, so the card is a true square either way -- "adjust one
+    // or the other but get them to fit flush," per the live report --
+    // instead of only ever adjusting height and leaving the mismatch.
+    let (art_width, art_height) = if ideal_height <= effective_ceiling {
+        (art_width_candidate, ideal_height.max(1))
+    } else {
+        let constrained_height = effective_ceiling.max(1);
+        let constrained_width = square_width_cells(constrained_height, cell_size).min(art_width_candidate).max(1);
+        (constrained_width, constrained_height)
+    };
+    // Symmetric `Min(1)` on both ends -- true centering. This looked
+    // wrong once before only because the fixed content above it (art +
+    // 6 text rows) was too small a block to center inside a tall pane
+    // without the leftover space reading as excessive; with the art
+    // itself now scaling to the pane, the same centering reads as
+    // balanced instead of top- or bottom-heavy.
+    let side_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1), // top spacer
+            Constraint::Length(art_height),
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // title
+            Constraint::Length(1), // artist -- album
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // icon + time + vol
+            Constraint::Length(3), // gauge (bordered -- needs its own top/bottom rows)
+            Constraint::Min(1), // bottom spacer
+        ])
+        .split(cols[0]);
+
+    let album = app.track_album.as_deref().unwrap_or(title);
+    render_art(frame, app, images, artist, album, capsule_row(side_rows[1], art_width));
 
     frame.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Center).wrap(Wrap { trim: true }),
-        chunks[base + 4],
+        Paragraph::new(truncate_ellipsis(title, cols[0].width as usize))
+            .alignment(Alignment::Center)
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+        side_rows[3],
     );
+    let artist_album = match &app.track_album {
+        Some(al) => format!("{artist} \u{2014} {al}"),
+        None => artist.to_string(),
+    };
+    frame.render_widget(
+        Paragraph::new(truncate_ellipsis(&artist_album, cols[0].width as usize))
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray)),
+        side_rows[4],
+    );
+    if let Some(label) = &app.context_label {
+        frame.render_widget(
+            Paragraph::new(truncate_ellipsis(&format!("Playing from {label}"), cols[0].width as usize))
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::DarkGray)),
+            side_rows[5],
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(format!("{} {}   {}", playing_icon(app), time_readout(app), volume_readout(app)))
+            .alignment(Alignment::Center),
+        side_rows[6],
+    );
+    // A contained capsule the same width as the art card above it, not a
+    // bar stretching to the full column -- same `capsule_row` call
+    // applied to a different row of the same parent guarantees
+    // byte-identical left/right edges with the art card by construction,
+    // which is the actual fix (previously computed independently, which
+    // is how the two drifted apart).
+    frame.render_widget(progress_gauge_bordered(app), capsule_row(side_rows[7], art_width));
+
+    // No divider rule between the two halves -- asked for directly,
+    // relying on the whitespace gap alone (lyrics get a left inset
+    // below) to separate them rather than a drawn line.
+    let lyrics_area = Rect { x: cols[1].x + 2, width: cols[1].width.saturating_sub(2), ..cols[1] };
+    render_fullscreen_lyrics(frame, app, lyrics_area, Alignment::Left);
+}
+
+// Six attempts at "bigger" here, in order -- see git history for each
+// one's full detail. First: `tui-big-text` enlarged only the current
+// line, jarringly inconsistent next to its normal-size neighbors.
+// Second and third: `tui-big-text` uniformly at `PixelSize::Quadrant`,
+// reported "way too large" twice, with a song's opening line pinned to
+// the top instead of centered. Fourth: letter-spacing instead of block
+// glyphs -- "irregularly big spacing," then still "way too large" and
+// "unnatural" even after fixing the spacing ratio. Fifth and sixth:
+// block glyphs reopened at the user's explicit request, first at
+// `PixelSize::Sextant` (confirmed to render with correct, non-garbled
+// glyphs -- the font-coverage risk was real but didn't materialize),
+// then `PixelSize::Octant` for even smaller -- both still reported "way
+// too big," and, decisively this round, rejected on a different axis
+// entirely: "not pixelized... more curved," an explicit preference for
+// how the text looks, not just how big it is. Block-glyph rendering
+// (font8x8-backed, inherently blocky at any `PixelSize`) cannot satisfy
+// that -- it's not a parameter to tune, it's the technique itself. Six
+// attempts across two families (glyph-scaling, letter-spacing) both
+// eventually rejected is well past the systematic-debugging "question
+// the architecture" threshold a second and third time over: `tui-big-
+// text`/`font8x8` removed from the project outright (`cargo remove`,
+// confirmed `Cargo.toml`/`Cargo.lock` clean via `git diff`), the same
+// full removal already proven twice this session for letter-spacing and
+// the original block-glyph code. What's left -- `bold_lines` +
+// `lyric_tier_color`'s 4-tier fade + `center_current_line`/
+// `top_anchored_offset` -- renders with the terminal's own font, which
+// is exactly what "curved" means in a terminal context: normal
+// anti-aliased glyphs, not a bitmap approximation. Literally bigger
+// *and* curved at the same time isn't achievable through text alone in
+// a fixed-size cell grid -- that would need rendering text to a real
+// raster image via an actual font and displaying it through a terminal
+// graphics protocol (kitty/iTerm2/sixel), the same category of
+// investment Phase 11 already tracks for album art specifically, not
+// attempted here without discussing that scope and cost first.
+fn render_fullscreen_lyrics(frame: &mut Frame, app: &AppState, area: Rect, alignment: Alignment) {
+    let (lines, offset) =
+        center_current_line(bold_lines(body_lines(app)), current_body_line_row(app), area.height, area.width);
+    frame.render_widget(
+        Paragraph::new(lines).alignment(alignment).wrap(Wrap { trim: true }).scroll((offset, 0)),
+        area,
+    );
+}
+
+/// Narrow-terminal fallback: the original single stacked column (art on
+/// top, then title/transport/lyrics, all centered) -- kept rather than
+/// deleted since a split too narrow to read either half legibly is
+/// worse than not splitting at all.
+/// Inline (art beside title/artist/transport/gauge), mirroring the
+/// compact hero's own established shape -- reported live as wanted here
+/// too ("the now playing format is not inline... song name is above
+/// the album cover"). Previously stacked (art on top, text below,
+/// lyrics under that); keeps the same two regions (an art+meta header,
+/// then lyrics spanning the full width below it) but makes the header
+/// row inline instead of vertically stacked, matching
+/// `render_now_playing_hero`'s structure -- centered instead of
+/// left-aligned, and using `render_fullscreen_lyrics` (this app's
+/// bold+color-fade fullscreen lyrics treatment) rather than the compact
+/// hero's small top-anchored one, since this is still a fullscreen view.
+fn render_fullscreen_hero_stacked(
+    frame: &mut Frame,
+    app: &AppState,
+    images: &mut ImageState,
+    artist: &str,
+    title: &str,
+    area: Rect,
+) {
+    let art_width = (area.width / 4).clamp(ART_MIN_WIDTH, ART_MAX_WIDTH);
+    let art_height = square_height_cells(art_width, real_cell_size(images.picker.as_ref()));
+    let show_art = area.width >= art_width + 24 && area.height >= art_height + 4;
+
+    // `.max(9)`, not `8`: `meta_chunks` below needs 9 rows minimum now
+    // (its leading spacer grew to `Length(2)`, matching the compact
+    // hero's own identical fix) -- a `header_height` too short for that
+    // would silently shrink `meta_chunks`' own content instead.
+    let header_height = (art_height + 2).max(9).min(area.height.saturating_sub(2).max(1));
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(header_height), Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+
+    let header_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(if show_art {
+            vec![Constraint::Length(art_width), Constraint::Min(1)]
+        } else {
+            vec![Constraint::Min(1)]
+        })
+        .split(outer[0]);
+
+    let album = app.track_album.as_deref().unwrap_or(title);
+    let mut art_top_row: Option<u16> = None;
+    let meta_area = if show_art {
+        // Same bug, same fix, as `render_now_playing_hero`'s own art
+        // column (see its doc comment for the full account): a top
+        // `Min(1)` competes with the bottom `Min(1)` for whatever slack
+        // `header_height` has beyond `art_height`, and ratatui's surplus
+        // distribution between two `Min` constraints doesn't reliably
+        // split it 1-and-1 the way a hand-check might assume -- while
+        // `meta_chunks` below starts the title after a *fixed* `Length(1)`
+        // spacer regardless. This function was missed when that fix
+        // shipped for the compact hero (this is a *different* function,
+        // not a leftover branch of the same one), so the exact same
+        // "song name floats above the art card" report kept reproducing
+        // here even after the compact view was confirmed fixed. Fixed
+        // identically: a fixed `Length(1)` top margin, matching this
+        // column's own `meta_chunks[0]` spacer exactly, by construction.
+        let art_area = Layout::default()
+            .constraints([Constraint::Length(1), Constraint::Length(art_height), Constraint::Min(1)])
+            .split(header_cols[0])[1];
+        art_top_row = Some(art_area.y);
+        render_art(frame, app, images, artist, album, art_area);
+        header_cols[1]
+    } else {
+        header_cols[0]
+    };
+
+    // Same shift as `render_now_playing_hero`'s own `meta_chunks` -- see
+    // its doc comment for the full reasoning (box-drawing corner glyphs
+    // render centered in their cell, regular text glyphs render near the
+    // top, so the two can never visually align on one shared row; asked
+    // directly, the title moves one row below the border line instead).
+    let meta_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // spacer (one extra row -- see above)
+            Constraint::Length(1), // title
+            Constraint::Length(1), // artist -- album
+            Constraint::Length(1), // spacer / context label
+            Constraint::Length(1), // icon + time + vol
+            Constraint::Length(3), // gauge (bordered)
+        ])
+        .split(meta_area);
+
+    // Same diagnostic as `render_now_playing_hero`, extended here after
+    // finding this function had the same top-spacer bug that function's
+    // own fix never reached (see the art_area comment above) -- logs once
+    // per distinct value change so a live run can confirm this call site
+    // too, not just the compact one.
+    if let Some(art_row) = art_top_row {
+        let title_row = meta_chunks[1].y;
+        thread_local! {
+            static LAST_LOGGED: std::cell::Cell<Option<(u16, u16)>> = const { std::cell::Cell::new(None) };
+        }
+        let pair = (art_row, title_row);
+        let changed = LAST_LOGGED.with(|c| c.replace(Some(pair)) != Some(pair));
+        if changed {
+            log::info!(
+                "fullscreen-stacked hero alignment: art_top_row={art_row} title_row={title_row} (one_below_border={})",
+                title_row == art_row + 1
+            );
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(truncate_ellipsis(title, meta_area.width as usize))
+            .alignment(Alignment::Center)
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+        meta_chunks[1],
+    );
+    let artist_album = match &app.track_album {
+        Some(al) => format!("{artist} \u{2014} {al}"),
+        None => artist.to_string(),
+    };
+    frame.render_widget(
+        Paragraph::new(truncate_ellipsis(&artist_album, meta_area.width as usize))
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray)),
+        meta_chunks[2],
+    );
+    if let Some(label) = &app.context_label {
+        frame.render_widget(
+            Paragraph::new(truncate_ellipsis(&format!("Playing from {label}"), meta_area.width as usize))
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::DarkGray)),
+            meta_chunks[3],
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(format!("{} {}   {}", playing_icon(app), time_readout(app), volume_readout(app)))
+            .alignment(Alignment::Center),
+        meta_chunks[4],
+    );
+    frame.render_widget(progress_gauge_bordered(app), meta_chunks[5]);
+
+    frame.render_widget(Block::default().borders(Borders::TOP), outer[1]);
+    render_fullscreen_lyrics(frame, app, outer[2], Alignment::Center);
 }

@@ -6,7 +6,6 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub context_lines: usize,
     /// `q` asks "Quit spot-tui? y/n" first, same overlay every other
     /// destructive action already confirms through, rather than exiting
     /// immediately. Reported live as wanted, with an escape hatch for
@@ -20,7 +19,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { context_lines: 2, confirm_quit: true }
+        Self { confirm_quit: true }
     }
 }
 
@@ -42,7 +41,6 @@ mod tests {
     #[test]
     fn empty_toml_uses_defaults() {
         let cfg: Config = toml::from_str("").unwrap();
-        assert_eq!(cfg.context_lines, 2);
         assert!(cfg.confirm_quit);
     }
 
@@ -50,12 +48,16 @@ mod tests {
     fn confirm_quit_can_be_disabled() {
         let cfg: Config = toml::from_str("confirm_quit = false").unwrap();
         assert!(!cfg.confirm_quit);
-        assert_eq!(cfg.context_lines, 2); // untouched field keeps its default
     }
 
+    // `context_lines` was removed once Now Playing started showing the
+    // whole lyric sheet instead of a windowed few lines around the
+    // current one -- a leftover `context_lines = N` in an old config
+    // file should be silently ignored, not rejected, matching serde's
+    // default (non-`deny_unknown_fields`) behavior.
     #[test]
-    fn partial_toml_overrides_only_given_fields() {
+    fn unknown_fields_are_ignored_not_rejected() {
         let cfg: Config = toml::from_str("context_lines = 4").unwrap();
-        assert_eq!(cfg.context_lines, 4);
+        assert!(cfg.confirm_quit);
     }
 }

@@ -18,9 +18,10 @@ use librespot_playback::audio_backend;
 use librespot_playback::config::{AudioFormat, PlayerConfig};
 use librespot_playback::mixer::{self, MixerConfig};
 use librespot_playback::player::{Player, PlayerEvent};
-use lyrics::{current_line_index, CachedLyrics, LyricLine, LyricsClient};
+use lyrics::{current_line_index, spotify_lyrics, CachedLyrics, LyricLine, LyricsClient};
 use position::PositionTracker;
 use std::io::stdout;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -57,13 +58,17 @@ enum CrudResult {
     PlaylistCreated(Result<PlaylistSummary, String>),
     PlaylistRenamed { playlist_uri: String, new_name: String, result: Result<(), String> },
     PlaylistDeleted { playlist_uri: String, result: Result<(), String> },
-    TrackAdded { playlist_uri: String, result: Result<(), String> },
+    // `track_uri` added alongside the existing fields specifically so
+    // the success arms can write through into `AppState::playlist_membership`
+    // -- the same optimistic-update-over-refetch lesson `bump_track_count`
+    // already established for track counts.
+    TrackAdded { playlist_uri: String, track_uri: String, result: Result<(), String> },
     /// The picker's target playlist already contains this track (checked
     /// live before adding, not assumed) -- carries a ready-made message
     /// so the main loop just has to show it, not re-derive the track's
     /// name from a bare URI.
     PlaylistAlreadyHasTrack { playlist_uri: String, track_uri: String, message: String },
-    TrackRemoved { playlist_uri: String, occurrences: usize, result: Result<(), String> },
+    TrackRemoved { playlist_uri: String, track_uri: String, occurrences: usize, result: Result<(), String> },
     TrackReordered { playlist_uri: String, result: Result<(), String> },
     DeviceTransferred(Result<(), String>),
 }
@@ -82,6 +87,46 @@ enum SidebarAction {
 const TICK: Duration = Duration::from_millis(100);
 const DEBOUNCE: Duration = Duration::from_millis(250);
 const SEEK_STEP_MS: i64 = 5000;
+
+/// Clamped at both ends: `0` because a negative position is nonsensical,
+/// `duration_ms` because librespot's own `Spirc::set_position_ms` doc
+/// comment says a target past the track's real length is silently
+/// ignored, not clamped there for you -- without this, holding the seek
+/// key runs the target past that ceiling within a couple of repeats,
+/// and every press after that keeps recomputing a target that's still
+/// out of range, silently dropped forever until something else moves
+/// the real position. Reported live as "arrow keys stop working."
+fn seek_target_ms(current_ms: i64, delta_ms: i64, duration_ms: i64) -> u32 {
+    (current_ms + delta_ms).clamp(0, duration_ms.max(0)) as u32
+}
+
+#[cfg(test)]
+mod seek_target_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_forward_seek_within_bounds_is_unchanged() {
+        assert_eq!(seek_target_ms(10_000, 5_000, 300_000), 15_000);
+    }
+
+    #[test]
+    fn ordinary_backward_seek_within_bounds_is_unchanged() {
+        assert_eq!(seek_target_ms(10_000, -5_000, 300_000), 5_000);
+    }
+
+    #[test]
+    fn backward_seek_past_the_start_clamps_to_zero() {
+        assert_eq!(seek_target_ms(3_000, -5_000, 300_000), 0);
+    }
+
+    #[test]
+    fn forward_seek_past_the_end_clamps_to_duration_not_left_unbounded() {
+        // The exact regression: holding Right for a few repeats pushes
+        // the naive target (297_000 + 5_000 = 302_000) past a 300_000ms
+        // track -- librespot would silently ignore that, not clamp it.
+        assert_eq!(seek_target_ms(297_000, 5_000, 300_000), 300_000);
+    }
+}
 
 #[derive(Clone)]
 struct TrackMeta {
@@ -107,9 +152,21 @@ fn cache_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("spot-tui-cache"))
 }
 
-fn spawn_fetch_thread() -> (mpsc::Sender<(u64, TrackMeta)>, mpsc::Receiver<(u64, CachedLyrics)>) {
+/// The third element is a clonable handle to the same result channel the
+/// lrclib thread below reports through -- Phase 17's Spotify-first-party
+/// lookup runs as a `tokio::spawn`ed task per track (not on this thread,
+/// since `SpClient::get_lyrics` is async), and sends its own success
+/// results straight into this channel so the existing drain loop and its
+/// staleness guard (keyed on `fetch_gen`) apply unchanged regardless of
+/// which source actually produced the result.
+fn spawn_fetch_thread() -> (
+    mpsc::Sender<(u64, TrackMeta)>,
+    mpsc::Receiver<(u64, CachedLyrics)>,
+    mpsc::Sender<(u64, CachedLyrics)>,
+) {
     let (req_tx, req_rx) = mpsc::channel::<(u64, TrackMeta)>();
     let (res_tx, res_rx) = mpsc::channel();
+    let res_tx_for_spotify = res_tx.clone();
 
     std::thread::spawn(move || {
         let client = LyricsClient::new(cache_dir());
@@ -127,7 +184,7 @@ fn spawn_fetch_thread() -> (mpsc::Sender<(u64, TrackMeta)>, mpsc::Receiver<(u64,
         }
     });
 
-    (req_tx, res_rx)
+    (req_tx, res_rx, res_tx_for_spotify)
 }
 
 struct TerminalGuard;
@@ -162,6 +219,37 @@ fn tmux_toggle_zoom() {
             .args(["resize-pane", "-Z"])
             .status();
     }
+}
+
+/// Whether the real terminal (possibly wrapped in tmux) is Ghostty --
+/// used to work around this crate version's missing Ghostty handling
+/// (see the call site's own doc comment). Checking `TERM`/`TERM_PROGRAM`
+/// alone misses the case reported live: running inside tmux, tmux
+/// deliberately overwrites both to its own values (`tmux`/
+/// `tmux-256color`) for every pane, by design, so a session can be
+/// detached and reattached under a *different* terminal later without
+/// panes caring -- there is no way to recover the real outer terminal
+/// from those two variables once tmux has rewritten them. tmux still
+/// knows the real client terminal internally, though, and exposes it
+/// on request -- confirmed live: `tmux display-message -p
+/// '#{client_termtype}'` returned `"ghostty 1.3.1"` in the exact
+/// session where `$TERM_PROGRAM` inside the pane reported `"tmux"`.
+fn is_ghostty() -> bool {
+    if std::env::var("TERM_PROGRAM").is_ok_and(|t| t.eq_ignore_ascii_case("ghostty"))
+        || std::env::var("TERM").is_ok_and(|t| t.contains("ghostty"))
+    {
+        return true;
+    }
+    if std::env::var("TMUX").is_ok()
+        && let Ok(output) =
+            std::process::Command::new("tmux").args(["display-message", "-p", "#{client_termtype}"]).output()
+    {
+        let client_termtype = String::from_utf8_lossy(&output.stdout).to_lowercase();
+        if client_termtype.contains("ghostty") {
+            return true;
+        }
+    }
+    false
 }
 
 /// `f`, made universal (every screen except Search, same standing
@@ -453,7 +541,12 @@ fn fire_confirm_action(
             let playlist_uri_for_result = playlist_uri.clone();
             tokio::spawn(async move {
                 let result = api::playlists::remove_track(&client, &playlist_uri, &track_uri).await;
-                let _ = tx.send(CrudResult::TrackRemoved { playlist_uri: playlist_uri_for_result, occurrences, result });
+                let _ = tx.send(CrudResult::TrackRemoved {
+                    playlist_uri: playlist_uri_for_result,
+                    track_uri,
+                    occurrences,
+                    result,
+                });
             });
         }
         ConfirmAction::AddTrackAnyway { playlist_uri, track_uri } => {
@@ -462,7 +555,7 @@ fn fire_confirm_action(
             let playlist_uri_for_result = playlist_uri.clone();
             tokio::spawn(async move {
                 let result = api::playlists::add_track(&client, &playlist_uri, &track_uri).await;
-                let _ = tx.send(CrudResult::TrackAdded { playlist_uri: playlist_uri_for_result, result });
+                let _ = tx.send(CrudResult::TrackAdded { playlist_uri: playlist_uri_for_result, track_uri, result });
             });
         }
     }
@@ -572,6 +665,7 @@ fn handle_picker_key(
     app: &mut AppState,
     code: KeyCode,
     crud_tx: &mpsc::Sender<CrudResult>,
+    library_tx: &mpsc::Sender<LibraryFetchResult>,
     spotify_client: &Option<AuthCodeSpotify>,
 ) {
     let count = |app: &AppState| match &app.library.playlists {
@@ -648,6 +742,7 @@ fn handle_picker_key(
             };
             app.status = Some(("adding to playlist\u{2026}".to_string(), false));
             let tx = crud_tx.clone();
+            let lib_tx = library_tx.clone();
             let track_uri = picker.track_uri.clone();
             tokio::spawn(async move {
                 // Checks membership before adding, rather than warning
@@ -662,6 +757,18 @@ fn handle_picker_key(
                 // run.
                 match api::library::playlist_tracks(&client, &playlist_uri).await {
                     Ok(tracks) => {
+                        // A free opportunity to populate the picker's
+                        // membership cache for this whole playlist, not
+                        // just the one track being checked -- this fetch
+                        // already has the full list in hand. Routed
+                        // through the same `LibraryFetchResult::PlaylistTracks`
+                        // arm every other track-list fetch already goes
+                        // through, so there's no second cache-population
+                        // code path to keep in sync.
+                        let _ = lib_tx.send(LibraryFetchResult::PlaylistTracks {
+                            playlist_uri: playlist_uri.clone(),
+                            result: Ok(tracks.clone()),
+                        });
                         if let Some(existing) = tracks.iter().find(|t| t.uri == track_uri) {
                             let message = format!(
                                 "\"{} \u{2014} {}\" is already in \"{playlist_name}\". Add it again anyway? y/n",
@@ -670,13 +777,13 @@ fn handle_picker_key(
                             let _ = tx.send(CrudResult::PlaylistAlreadyHasTrack { playlist_uri, track_uri, message });
                         } else {
                             let result = api::playlists::add_track(&client, &playlist_uri, &track_uri).await;
-                            let _ = tx.send(CrudResult::TrackAdded { playlist_uri, result });
+                            let _ = tx.send(CrudResult::TrackAdded { playlist_uri, track_uri, result });
                         }
                     }
                     Err(e) => {
                         log::warn!("duplicate check before add_track failed, adding anyway: {e}");
                         let result = api::playlists::add_track(&client, &playlist_uri, &track_uri).await;
-                        let _ = tx.send(CrudResult::TrackAdded { playlist_uri, result });
+                        let _ = tx.send(CrudResult::TrackAdded { playlist_uri, track_uri, result });
                     }
                 }
             });
@@ -700,6 +807,7 @@ async fn connect_spirc() -> Result<
         Spirc,
         tokio::task::JoinHandle<()>,
         librespot_playback::player::PlayerEventChannel,
+        Session,
     ),
     String,
 > {
@@ -743,12 +851,17 @@ async fn connect_spirc() -> Result<
         initial_volume: u16::MAX,
         ..ConnectConfig::default()
     };
+    // Second handle to the same session (Session is a cheap Arc-style
+    // clone), kept for Phase 17's first-party lyrics lookup
+    // (session.spclient().get_lyrics) -- the original is consumed by
+    // Spirc::new below, which owns driving the Connect session itself.
+    let lyrics_session = session.clone();
     let (spirc, spirc_task) = Spirc::new(connect_config, session, credentials, player, mixer)
         .await
         .map_err(|e| e.to_string())?;
     let spirc_handle = tokio::spawn(spirc_task);
 
-    Ok((spirc, spirc_handle, player_events))
+    Ok((spirc, spirc_handle, player_events, lyrics_session))
 }
 
 fn to_lyrics_state(cached: CachedLyrics) -> LyricsState {
@@ -850,17 +963,89 @@ async fn main() -> std::io::Result<()> {
     let _guard = TerminalGuard::new()?;
     let mut terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout()))?;
 
-    let (fetch_tx, fetch_rx) = spawn_fetch_thread();
+    // Query the terminal's real graphics-protocol capability exactly
+    // once, here -- `Picker::from_query_stdio`'s own doc comment
+    // requires this to run after entering the alternate screen (already
+    // done above) but strictly before the main loop starts reading
+    // terminal events below, so its own momentary stdio read never
+    // races `event::read()`.
+    let mut picker = ratatui_image::picker::Picker::from_query_stdio().ok();
+    if let Some(p) = &mut picker {
+        // Confirmed live: this crate version (11.0.8) has no Ghostty
+        // handling at all (checked its source directly -- only
+        // WezTerm/Konsole get an env-var check, both for *blacklisting*
+        // a protocol, not detecting one) even though Ghostty fully
+        // implements the kitty graphics protocol (ghostty.org/docs/
+        // features). Its stdio capability probe still resolved to
+        // `Halfblocks` here regardless -- most likely the probe's
+        // "stop reading once the trailing device-status-report arrives"
+        // heuristic races Ghostty's actual response order, dropping the
+        // kitty-specific reply before it's parsed. Overriding via
+        // `TERM`/`TERM_PROGRAM` mirrors exactly the pattern this crate
+        // already uses for WezTerm/Konsole -- extending it to a
+        // terminal this version doesn't special-case yet, not a hack
+        // invented from nothing.
+        if p.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks && is_ghostty() {
+            log::info!("graphics protocol probe said Halfblocks but the real terminal is Ghostty -- overriding to Kitty");
+            p.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+        }
+        log::info!("graphics protocol in use: {:?}", p.protocol_type());
+
+        // The same stdio probe that missed Ghostty's kitty-graphics
+        // reply also populates `font_size` -- and got that wrong here
+        // too, confirmed live: this app's own art-sizing math worked
+        // around it (computing cell counts from a separately-queried
+        // real cell size), but `ratatui-image`'s own internal image
+        // encoder *also* reads `Picker`'s stored `font_size` to decide
+        // how many real pixels to transmit per cell -- so the two ended
+        // up disagreeing with each other, each internally consistent
+        // but not with the terminal's true cell size, and the
+        // transmitted image came out lower-resolution than the cells it
+        // was stretched across, rendering visibly pixelated. Correcting
+        // the stored value itself, once, here, fixes both from one
+        // source of truth instead of two separately-computed ones.
+        // `Picker` has no public setter for `font_size` --
+        // `from_fontsize` (deprecated upstream in favor of
+        // `from_query_stdio`/`halfblocks`, neither of which allows
+        // injecting a known-correct value) is still the only way to
+        // build one with an explicit size, so this is an intentional,
+        // justified use of a deprecated API, not an oversight.
+        if let Ok(win) = crossterm::terminal::window_size() {
+            if win.width > 0 && win.height > 0 && win.columns > 0 && win.rows > 0 {
+                let (real_w, real_h) = (win.width / win.columns, win.height / win.rows);
+                if real_w > 0 && real_h > 0 {
+                    let protocol = p.protocol_type();
+                    #[allow(deprecated)]
+                    let mut corrected =
+                        ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(real_w, real_h));
+                    corrected.set_protocol_type(protocol);
+                    log::info!("corrected picker font size to {real_w}x{real_h}px/cell via window_size ioctl");
+                    *p = corrected;
+                }
+            }
+        }
+    } else {
+        log::warn!("graphics protocol detection failed outright, falling back to text/placeholder art");
+    }
+
+    let (fetch_tx, fetch_rx, fetch_res_tx) = spawn_fetch_thread();
+    // Real album art: fetched off the render path (spawn_blocking, since
+    // it's a plain synchronous `ureq` GET + JPEG decode) and reported
+    // back through this channel, generation-tagged the same way lyrics
+    // fetches already are so a result for a track already skipped past
+    // gets dropped rather than painted over the current one.
+    let (cover_tx, cover_rx) = mpsc::channel::<(u64, image::DynamicImage)>();
     let cfg = config::load();
     let mut tracker: PositionTracker;
     let mut app = AppState {
         track_title: None,
         track_artist: None,
         track_album: None,
+        current_track_uri: None,
+        context_label: None,
         lyrics: LyricsState::Idle,
         current_line: None,
         fullscreen: false,
-        context_lines: cfg.context_lines,
         playing: None,
         position: Duration::ZERO,
         duration: Duration::ZERO,
@@ -875,6 +1060,7 @@ async fn main() -> std::io::Result<()> {
         album_detail: None,
         pinned_playlists: pins::load("playlists"),
         pinned_tracks: pins::load("tracks"),
+        playlist_membership: std::collections::HashMap::new(),
         search: SearchState::new(),
         pending_confirm: None,
         text_prompt: None,
@@ -886,6 +1072,7 @@ async fn main() -> std::io::Result<()> {
     // separately from `app` -- see `ui::ScrollState`'s own doc comment
     // for why this isn't just more fields on `AppState`.
     let mut scroll = ui::ScrollState::default();
+    let mut images = ui::ImageState { picker, cover_image: None, sized_covers: Vec::new() };
 
     let mut generation: u64 = 0;
     let mut pending_fetch: Option<(u64, TrackMeta, Instant)> = None;
@@ -905,8 +1092,47 @@ async fn main() -> std::io::Result<()> {
     let mut backoff = Duration::from_millis(500);
     const MAX_BACKOFF: Duration = Duration::from_secs(10);
 
+    // Only the very first connect of this process's lifetime gets the
+    // startup animation + minimum-visible-duration treatment below --
+    // reconnects after a later drop should stay as fast/invisible as
+    // they already are, not get padded every time.
+    let mut first_connect = true;
+    // Long enough to give Ghostty's kitty-graphics subsystem a real
+    // window to finish initializing before the first real frame (with
+    // real album art) ever gets drawn -- see `ui::render_startup`'s own
+    // doc comment for the live bug this covers. Short enough that a
+    // normal-speed connect (which already takes several real seconds
+    // per the log) rarely even notices this floor; it only matters on
+    // an unusually fast/cached reconnect that would otherwise skip the
+    // warm-up window entirely.
+    const STARTUP_MIN_VISIBLE: Duration = Duration::from_millis(600);
+    const STARTUP_TICK: Duration = Duration::from_millis(80);
+
     'outer: loop {
-        let (spirc, spirc_handle, mut player_events) = match connect_spirc().await {
+        let connect_result = if first_connect {
+            let start = Instant::now();
+            let mut handle = tokio::spawn(connect_spirc());
+            let mut tick: usize = 0;
+            let result = loop {
+                tokio::select! {
+                    res = &mut handle => break res.expect("connect_spirc task panicked"),
+                    _ = tokio::time::sleep(STARTUP_TICK) => {
+                        tick = tick.wrapping_add(1);
+                        terminal.draw(|f| ui::render_startup(f, tick))?;
+                    }
+                }
+            };
+            while start.elapsed() < STARTUP_MIN_VISIBLE {
+                tick = tick.wrapping_add(1);
+                terminal.draw(|f| ui::render_startup(f, tick))?;
+                tokio::time::sleep(STARTUP_TICK).await;
+            }
+            first_connect = false;
+            result
+        } else {
+            connect_spirc().await
+        };
+        let (spirc, spirc_handle, mut player_events, lyrics_session) = match connect_result {
             Ok(v) => {
                 backoff = Duration::from_millis(500);
                 v
@@ -918,7 +1144,7 @@ async fn main() -> std::io::Result<()> {
                 app.track_album = None;
                 app.playing = None;
                 app.lyrics = LyricsState::SessionEnded;
-                terminal.draw(|f| ui::render(f, &app, &mut scroll))?;
+                terminal.draw(|f| ui::render(f, &app, &mut scroll, &mut images))?;
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
                 continue 'outer;
@@ -967,9 +1193,31 @@ async fn main() -> std::io::Result<()> {
                 app.track_title = Some(audio_item.name.clone());
                 app.track_artist = if artist.is_empty() { None } else { Some(artist.clone()) };
                 app.track_album = album.clone();
+                app.current_track_uri = Some(audio_item.track_id.to_string());
                 app.duration = Duration::from_millis(audio_item.duration_ms as u64);
                 app.lyrics = LyricsState::Loading;
                 generation += 1;
+
+                // Real album art, only worth fetching at all if a real
+                // graphics protocol is actually in use -- `covers` is
+                // already sorted largest-first by librespot itself.
+                if images.picker.is_some() {
+                    if let Some(cover_url) = audio_item.covers.first().map(|c| c.url.clone()) {
+                        let tx = cover_tx.clone();
+                        let cover_gen = generation;
+                        tokio::task::spawn_blocking(move || {
+                            let fetched = ureq::get(&cover_url).call().ok().and_then(|resp| {
+                                let mut bytes = Vec::new();
+                                resp.into_reader().read_to_end(&mut bytes).ok()?;
+                                image::load_from_memory(&bytes).ok()
+                            });
+                            if let Some(img) = fetched {
+                                let _ = tx.send((cover_gen, img));
+                            }
+                        });
+                    }
+                }
+
                 pending_fetch = Some((
                     generation,
                     TrackMeta {
@@ -988,8 +1236,49 @@ async fn main() -> std::io::Result<()> {
 
         if let Some((fetch_gen, meta, deadline)) = pending_fetch.clone() {
             if Instant::now() >= deadline {
-                let _ = fetch_tx.send((fetch_gen, meta));
                 pending_fetch = None;
+                // Spicy Lyrics was tried and conclusively closed out (not
+                // just deprioritized): their backend rejects any token not
+                // minted by an official Spotify client, and Spotify's own
+                // keymaster service refuses to mint a token under a
+                // different client id than the one a session actually
+                // authenticated under (confirmed live: a 403 "Invalid
+                // request" from `hm://keymaster/token/authenticated` itself,
+                // before Spicy Lyrics is ever even reached). There is no
+                // token this app can legitimately obtain that both those
+                // gates would accept. Real, closed dead end -- not a bug
+                // left half-fixed. Tried in order: Spotify's own first-party
+                // catalog (Phase 17, session.spclient().get_lyrics), then
+                // lrclib via the background thread below. `None` means "no
+                // usable synced result from this source," not "no lyrics at
+                // all" -- falls through to the next. A track_id that fails
+                // to parse (shouldn't happen for a real spotify:track: uri,
+                // but this is exactly the kind of external-shape assumption
+                // this codebase never trusts blindly) skips straight to the
+                // lrclib fallback.
+                let track_id = librespot_core::SpotifyUri::from_uri(&meta.track_id)
+                    .ok()
+                    .and_then(|uri| librespot_core::SpotifyId::try_from(&uri).ok());
+                match track_id {
+                    Some(track_id) => {
+                        let session = lyrics_session.clone();
+                        let fallback_tx = fetch_tx.clone();
+                        let result_tx = fetch_res_tx.clone();
+                        tokio::spawn(async move {
+                            match spotify_lyrics(&session, track_id).await {
+                                Some(cached) => {
+                                    let _ = result_tx.send((fetch_gen, cached));
+                                }
+                                None => {
+                                    let _ = fallback_tx.send((fetch_gen, meta));
+                                }
+                            }
+                        });
+                    }
+                    None => {
+                        let _ = fetch_tx.send((fetch_gen, meta));
+                    }
+                }
             }
         }
 
@@ -1082,6 +1371,19 @@ async fn main() -> std::io::Result<()> {
                     app.library.playlists = r.map_or_else(Fetch::Failed, Fetch::Ready);
                 }
                 LibraryFetchResult::PlaylistTracks { playlist_uri, result } => {
+                    // Populated regardless of whether this playlist is
+                    // the one currently open below -- the staleness
+                    // guard below protects the *view* from a stale
+                    // fetch, but the data itself is still correct for
+                    // the URI it was fetched under. Every full track-
+                    // list fetch, for any reason, is a free chance to
+                    // populate the add-to-playlist picker's membership
+                    // cache (see `AppState::playlist_membership`'s own
+                    // doc comment).
+                    if let Ok(tracks) = &result {
+                        app.playlist_membership
+                            .insert(playlist_uri.clone(), tracks.iter().map(|t| t.uri.clone()).collect());
+                    }
                     // Guard against a stale fetch for a playlist the user
                     // has since backed out of overwriting whichever one
                     // is actually showing now.
@@ -1118,8 +1420,11 @@ async fn main() -> std::io::Result<()> {
 
         while let Ok(result) = crud_rx.try_recv() {
             match result {
-                CrudResult::PlaylistCreated(Ok(_)) => {
+                CrudResult::PlaylistCreated(Ok(summary)) => {
                     app.status = Some(("playlist created".to_string(), false));
+                    // A just-created playlist provably contains nothing --
+                    // free and correct, no fetch needed to know it.
+                    app.playlist_membership.insert(summary.uri, std::collections::HashSet::new());
                     refetch_playlists(&mut app, &library_tx, &spotify_client);
                 }
                 CrudResult::PlaylistCreated(Err(e)) => {
@@ -1145,6 +1450,7 @@ async fn main() -> std::io::Result<()> {
                 }
                 CrudResult::PlaylistDeleted { playlist_uri, result: Ok(()) } => {
                     app.status = Some(("playlist deleted".to_string(), false));
+                    app.playlist_membership.remove(&playlist_uri);
                     // The detail screen for a playlist that no longer
                     // exists has nothing left to show -- back out to Your
                     // Playlists rather than leave stale tracks on screen.
@@ -1157,12 +1463,18 @@ async fn main() -> std::io::Result<()> {
                 CrudResult::PlaylistDeleted { result: Err(e), .. } => {
                     app.status = Some((format!("delete failed: {e}"), true));
                 }
-                CrudResult::TrackAdded { playlist_uri, result: Ok(()) } => {
+                CrudResult::TrackAdded { playlist_uri, track_uri, result: Ok(()) } => {
                     app.status = Some(("added to playlist".to_string(), false));
                     // Local, immediate -- see bump_track_count's own doc
                     // comment for why a refetch (tried first) isn't reliable
                     // here. Before consuming playlist_uri below.
                     bump_track_count(&mut app, &playlist_uri, 1);
+                    // Same optimistic-write-through reasoning, applied to
+                    // the picker's membership cache: without this, adding
+                    // a track and immediately reopening the picker on it
+                    // would show no checkmark for the playlist just added
+                    // to, until something else happened to refetch it.
+                    app.playlist_membership.entry(playlist_uri.clone()).or_default().insert(track_uri);
                     // Same staleness guard as TrackRemoved -- rare (the
                     // add-to-playlist target is usually a *different*
                     // playlist than whichever one's open), but if they
@@ -1179,7 +1491,7 @@ async fn main() -> std::io::Result<()> {
                     app.pending_confirm =
                         Some(PendingConfirm { message, action: ConfirmAction::AddTrackAnyway { playlist_uri, track_uri } });
                 }
-                CrudResult::TrackRemoved { playlist_uri, occurrences, result: Ok(()) } => {
+                CrudResult::TrackRemoved { playlist_uri, track_uri, occurrences, result: Ok(()) } => {
                     app.status = Some(("removed from playlist".to_string(), false));
                     // remove_track deletes every occurrence in one call
                     // (see api::playlists::remove_track's own doc comment
@@ -1188,6 +1500,9 @@ async fn main() -> std::io::Result<()> {
                     // the count drops by however many copies existed, not
                     // always 1.
                     bump_track_count(&mut app, &playlist_uri, -(occurrences as i64));
+                    if let Some(set) = app.playlist_membership.get_mut(&playlist_uri) {
+                        set.remove(&track_uri);
+                    }
                     if app.playlist_detail.as_ref().is_some_and(|pd| pd.playlist.uri == playlist_uri) {
                         refetch_playlist_tracks(&mut app, &library_tx, &spotify_client, playlist_uri);
                     }
@@ -1241,6 +1556,25 @@ async fn main() -> std::io::Result<()> {
             }
         }
 
+        while let Ok((cover_gen, dyn_image)) = cover_rx.try_recv() {
+            // Same staleness guard as lyrics: a cover for a track already
+            // skipped past gets dropped instead of painted over whatever
+            // is playing now.
+            if cover_gen == generation {
+                if let Some(uri) = &app.current_track_uri {
+                    // Only the *decoded* image is stored here -- building
+                    // the actual protocol-encoded `StatefulProtocol` per
+                    // render size happens lazily in `ui::render_art`,
+                    // which is what lets a stable set of sizes (compact,
+                    // fullscreen) be cached instead of re-encoded and
+                    // re-transmitted on every `f` toggle (see
+                    // `ImageState`'s own doc comment).
+                    images.cover_image = Some((uri.clone(), dyn_image));
+                    images.sized_covers.clear();
+                }
+            }
+        }
+
         let now = Instant::now();
         app.position = Duration::from_millis(tracker.progress_ms(now) as u64);
         app.playing = if tracker.current_track_id().is_some() {
@@ -1254,7 +1588,7 @@ async fn main() -> std::io::Result<()> {
             None
         };
 
-        terminal.draw(|f| ui::render(f, &app, &mut scroll))?;
+        terminal.draw(|f| ui::render(f, &app, &mut scroll, &mut images))?;
 
         if event::poll(TICK)? {
             if let Event::Key(key) = event::read()? {
@@ -1276,7 +1610,7 @@ async fn main() -> std::io::Result<()> {
                 } else if app.text_prompt.is_some() {
                     handle_text_prompt_key(&mut app, key.code, &crud_tx, &spotify_client);
                 } else if app.playlist_picker.is_some() {
-                    handle_picker_key(&mut app, key.code, &crud_tx, &spotify_client);
+                    handle_picker_key(&mut app, key.code, &crud_tx, &library_tx, &spotify_client);
                 // Tab is a distinct KeyCode, never a `Char(_)` -- safe to
                 // intercept before anything else without ever eating a
                 // literal keystroke a text field might want.
@@ -1496,6 +1830,7 @@ async fn main() -> std::io::Result<()> {
                                         Default::default(),
                                     ));
                                     let _ = spirc.play();
+                                    app.context_label = Some("Search".to_string());
                                     app.nav.goto(Screen::NowPlaying);
                                 }
                             }
@@ -1562,15 +1897,20 @@ async fn main() -> std::io::Result<()> {
                                 let _ = spirc.volume_down();
                             }
                             KeyCode::Left => {
-                                let target = (tracker.progress_ms(Instant::now()) as i64
-                                    - SEEK_STEP_MS)
-                                    .max(0);
-                                let _ = spirc.set_position_ms(target as u32);
+                                let target = seek_target_ms(
+                                    tracker.progress_ms(Instant::now()) as i64,
+                                    -SEEK_STEP_MS,
+                                    app.duration.as_millis() as i64,
+                                );
+                                let _ = spirc.set_position_ms(target);
                             }
                             KeyCode::Right => {
-                                let target =
-                                    tracker.progress_ms(Instant::now()) as i64 + SEEK_STEP_MS;
-                                let _ = spirc.set_position_ms(target as u32);
+                                let target = seek_target_ms(
+                                    tracker.progress_ms(Instant::now()) as i64,
+                                    SEEK_STEP_MS,
+                                    app.duration.as_millis() as i64,
+                                );
+                                let _ = spirc.set_position_ms(target);
                             }
                             _ => {}
                         },
@@ -1869,6 +2209,7 @@ async fn main() -> std::io::Result<()> {
                                                 Default::default(),
                                             ));
                                             let _ = spirc.play();
+                                            app.context_label = Some("Liked Songs".to_string());
                                             app.nav.goto(Screen::NowPlaying);
                                         }
                                     }
@@ -2666,6 +3007,7 @@ async fn main() -> std::io::Result<()> {
                                                     opts,
                                                 ));
                                                 let _ = spirc.play();
+                                                app.context_label = Some(pd.playlist.name.clone());
                                                 app.nav.goto(Screen::NowPlaying);
                                             }
                                         }
@@ -3013,6 +3355,7 @@ async fn main() -> std::io::Result<()> {
                                             let _ = spirc.activate();
                                             let _ = spirc.load(LoadRequest::from_context_uri(album.uri.clone(), opts));
                                             let _ = spirc.play();
+                                            app.context_label = Some(album.name.clone());
                                             app.nav.goto(Screen::NowPlaying);
                                         }
                                     }
@@ -3036,7 +3379,7 @@ async fn main() -> std::io::Result<()> {
                 app.track_album = None;
                 app.playing = None;
                 app.lyrics = LyricsState::SessionEnded;
-                terminal.draw(|f| ui::render(f, &app, &mut scroll))?;
+                terminal.draw(|f| ui::render(f, &app, &mut scroll, &mut images))?;
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
             }

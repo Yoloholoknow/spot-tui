@@ -8,6 +8,7 @@ chrono = "0.4.45"
 crossterm = "0.29.0"
 directories = "6.0.0"
 env_logger = "0.11.11"
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 librespot-connect = "0.8.0"
 librespot-core = "0.8.0"
 librespot-metadata = "0.8.0"
@@ -15,6 +16,7 @@ librespot-oauth = "0.8.0"
 librespot-playback = "0.8.0"
 log = "0.4.34"
 ratatui = "0.30.2"
+ratatui-image = { version = "11.0.8", default-features = false, features = ["crossterm"] }
 rspotify = "0.16.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

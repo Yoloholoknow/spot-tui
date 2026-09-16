@@ -140,8 +140,8 @@ fn write_token_cache(token: &Token) {
 pub async fn load_or_refresh_token() -> Result<Token, String> {
     let path = token_cache_path();
 
-    if let Ok(raw) = std::fs::read_to_string(&path) {
-        if let Ok(cached) = serde_json::from_str::<Token>(&raw) {
+    if let Ok(raw) = std::fs::read_to_string(&path)
+        && let Ok(cached) = serde_json::from_str::<Token>(&raw) {
             if !is_expired(&cached) {
                 return Ok(cached);
             }
@@ -156,7 +156,6 @@ pub async fn load_or_refresh_token() -> Result<Token, String> {
                 log::warn!("cached refresh_token no longer works, falling back to interactive login");
             }
         }
-    }
 
     let fresh = tokio::task::spawn_blocking(login_blocking)
         .await

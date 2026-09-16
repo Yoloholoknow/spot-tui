@@ -676,6 +676,15 @@ pub enum ConfirmAction {
     /// that doesn't mutate anything, just tells the main loop to actually
     /// exit once confirmed.
     Quit,
+    // Reported live: liking/following/saving fires immediately (matches
+    // `a` = add-to-playlist, which never confirms either), but the
+    // reverse -- unlike/unfollow/unsave, all reached from the screen
+    // that *is* the owning list -- confirms first, same standing rule
+    // "d"/"Shift+D" already established for anything that removes an
+    // item from a list you're looking straight at.
+    UnlikeTrack { track_uri: String },
+    UnfollowArtist { artist_uri: String },
+    UnsaveAlbum { album_uri: String },
 }
 
 /// Derived from the variant rather than stored as its own field on
@@ -692,7 +701,13 @@ impl ConfirmAction {
     fn severity(&self) -> ConfirmSeverity {
         match self {
             ConfirmAction::DeletePlaylist(_) | ConfirmAction::RemoveTrack { .. } => ConfirmSeverity::Danger,
-            ConfirmAction::AddTrackAnyway { .. } => ConfirmSeverity::Warn,
+            // Warn, not Danger -- unlike RemoveTrack/DeletePlaylist,
+            // undoing any of these is one more keypress away (like/
+            // follow/save again), not a real, harder-to-recover loss.
+            ConfirmAction::AddTrackAnyway { .. }
+            | ConfirmAction::UnlikeTrack { .. }
+            | ConfirmAction::UnfollowArtist { .. }
+            | ConfirmAction::UnsaveAlbum { .. } => ConfirmSeverity::Warn,
             ConfirmAction::Quit => ConfirmSeverity::Neutral,
         }
     }
@@ -1804,6 +1819,23 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             (
                 "m",
                 "reorder tracks (Playlist Detail only) -- requires no filter/sort active; pinned tracks are fine",
+            ),
+        ],
+    ),
+    (
+        "Like, Follow, Save",
+        &[
+            (
+                "Shift+L",
+                "like/unlike the selected (or currently playing) track -- Playlist Detail/Queue/Album Detail/Now Playing always like; Liked Songs always unlike, and confirms first (Ctrl+Up from Search, since every letter there has to reach the query box)",
+            ),
+            (
+                "Shift+F",
+                "follow/unfollow -- Artist Detail always follows; Followed Artists always unfollows and confirms first",
+            ),
+            (
+                "s",
+                "save/unsave the album -- Album Detail always saves; Saved Albums always unsaves and confirms first",
             ),
         ],
     ),

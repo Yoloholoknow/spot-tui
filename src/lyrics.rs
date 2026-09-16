@@ -44,7 +44,7 @@ pub fn parse_lrc(input: &str) -> Vec<LyricLine> {
         }
     }
 
-    lines.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    lines.sort_by_key(|a| a.timestamp);
     lines
 }
 
@@ -76,10 +76,10 @@ pub struct LrcLibEntry {
 /// Picks the best `/api/search` candidate: must have synced lyrics, then
 /// minimize distance from the known track duration (search results span
 /// covers, remixes, etc. with mismatched runtimes).
-pub fn best_search_candidate<'a>(
-    candidates: &'a [LrcLibEntry],
+pub fn best_search_candidate(
+    candidates: &[LrcLibEntry],
     target_duration_secs: f64,
-) -> Option<&'a LrcLibEntry> {
+) -> Option<&LrcLibEntry> {
     candidates
         .iter()
         .filter(|c| c.synced_lyrics.is_some())
@@ -208,11 +208,10 @@ impl LyricsClient {
             req = req.query("album_name", album);
         }
 
-        if let Ok(resp) = req.call() {
-            if let Ok(entry) = resp.into_json::<LrcLibEntry>() {
+        if let Ok(resp) = req.call()
+            && let Ok(entry) = resp.into_json::<LrcLibEntry>() {
                 return classify(&entry);
             }
-        }
 
         // Fall back to fuzzy search when the exact match misses.
         let search = self
@@ -223,13 +222,11 @@ impl LyricsClient {
             .set("User-Agent", "spot-tui/0.1 (personal use)")
             .call();
 
-        if let Ok(resp) = search {
-            if let Ok(candidates) = resp.into_json::<Vec<LrcLibEntry>>() {
-                if let Some(best) = best_search_candidate(&candidates, duration_secs) {
+        if let Ok(resp) = search
+            && let Ok(candidates) = resp.into_json::<Vec<LrcLibEntry>>()
+                && let Some(best) = best_search_candidate(&candidates, duration_secs) {
                     return classify(best);
                 }
-            }
-        }
 
         CachedLyrics::NotFound
     }

@@ -71,6 +71,12 @@ enum CrudResult {
     TrackRemoved { playlist_uri: String, track_uri: String, occurrences: usize, result: Result<(), String> },
     TrackReordered { playlist_uri: String, result: Result<(), String> },
     DeviceTransferred(Result<(), String>),
+    // Phase 13: like/follow/save. Each carries which *direction* it was
+    // (not inferred from the result) so the status message and the
+    // affected list's refetch trigger are unambiguous even on failure.
+    LikeToggled { track_uri: String, liked: bool, result: Result<(), String> },
+    FollowToggled { artist_uri: String, followed: bool, result: Result<(), String> },
+    SaveToggled { album_uri: String, saved: bool, result: Result<(), String> },
 }
 
 /// Owned result of resolving a Sidebar row into an action -- computed in
@@ -312,11 +318,10 @@ fn refetch_playlist_tracks(
     spotify_client: &Option<AuthCodeSpotify>,
     playlist_uri: String,
 ) {
-    if let Some(pd) = &mut app.playlist_detail {
-        if pd.playlist.uri == playlist_uri {
+    if let Some(pd) = &mut app.playlist_detail
+        && pd.playlist.uri == playlist_uri {
             pd.tracks = Fetch::Loading;
         }
-    }
     match spotify_client.clone() {
         Some(client) => {
             let tx = library_tx.clone();
@@ -327,11 +332,10 @@ fn refetch_playlist_tracks(
             });
         }
         None => {
-            if let Some(pd) = &mut app.playlist_detail {
-                if pd.playlist.uri == playlist_uri {
+            if let Some(pd) = &mut app.playlist_detail
+                && pd.playlist.uri == playlist_uri {
                     pd.tracks = Fetch::Failed("Spotify client not ready yet".into());
                 }
-            }
         }
     }
 }
@@ -361,6 +365,45 @@ fn refetch_playlists(
     }
 }
 
+fn refetch_liked_songs(app: &mut AppState, library_tx: &mpsc::Sender<LibraryFetchResult>, spotify_client: &Option<AuthCodeSpotify>) {
+    app.library.liked_songs = Fetch::Loading;
+    if let Some(client) = spotify_client.clone() {
+        let tx = library_tx.clone();
+        tokio::spawn(async move {
+            let result = api::library::liked_songs(&client).await.map_err(|e| e.to_string());
+            let _ = tx.send(LibraryFetchResult::LikedSongs(result));
+        });
+    } else {
+        app.library.liked_songs = Fetch::Failed("Spotify client not ready yet".into());
+    }
+}
+
+fn refetch_followed_artists(app: &mut AppState, library_tx: &mpsc::Sender<LibraryFetchResult>, spotify_client: &Option<AuthCodeSpotify>) {
+    app.library.followed_artists = Fetch::Loading;
+    if let Some(client) = spotify_client.clone() {
+        let tx = library_tx.clone();
+        tokio::spawn(async move {
+            let result = api::library::followed_artists(&client).await.map_err(|e| e.to_string());
+            let _ = tx.send(LibraryFetchResult::FollowedArtists(result));
+        });
+    } else {
+        app.library.followed_artists = Fetch::Failed("Spotify client not ready yet".into());
+    }
+}
+
+fn refetch_saved_albums(app: &mut AppState, library_tx: &mpsc::Sender<LibraryFetchResult>, spotify_client: &Option<AuthCodeSpotify>) {
+    app.library.saved_albums = Fetch::Loading;
+    if let Some(client) = spotify_client.clone() {
+        let tx = library_tx.clone();
+        tokio::spawn(async move {
+            let result = api::library::saved_albums(&client).await.map_err(|e| e.to_string());
+            let _ = tx.send(LibraryFetchResult::SavedAlbums(result));
+        });
+    } else {
+        app.library.saved_albums = Fetch::Failed("Spotify client not ready yet".into());
+    }
+}
+
 /// Locally adjusts a playlist's `track_count` by `delta`, both in the
 /// library-wide list (Your Playlists/Sidebar) and in Playlist Detail's
 /// own copy if it's the one currently open. Applied immediately after a
@@ -374,16 +417,14 @@ fn refetch_playlists(
 /// also sidesteps the refetch briefly flashing the whole list to
 /// "loading..." for what should be a single-number update.
 fn bump_track_count(app: &mut AppState, playlist_uri: &str, delta: i64) {
-    if let Fetch::Ready(items) = &mut app.library.playlists {
-        if let Some(p) = items.iter_mut().find(|p| p.uri == playlist_uri) {
+    if let Fetch::Ready(items) = &mut app.library.playlists
+        && let Some(p) = items.iter_mut().find(|p| p.uri == playlist_uri) {
             p.track_count = (p.track_count as i64 + delta).max(0) as u32;
         }
-    }
-    if let Some(pd) = &mut app.playlist_detail {
-        if pd.playlist.uri == playlist_uri {
+    if let Some(pd) = &mut app.playlist_detail
+        && pd.playlist.uri == playlist_uri {
             pd.playlist.track_count = (pd.playlist.track_count as i64 + delta).max(0) as u32;
         }
-    }
 }
 
 /// Shared by entering the Devices screen and by a successful transfer
@@ -558,6 +599,30 @@ fn fire_confirm_action(
                 let _ = tx.send(CrudResult::TrackAdded { playlist_uri: playlist_uri_for_result, track_uri, result });
             });
         }
+        ConfirmAction::UnlikeTrack { track_uri } => {
+            app.status = Some(("unliking\u{2026}".to_string(), false));
+            let tx = crud_tx.clone();
+            tokio::spawn(async move {
+                let result = api::library::unlike_track(&client, &track_uri).await;
+                let _ = tx.send(CrudResult::LikeToggled { track_uri, liked: false, result });
+            });
+        }
+        ConfirmAction::UnfollowArtist { artist_uri } => {
+            app.status = Some(("unfollowing\u{2026}".to_string(), false));
+            let tx = crud_tx.clone();
+            tokio::spawn(async move {
+                let result = api::library::unfollow_artist(&client, &artist_uri).await;
+                let _ = tx.send(CrudResult::FollowToggled { artist_uri, followed: false, result });
+            });
+        }
+        ConfirmAction::UnsaveAlbum { album_uri } => {
+            app.status = Some(("unsaving\u{2026}".to_string(), false));
+            let tx = crud_tx.clone();
+            tokio::spawn(async move {
+                let result = api::library::unsave_album(&client, &album_uri).await;
+                let _ = tx.send(CrudResult::SaveToggled { album_uri, saved: false, result });
+            });
+        }
     }
     false
 }
@@ -689,11 +754,10 @@ fn handle_picker_key(
         }
         KeyCode::Down => {
             let count = count(app);
-            if let Some(picker) = &mut app.playlist_picker {
-                if count > 0 {
+            if let Some(picker) = &mut app.playlist_picker
+                && count > 0 {
                     picker.selected = (picker.selected + 1).min(count - 1);
                 }
-            }
         }
         KeyCode::Left => {
             if let Some(picker) = &mut app.playlist_picker {
@@ -1010,8 +1074,8 @@ async fn main() -> std::io::Result<()> {
         // injecting a known-correct value) is still the only way to
         // build one with an explicit size, so this is an intentional,
         // justified use of a deprecated API, not an oversight.
-        if let Ok(win) = crossterm::terminal::window_size() {
-            if win.width > 0 && win.height > 0 && win.columns > 0 && win.rows > 0 {
+        if let Ok(win) = crossterm::terminal::window_size()
+            && win.width > 0 && win.height > 0 && win.columns > 0 && win.rows > 0 {
                 let (real_w, real_h) = (win.width / win.columns, win.height / win.rows);
                 if real_w > 0 && real_h > 0 {
                     let protocol = p.protocol_type();
@@ -1023,7 +1087,6 @@ async fn main() -> std::io::Result<()> {
                     *p = corrected;
                 }
             }
-        }
     } else {
         log::warn!("graphics protocol detection failed outright, falling back to text/placeholder art");
     }
@@ -1201,8 +1264,8 @@ async fn main() -> std::io::Result<()> {
                 // Real album art, only worth fetching at all if a real
                 // graphics protocol is actually in use -- `covers` is
                 // already sorted largest-first by librespot itself.
-                if images.picker.is_some() {
-                    if let Some(cover_url) = audio_item.covers.first().map(|c| c.url.clone()) {
+                if images.picker.is_some()
+                    && let Some(cover_url) = audio_item.covers.first().map(|c| c.url.clone()) {
                         let tx = cover_tx.clone();
                         let cover_gen = generation;
                         tokio::task::spawn_blocking(move || {
@@ -1216,7 +1279,6 @@ async fn main() -> std::io::Result<()> {
                             }
                         });
                     }
-                }
 
                 pending_fetch = Some((
                     generation,
@@ -1234,8 +1296,8 @@ async fn main() -> std::io::Result<()> {
             tracker.on_event(&event, now);
         }
 
-        if let Some((fetch_gen, meta, deadline)) = pending_fetch.clone() {
-            if Instant::now() >= deadline {
+        if let Some((fetch_gen, meta, deadline)) = pending_fetch.clone()
+            && Instant::now() >= deadline {
                 pending_fetch = None;
                 // Spicy Lyrics was tried and conclusively closed out (not
                 // just deprioritized): their backend rejects any token not
@@ -1280,10 +1342,9 @@ async fn main() -> std::io::Result<()> {
                     }
                 }
             }
-        }
 
-        if !client_checked {
-            if let Ok(result) = client_rx.try_recv() {
+        if !client_checked
+            && let Ok(result) = client_rx.try_recv() {
                 app.search.client_ready = result.is_some();
                 spotify_client = result;
                 client_checked = true;
@@ -1321,12 +1382,11 @@ async fn main() -> std::io::Result<()> {
                     });
                 }
             }
-        }
 
         if *app.nav.top() == Screen::Queue {
             let due = queue_last_fetched.is_none_or(|t| t.elapsed() >= QUEUE_POLL_INTERVAL);
-            if due {
-                if let Some(client) = spotify_client.clone() {
+            if due
+                && let Some(client) = spotify_client.clone() {
                     queue_last_fetched = Some(Instant::now());
                     let tx = library_tx.clone();
                     tokio::spawn(async move {
@@ -1334,7 +1394,6 @@ async fn main() -> std::io::Result<()> {
                         let _ = tx.send(LibraryFetchResult::Queue(result));
                     });
                 }
-            }
         } else {
             // Leaving the screen resets the timer so returning to it
             // later fetches immediately instead of waiting out whatever
@@ -1387,11 +1446,10 @@ async fn main() -> std::io::Result<()> {
                     // Guard against a stale fetch for a playlist the user
                     // has since backed out of overwriting whichever one
                     // is actually showing now.
-                    if let Some(pd) = &mut app.playlist_detail {
-                        if pd.playlist.uri == playlist_uri {
+                    if let Some(pd) = &mut app.playlist_detail
+                        && pd.playlist.uri == playlist_uri {
                             pd.tracks = result.map_or_else(Fetch::Failed, Fetch::Ready);
                         }
-                    }
                 }
                 LibraryFetchResult::Queue(result) => {
                     app.queue.fetch = result.map_or_else(Fetch::Failed, Fetch::Ready);
@@ -1402,18 +1460,16 @@ async fn main() -> std::io::Result<()> {
                 LibraryFetchResult::ArtistDetail { artist_uri, result } => {
                     // Same staleness guard as PlaylistTracks -- discards a
                     // fetch for an artist the user has since backed out of.
-                    if let Some(state) = &mut app.artist_detail {
-                        if state.artist_uri == artist_uri {
+                    if let Some(state) = &mut app.artist_detail
+                        && state.artist_uri == artist_uri {
                             state.detail = result.map_or_else(Fetch::Failed, Fetch::Ready);
                         }
-                    }
                 }
                 LibraryFetchResult::AlbumDetail { album_uri, result } => {
-                    if let Some(state) = &mut app.album_detail {
-                        if state.album_uri == album_uri {
+                    if let Some(state) = &mut app.album_detail
+                        && state.album_uri == album_uri {
                             state.detail = result.map_or_else(Fetch::Failed, Fetch::Ready);
                         }
-                    }
                 }
             }
         }
@@ -1438,11 +1494,10 @@ async fn main() -> std::io::Result<()> {
                     // refetch of the *list* never touches. Patch it
                     // directly so an already-open detail view doesn't keep
                     // showing the old name until backed out and reopened.
-                    if let Some(pd) = &mut app.playlist_detail {
-                        if pd.playlist.uri == playlist_uri {
+                    if let Some(pd) = &mut app.playlist_detail
+                        && pd.playlist.uri == playlist_uri {
                             pd.playlist.name = new_name;
                         }
-                    }
                     refetch_playlists(&mut app, &library_tx, &spotify_client);
                 }
                 CrudResult::PlaylistRenamed { result: Err(e), .. } => {
@@ -1544,6 +1599,37 @@ async fn main() -> std::io::Result<()> {
                 CrudResult::DeviceTransferred(Err(e)) => {
                     app.status = Some((format!("transfer failed: {e}"), true));
                 }
+                CrudResult::LikeToggled { result: Ok(()), liked, track_uri } => {
+                    log::info!("like_track[{track_uri}]: liked={liked}");
+                    app.status = Some((if liked { "liked".to_string() } else { "unliked".to_string() }, false));
+                    refetch_liked_songs(&mut app, &library_tx, &spotify_client);
+                }
+                CrudResult::LikeToggled { result: Err(e), liked, track_uri } => {
+                    let verb = if liked { "like" } else { "unlike" };
+                    log::warn!("like_track[{track_uri}]: {verb} failed: {e}");
+                    app.status = Some((format!("{verb} failed: {e}"), true));
+                }
+                CrudResult::FollowToggled { result: Ok(()), followed, artist_uri } => {
+                    log::info!("follow_artist[{artist_uri}]: followed={followed}");
+                    app.status =
+                        Some((if followed { "followed".to_string() } else { "unfollowed".to_string() }, false));
+                    refetch_followed_artists(&mut app, &library_tx, &spotify_client);
+                }
+                CrudResult::FollowToggled { result: Err(e), followed, artist_uri } => {
+                    let verb = if followed { "follow" } else { "unfollow" };
+                    log::warn!("follow_artist[{artist_uri}]: {verb} failed: {e}");
+                    app.status = Some((format!("{verb} failed: {e}"), true));
+                }
+                CrudResult::SaveToggled { result: Ok(()), saved, album_uri } => {
+                    log::info!("save_album[{album_uri}]: saved={saved}");
+                    app.status = Some((if saved { "saved".to_string() } else { "unsaved".to_string() }, false));
+                    refetch_saved_albums(&mut app, &library_tx, &spotify_client);
+                }
+                CrudResult::SaveToggled { result: Err(e), saved, album_uri } => {
+                    let verb = if saved { "save" } else { "unsave" };
+                    log::warn!("save_album[{album_uri}]: {verb} failed: {e}");
+                    app.status = Some((format!("{verb} failed: {e}"), true));
+                }
             }
         }
 
@@ -1560,8 +1646,8 @@ async fn main() -> std::io::Result<()> {
             // Same staleness guard as lyrics: a cover for a track already
             // skipped past gets dropped instead of painted over whatever
             // is playing now.
-            if cover_gen == generation {
-                if let Some(uri) = &app.current_track_uri {
+            if cover_gen == generation
+                && let Some(uri) = &app.current_track_uri {
                     // Only the *decoded* image is stored here -- building
                     // the actual protocol-encoded `StatefulProtocol` per
                     // render size happens lazily in `ui::render_art`,
@@ -1572,7 +1658,6 @@ async fn main() -> std::io::Result<()> {
                     images.cover_image = Some((uri.clone(), dyn_image));
                     images.sized_covers.clear();
                 }
-            }
         }
 
         let now = Instant::now();
@@ -1590,8 +1675,8 @@ async fn main() -> std::io::Result<()> {
 
         terminal.draw(|f| ui::render(f, &app, &mut scroll, &mut images))?;
 
-        if event::poll(TICK)? {
-            if let Event::Key(key) = event::read()? {
+        if event::poll(TICK)?
+            && let Event::Key(key) = event::read()? {
                 // A mutation's result message (success or failure) shows
                 // until the next keypress, same lifetime a status line
                 // conventionally gets.
@@ -1774,6 +1859,31 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Right => {
                                 app.search.cursor_right();
                             }
+                            // Ctrl+Up, not Ctrl+L -- Ctrl+L never reached the
+                            // app at all (reported live), most likely
+                            // because Ctrl+L (ASCII form-feed) is one of the
+                            // most commonly terminal/multiplexer-reserved
+                            // control codes historically ("clear/redraw"),
+                            // unlike Ctrl+Down/Ctrl+Right/Alt+Right, which
+                            // are already confirmed working here. Reusing
+                            // the same proven Ctrl+arrow category instead
+                            // of a fresh Ctrl+letter one, per this app's own
+                            // standing fallback plan for exactly this risk.
+                            // Always *like* (add) -- Search results aren't a
+                            // "you already have this" list the way Liked
+                            // Songs is, so there's no unlike direction to
+                            // reach from here.
+                            KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                if let Some(track) = app.search.results.get(app.search.selected).cloned()
+                                    && let Some(client) = spotify_client.clone() {
+                                        let track_uri = track.uri;
+                                        let tx = crud_tx.clone();
+                                        tokio::spawn(async move {
+                                            let result = api::library::like_track(&client, &track_uri).await;
+                                            let _ = tx.send(CrudResult::LikeToggled { track_uri, liked: true, result });
+                                        });
+                                    }
+                            }
                             KeyCode::Up => {
                                 app.search.selected = app.search.selected.saturating_sub(1);
                             }
@@ -1800,8 +1910,8 @@ async fn main() -> std::io::Result<()> {
                             // "commit and teleport" (reported live as feeling unnatural).
                             KeyCode::Enter => {
                                 if app.search.results.is_empty() {
-                                    if let Some(client) = spotify_client.clone() {
-                                        if !app.search.query.trim().is_empty() {
+                                    if let Some(client) = spotify_client.clone()
+                                        && !app.search.query.trim().is_empty() {
                                             let query = app.search.query.clone();
                                             let tx = search_tx.clone();
                                             app.search.searching = true;
@@ -1817,7 +1927,6 @@ async fn main() -> std::io::Result<()> {
                                                 let _ = tx.send(result);
                                             });
                                         }
-                                    }
                                 } else if let Some(track) =
                                     app.search.results.get(app.search.selected).cloned()
                                 {
@@ -1861,6 +1970,25 @@ async fn main() -> std::io::Result<()> {
                                 app.search.cursor = 0;
                                 app.search.results.clear();
                                 app.search.error = None;
+                            }
+                            // Shift+L, not plain `l` -- `l` is already the
+                            // universal "jump to Library" shortcut below, so
+                            // this guard has to come first (a terminal
+                            // reporting Shift+L as lowercase+modifier would
+                            // otherwise never reach it, same encoding-
+                            // robustness concern `is_shift_char` already
+                            // exists for elsewhere in this file).
+                            KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'L', 'l') => {
+                                if let Some(track_id) = tracker.current_track_id() {
+                                    let track_uri = track_id.to_string();
+                                    if let Some(client) = spotify_client.clone() {
+                                        let tx = crud_tx.clone();
+                                        tokio::spawn(async move {
+                                            let result = api::library::like_track(&client, &track_uri).await;
+                                            let _ = tx.send(CrudResult::LikeToggled { track_uri, liked: true, result });
+                                        });
+                                    }
+                                }
                             }
                             // `goto`, not `push` -- a universal "jump to Library" shortcut
                             // should always land on exactly [NowPlaying, Library], never pile
@@ -2104,6 +2232,34 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Char('f') => {
                                     toggle_or_enter_fullscreen(&mut app);
                                 }
+                                // Shift+L before plain `l` -- same encoding-
+                                // robustness reason as every other Shift+
+                                // guard in this file. Every track shown
+                                // here is already liked by definition, so
+                                // this is always the *unlike* direction --
+                                // Now Playing's own Shift+L (the only other
+                                // place this key is bound) is always *like*
+                                // instead, for the same reason.
+                                // Confirms first -- reported live as wanted,
+                                // same standing rule `d`/`Shift+D` already
+                                // established for anything that removes an
+                                // item from the very list you're looking at.
+                                KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'L', 'l') => {
+                                    if let Fetch::Ready(items) = &app.library.liked_songs {
+                                        let display = filtered_sorted(items, &app.library.liked_songs_filter, &label);
+                                        if let Some(track) =
+                                            display.get(app.library.liked_songs_selected).map(|&(_, t)| t.clone())
+                                        {
+                                            app.pending_confirm = Some(PendingConfirm {
+                                                message: format!(
+                                                    "Unlike \"{} \u{2014} {}\"? y/n",
+                                                    track.artist, track.title
+                                                ),
+                                                action: ConfirmAction::UnlikeTrack { track_uri: track.uri },
+                                            });
+                                        }
+                                    }
+                                }
                                 KeyCode::Char('l') => {
                                     app.nav.goto(Screen::Library);
                                 }
@@ -2269,6 +2425,28 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Char('l') => {
                                     app.nav.goto(Screen::Library);
                                 }
+                                // Every album shown here is already saved by
+                                // definition, so this is always the *unsave*
+                                // direction -- Album Detail's own `s` (the only
+                                // other place this key is bound) is always *save*.
+                                // Confirms first -- same standing rule as
+                                // Liked Songs' own Shift+L above.
+                                KeyCode::Char('s') => {
+                                    if let Fetch::Ready(items) = &app.library.saved_albums {
+                                        let display = filtered_sorted(items, &app.library.saved_albums_filter, &label);
+                                        if let Some(album) =
+                                            display.get(app.library.saved_albums_selected).map(|&(_, a)| a.clone())
+                                        {
+                                            app.pending_confirm = Some(PendingConfirm {
+                                                message: format!(
+                                                    "Unsave \"{} \u{2014} {}\"? y/n",
+                                                    album.name, album.artist
+                                                ),
+                                                action: ConfirmAction::UnsaveAlbum { album_uri: album.uri },
+                                            });
+                                        }
+                                    }
+                                }
                                 KeyCode::Char('c') => {
                                     app.text_prompt = Some(TextPrompt::new(
                                         "New playlist name",
@@ -2369,6 +2547,31 @@ async fn main() -> std::io::Result<()> {
                                 }
                                 KeyCode::Char('-') => {
                                     let _ = spirc.volume_down();
+                                }
+                                // Shift+F before plain `f` (fullscreen) --
+                                // same encoding-robustness reason as every
+                                // other Shift+ guard in this file. Every
+                                // artist shown here is already followed by
+                                // definition, so this is always *unfollow*
+                                // -- Artist Detail's own Shift+F (the only
+                                // other place this key is bound) is always
+                                // *follow*.
+                                // Confirms first -- same standing rule as
+                                // Liked Songs' own Shift+L above.
+                                KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'F', 'f') => {
+                                    if let Fetch::Ready(items) = &app.library.followed_artists {
+                                        let display =
+                                            filtered_sorted(items, &app.library.followed_artists_filter, &label);
+                                        if let Some(artist) = display
+                                            .get(app.library.followed_artists_selected)
+                                            .map(|&(_, a)| a.clone())
+                                        {
+                                            app.pending_confirm = Some(PendingConfirm {
+                                                message: format!("Unfollow \"{}\"? y/n", artist.name),
+                                                action: ConfirmAction::UnfollowArtist { artist_uri: artist.uri },
+                                            });
+                                        }
+                                    }
                                 }
                                 KeyCode::Char('f') => {
                                     toggle_or_enter_fullscreen(&mut app);
@@ -2642,22 +2845,20 @@ async fn main() -> std::io::Result<()> {
                                 // playlist content mid-reorder (remove/add/rename/pin)
                                 // would race the pending local move.
                                 KeyCode::Up if move_mode_active => {
-                                    if let Some(pd) = &mut app.playlist_detail {
-                                        if let Fetch::Ready(items) = &mut pd.tracks {
+                                    if let Some(pd) = &mut app.playlist_detail
+                                        && let Fetch::Ready(items) = &mut pd.tracks {
                                             pd.selected = ui::move_item_up(items, pd.selected);
                                         }
-                                    }
                                 }
                                 KeyCode::Down if move_mode_active => {
-                                    if let Some(pd) = &mut app.playlist_detail {
-                                        if let Fetch::Ready(items) = &mut pd.tracks {
+                                    if let Some(pd) = &mut app.playlist_detail
+                                        && let Fetch::Ready(items) = &mut pd.tracks {
                                             pd.selected = ui::move_item_down(items, pd.selected);
                                         }
-                                    }
                                 }
                                 KeyCode::Enter if move_mode_active => {
-                                    if let Some(pd) = &mut app.playlist_detail {
-                                        if let Some(start) = pd.move_mode.take() {
+                                    if let Some(pd) = &mut app.playlist_detail
+                                        && let Some(start) = pd.move_mode.take() {
                                             let end = pd.selected;
                                             if start != end {
                                                 if let Some(client) = spotify_client.clone() {
@@ -2684,17 +2885,14 @@ async fn main() -> std::io::Result<()> {
                                                 }
                                             }
                                         }
-                                    }
                                     resume_normal_display_index(&mut app);
                                 }
                                 KeyCode::Esc if move_mode_active => {
-                                    if let Some(pd) = &mut app.playlist_detail {
-                                        if let Some(start) = pd.move_mode.take() {
-                                            if let Fetch::Ready(items) = &mut pd.tracks {
+                                    if let Some(pd) = &mut app.playlist_detail
+                                        && let Some(start) = pd.move_mode.take()
+                                            && let Fetch::Ready(items) = &mut pd.tracks {
                                                 pd.selected = ui::move_item_to(items, pd.selected, start);
                                             }
-                                        }
-                                    }
                                     resume_normal_display_index(&mut app);
                                 }
                                 KeyCode::Char(_) if move_mode_active => {}
@@ -2738,12 +2936,11 @@ async fn main() -> std::io::Result<()> {
                                             } else {
                                                 None
                                             };
-                                            if let Some(real_index) = real_index {
-                                                if let Some(pd) = &mut app.playlist_detail {
+                                            if let Some(real_index) = real_index
+                                                && let Some(pd) = &mut app.playlist_detail {
                                                     pd.selected = real_index;
                                                     pd.move_mode = Some(real_index);
                                                 }
-                                            }
                                         }
                                         Some(reason) => {
                                             app.status = Some((reason.to_string(), true));
@@ -2774,6 +2971,33 @@ async fn main() -> std::io::Result<()> {
                                 }
                                 KeyCode::Char('f') => {
                                     toggle_or_enter_fullscreen(&mut app);
+                                }
+                                // Shift+L before plain `l` -- same encoding-
+                                // robustness reason as every other Shift+
+                                // guard in this file. Not every track in a
+                                // playlist is necessarily already liked, so
+                                // unlike Liked Songs' own Shift+L, this is
+                                // always the *like* direction.
+                                KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'L', 'l') => {
+                                    let track_uri = app.playlist_detail.as_ref().and_then(|pd| {
+                                        if let Fetch::Ready(items) = &pd.tracks {
+                                            let display = pinned_first(
+                                                filtered_sorted(items, &pd.filter, &label),
+                                                &app.pinned_tracks,
+                                                |t| t.uri.as_str(),
+                                            );
+                                            display.get(pd.selected).map(|&(_, t)| t.uri.clone())
+                                        } else {
+                                            None
+                                        }
+                                    });
+                                    if let (Some(track_uri), Some(client)) = (track_uri, spotify_client.clone()) {
+                                        let tx = crud_tx.clone();
+                                        tokio::spawn(async move {
+                                            let result = api::library::like_track(&client, &track_uri).await;
+                                            let _ = tx.send(CrudResult::LikeToggled { track_uri, liked: true, result });
+                                        });
+                                    }
                                 }
                                 KeyCode::Char('l') => {
                                     app.nav.goto(Screen::Library);
@@ -2825,8 +3049,8 @@ async fn main() -> std::io::Result<()> {
                                 // Always confirms first, no exceptions -- removing a track
                                 // is hard to reverse.
                                 KeyCode::Char('d') => {
-                                    if let Some(pd) = &app.playlist_detail {
-                                        if let Fetch::Ready(items) = &pd.tracks {
+                                    if let Some(pd) = &app.playlist_detail
+                                        && let Fetch::Ready(items) = &pd.tracks {
                                             let display = pinned_first(
                                                 filtered_sorted(items, &pd.filter, &label),
                                                 &app.pinned_tracks,
@@ -2867,7 +3091,6 @@ async fn main() -> std::io::Result<()> {
                                                 });
                                             }
                                         }
-                                    }
                                 }
                                 // Shift+D deletes the *open playlist itself* -- plain `d`
                                 // already means "remove the selected track" here, so
@@ -2883,8 +3106,8 @@ async fn main() -> std::io::Result<()> {
                                     }
                                 }
                                 KeyCode::Char('a') => {
-                                    if let Some(pd) = &app.playlist_detail {
-                                        if let Fetch::Ready(items) = &pd.tracks {
+                                    if let Some(pd) = &app.playlist_detail
+                                        && let Fetch::Ready(items) = &pd.tracks {
                                             let display = pinned_first(
                                                 filtered_sorted(items, &pd.filter, &label),
                                                 &app.pinned_tracks,
@@ -2895,7 +3118,6 @@ async fn main() -> std::io::Result<()> {
                                                     Some(PlaylistPicker { track_uri: track.uri.clone(), selected: 0, filter: ListFilter::default() });
                                             }
                                         }
-                                    }
                                 }
                                 // Shift+V (artist) before plain `v` (album) -- same
                                 // terminal-encoding reasoning as every other
@@ -2935,8 +3157,8 @@ async fn main() -> std::io::Result<()> {
                                     }
                                 }
                                 KeyCode::Char(c) if is_pin_key(KeyCode::Char(c), key.modifiers) => {
-                                    if let Some(pd) = &app.playlist_detail {
-                                        if let Fetch::Ready(items) = &pd.tracks {
+                                    if let Some(pd) = &app.playlist_detail
+                                        && let Fetch::Ready(items) = &pd.tracks {
                                             let display = pinned_first(
                                                 filtered_sorted(items, &pd.filter, &label),
                                                 &app.pinned_tracks,
@@ -2949,7 +3171,6 @@ async fn main() -> std::io::Result<()> {
                                                 pins::save("tracks", &app.pinned_tracks);
                                             }
                                         }
-                                    }
                                 }
                                 KeyCode::Up => {
                                     if let Some(pd) = &mut app.playlist_detail {
@@ -2957,8 +3178,8 @@ async fn main() -> std::io::Result<()> {
                                     }
                                 }
                                 KeyCode::Down => {
-                                    if let Some(pd) = &mut app.playlist_detail {
-                                        if let Fetch::Ready(items) = &pd.tracks {
+                                    if let Some(pd) = &mut app.playlist_detail
+                                        && let Fetch::Ready(items) = &pd.tracks {
                                             let display = pinned_first(
                                                 filtered_sorted(items, &pd.filter, &label),
                                                 &app.pinned_tracks,
@@ -2968,14 +3189,13 @@ async fn main() -> std::io::Result<()> {
                                                 pd.selected = (pd.selected + 1).min(display.len() - 1);
                                             }
                                         }
-                                    }
                                 }
                                 // Not Right -- Enter here can play a track and jump to Now Playing,
                                 // a real "leave here" side effect. Right means "go deeper," not
                                 // "commit and teleport" (reported live as feeling unnatural).
                                 KeyCode::Enter => {
-                                    if let Some(pd) = &app.playlist_detail {
-                                        if let Fetch::Ready(items) = &pd.tracks {
+                                    if let Some(pd) = &app.playlist_detail
+                                        && let Fetch::Ready(items) = &pd.tracks {
                                             let display = pinned_first(
                                                 filtered_sorted(items, &pd.filter, &label),
                                                 &app.pinned_tracks,
@@ -3011,7 +3231,6 @@ async fn main() -> std::io::Result<()> {
                                                 app.nav.goto(Screen::NowPlaying);
                                             }
                                         }
-                                    }
                                 }
                                 _ => {}
                             }
@@ -3077,6 +3296,24 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Char('f') => {
                                 toggle_or_enter_fullscreen(&mut app);
                             }
+                            // Shift+L before plain `l` -- same encoding-
+                            // robustness reason as every other Shift+
+                            // guard in this file. Always the *like*
+                            // direction -- the queue isn't a "you already
+                            // liked this" list the way Liked Songs is.
+                            KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'L', 'l') => {
+                                let track_uri = match &app.queue.fetch {
+                                    Fetch::Ready(summary) => summary.queue.get(app.queue.selected).map(|t| t.uri.clone()),
+                                    _ => None,
+                                };
+                                if let (Some(track_uri), Some(client)) = (track_uri, spotify_client.clone()) {
+                                    let tx = crud_tx.clone();
+                                    tokio::spawn(async move {
+                                        let result = api::library::like_track(&client, &track_uri).await;
+                                        let _ = tx.send(CrudResult::LikeToggled { track_uri, liked: true, result });
+                                    });
+                                }
+                            }
                             KeyCode::Char('l') => {
                                 app.nav.goto(Screen::Library);
                             }
@@ -3091,12 +3328,11 @@ async fn main() -> std::io::Result<()> {
                                 app.queue.selected = app.queue.selected.saturating_sub(1);
                             }
                             KeyCode::Down => {
-                                if let Fetch::Ready(summary) = &app.queue.fetch {
-                                    if !summary.queue.is_empty() {
+                                if let Fetch::Ready(summary) = &app.queue.fetch
+                                    && !summary.queue.is_empty() {
                                         app.queue.selected =
                                             (app.queue.selected + 1).min(summary.queue.len() - 1);
                                     }
-                                }
                             }
                             // No d/r/m here -- the public Web API has no
                             // remove or reorder endpoint for the queue at
@@ -3104,12 +3340,11 @@ async fn main() -> std::io::Result<()> {
                             // Adding to a playlist is the one real
                             // mutation available for a queued track.
                             KeyCode::Char('a') => {
-                                if let Fetch::Ready(summary) = &app.queue.fetch {
-                                    if let Some(track) = summary.queue.get(app.queue.selected) {
+                                if let Fetch::Ready(summary) = &app.queue.fetch
+                                    && let Some(track) = summary.queue.get(app.queue.selected) {
                                         app.playlist_picker =
                                             Some(PlaylistPicker { track_uri: track.uri.clone(), selected: 0, filter: ListFilter::default() });
                                     }
-                                }
                             }
                             KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'V', 'v') => {
                                 let artist_uri = match &app.queue.fetch {
@@ -3178,11 +3413,10 @@ async fn main() -> std::io::Result<()> {
                                 app.devices.selected = app.devices.selected.saturating_sub(1);
                             }
                             KeyCode::Down => {
-                                if let Fetch::Ready(items) = &app.devices.fetch {
-                                    if !items.is_empty() {
+                                if let Fetch::Ready(items) = &app.devices.fetch
+                                    && !items.is_empty() {
                                         app.devices.selected = (app.devices.selected + 1).min(items.len() - 1);
                                     }
-                                }
                             }
                             KeyCode::Enter => {
                                 let device_id = match &app.devices.fetch {
@@ -3227,6 +3461,24 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Char('-') => {
                                 let _ = spirc.volume_down();
                             }
+                            // Shift+F before plain `f` (fullscreen) -- same
+                            // encoding-robustness reason as every other
+                            // Shift+ guard in this file. Follows the
+                            // artist this screen is itself about; the
+                            // reverse (unfollow) lives on the Followed
+                            // Artists list screen instead.
+                            KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'F', 'f') => {
+                                if let Some(state) = &app.artist_detail {
+                                    let artist_uri = state.artist_uri.clone();
+                                    if let Some(client) = spotify_client.clone() {
+                                        let tx = crud_tx.clone();
+                                        tokio::spawn(async move {
+                                            let result = api::library::follow_artist(&client, &artist_uri).await;
+                                            let _ = tx.send(CrudResult::FollowToggled { artist_uri, followed: true, result });
+                                        });
+                                    }
+                                }
+                            }
                             KeyCode::Char('f') => {
                                 toggle_or_enter_fullscreen(&mut app);
                             }
@@ -3246,14 +3498,12 @@ async fn main() -> std::io::Result<()> {
                                 }
                             }
                             KeyCode::Down => {
-                                if let Some(state) = &app.artist_detail {
-                                    if let Fetch::Ready(artist) = &state.detail {
-                                        if !artist.albums.is_empty() {
+                                if let Some(state) = &app.artist_detail
+                                    && let Fetch::Ready(artist) = &state.detail
+                                        && !artist.albums.is_empty() {
                                             let next = (state.selected + 1).min(artist.albums.len() - 1);
                                             app.artist_detail.as_mut().unwrap().selected = next;
                                         }
-                                    }
-                                }
                             }
                             // Pure navigation, no playback -- opening an album doesn't
                             // play anything, matching the "Right = go deeper" rule.
@@ -3294,8 +3544,40 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Char('f') => {
                                 toggle_or_enter_fullscreen(&mut app);
                             }
+                            // Shift+L before plain `l` -- same encoding-
+                            // robustness reason as every other Shift+
+                            // guard in this file. Likes the selected
+                            // track, not the album -- `s` (below) is the
+                            // album-level save.
+                            KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'L', 'l') => {
+                                let track_uri = app.album_detail.as_ref().and_then(|state| match &state.detail {
+                                    Fetch::Ready(album) => album.tracks.get(state.selected).map(|t| t.uri.clone()),
+                                    _ => None,
+                                });
+                                if let (Some(track_uri), Some(client)) = (track_uri, spotify_client.clone()) {
+                                    let tx = crud_tx.clone();
+                                    tokio::spawn(async move {
+                                        let result = api::library::like_track(&client, &track_uri).await;
+                                        let _ = tx.send(CrudResult::LikeToggled { track_uri, liked: true, result });
+                                    });
+                                }
+                            }
                             KeyCode::Char('l') => {
                                 app.nav.goto(Screen::Library);
+                            }
+                            // Saves the album itself, viewed here -- the reverse
+                            // (unsave) lives on the Saved Albums list screen instead.
+                            KeyCode::Char('s') => {
+                                if let Some(state) = &app.album_detail {
+                                    let album_uri = state.album_uri.clone();
+                                    if let Some(client) = spotify_client.clone() {
+                                        let tx = crud_tx.clone();
+                                        tokio::spawn(async move {
+                                            let result = api::library::save_album(&client, &album_uri).await;
+                                            let _ = tx.send(CrudResult::SaveToggled { album_uri, saved: true, result });
+                                        });
+                                    }
+                                }
                             }
                             KeyCode::Char('c') => {
                                 app.text_prompt =
@@ -3333,21 +3615,19 @@ async fn main() -> std::io::Result<()> {
                                 }
                             }
                             KeyCode::Down => {
-                                if let Some(state) = &app.album_detail {
-                                    if let Fetch::Ready(album) = &state.detail {
-                                        if !album.tracks.is_empty() {
+                                if let Some(state) = &app.album_detail
+                                    && let Fetch::Ready(album) = &state.detail
+                                        && !album.tracks.is_empty() {
                                             let next = (state.selected + 1).min(album.tracks.len() - 1);
                                             app.album_detail.as_mut().unwrap().selected = next;
                                         }
-                                    }
-                                }
                             }
                             // Not Right -- this plays and jumps to Now Playing, a real
                             // "leave here" side effect, same rule as everywhere else.
                             KeyCode::Enter => {
-                                if let Some(state) = &app.album_detail {
-                                    if let Fetch::Ready(album) = &state.detail {
-                                        if state.selected < album.tracks.len() {
+                                if let Some(state) = &app.album_detail
+                                    && let Fetch::Ready(album) = &state.detail
+                                        && state.selected < album.tracks.len() {
                                             let opts = LoadRequestOptions {
                                                 playing_track: Some(PlayingTrack::Index(state.selected as u32)),
                                                 ..Default::default()
@@ -3358,15 +3638,12 @@ async fn main() -> std::io::Result<()> {
                                             app.context_label = Some(album.name.clone());
                                             app.nav.goto(Screen::NowPlaying);
                                         }
-                                    }
-                                }
                             }
                             _ => {}
                         },
                     }
                 }
             }
-        }
     };
 
         let _ = spirc.shutdown();

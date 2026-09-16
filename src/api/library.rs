@@ -12,7 +12,7 @@
 //! rather than a real limitation.
 
 use rspotify::clients::{BaseClient, OAuthClient};
-use rspotify::model::{Market, PlayableItem, PlaylistId};
+use rspotify::model::{AlbumId, ArtistId, LibraryId, Market, PlayableItem, PlaylistId, TrackId};
 use rspotify::prelude::Id;
 use rspotify::{AuthCodeSpotify, ClientResult};
 
@@ -188,4 +188,74 @@ pub async fn playlist_tracks(client: &AuthCodeSpotify, playlist_uri: &str) -> Re
         }
     }
     Ok(out)
+}
+
+// Phase 13: like/follow/save -- confirmed against rspotify 0.16.1's real
+// `LibraryId` enum (`rspotify-model/src/idtypes.rs`) before writing any of
+// these, per this project's own standing "check the real API surface
+// first" discipline: `Track`/`Artist`/`Album` variants exist exactly as
+// assumed, each wrapping that type's own `Id`. `library_add`/
+// `library_remove` are the same two calls `api::playlists::delete_playlist`
+// already uses for `LibraryId::Playlist` -- Spotify's Feb-2026 library
+// consolidation covers all of these through one endpoint family, not a
+// separate one per item kind.
+
+fn track_id_for_library(track_uri: &str) -> Result<TrackId<'_>, String> {
+    TrackId::from_id_or_uri(track_uri).map_err(|e| e.to_string())
+}
+
+fn artist_id(artist_uri: &str) -> Result<ArtistId<'_>, String> {
+    ArtistId::from_id_or_uri(artist_uri).map_err(|e| e.to_string())
+}
+
+fn album_id(album_uri: &str) -> Result<AlbumId<'_>, String> {
+    AlbumId::from_id_or_uri(album_uri).map_err(|e| e.to_string())
+}
+
+pub async fn like_track(client: &AuthCodeSpotify, track_uri: &str) -> Result<(), String> {
+    if let Err(e) = ensure_fresh(client).await {
+        log::warn!("token refresh before like_track failed, trying with existing token anyway: {e}");
+    }
+    let id = track_id_for_library(track_uri)?;
+    client.library_add([LibraryId::Track(id)]).await.map_err(|e| e.to_string())
+}
+
+pub async fn unlike_track(client: &AuthCodeSpotify, track_uri: &str) -> Result<(), String> {
+    if let Err(e) = ensure_fresh(client).await {
+        log::warn!("token refresh before unlike_track failed, trying with existing token anyway: {e}");
+    }
+    let id = track_id_for_library(track_uri)?;
+    client.library_remove([LibraryId::Track(id)]).await.map_err(|e| e.to_string())
+}
+
+pub async fn follow_artist(client: &AuthCodeSpotify, artist_uri: &str) -> Result<(), String> {
+    if let Err(e) = ensure_fresh(client).await {
+        log::warn!("token refresh before follow_artist failed, trying with existing token anyway: {e}");
+    }
+    let id = artist_id(artist_uri)?;
+    client.library_add([LibraryId::Artist(id)]).await.map_err(|e| e.to_string())
+}
+
+pub async fn unfollow_artist(client: &AuthCodeSpotify, artist_uri: &str) -> Result<(), String> {
+    if let Err(e) = ensure_fresh(client).await {
+        log::warn!("token refresh before unfollow_artist failed, trying with existing token anyway: {e}");
+    }
+    let id = artist_id(artist_uri)?;
+    client.library_remove([LibraryId::Artist(id)]).await.map_err(|e| e.to_string())
+}
+
+pub async fn save_album(client: &AuthCodeSpotify, album_uri: &str) -> Result<(), String> {
+    if let Err(e) = ensure_fresh(client).await {
+        log::warn!("token refresh before save_album failed, trying with existing token anyway: {e}");
+    }
+    let id = album_id(album_uri)?;
+    client.library_add([LibraryId::Album(id)]).await.map_err(|e| e.to_string())
+}
+
+pub async fn unsave_album(client: &AuthCodeSpotify, album_uri: &str) -> Result<(), String> {
+    if let Err(e) = ensure_fresh(client).await {
+        log::warn!("token refresh before unsave_album failed, trying with existing token anyway: {e}");
+    }
+    let id = album_id(album_uri)?;
+    client.library_remove([LibraryId::Album(id)]).await.map_err(|e| e.to_string())
 }

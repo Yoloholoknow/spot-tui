@@ -734,6 +734,108 @@ pub struct PlaylistPicker {
     pub filter: ListFilter,
 }
 
+/// Phase 12: the global quick-jump palette (`Ctrl+P`). Flattens playlists,
+/// liked tracks, followed artists, saved albums, devices, and every
+/// fixed nav destination into one searchable list. No stored/memoized
+/// entry list here, deliberately -- like `PlaylistPicker`, `selected`
+/// and `filter` are the only state; the actual entry pool is recomputed
+/// live from `AppState` on every keystroke (`quick_jump_entries`), so a
+/// background fetch completing while this is open is picked up for free
+/// on the very next render with no invalidation logic to get wrong.
+pub struct QuickJump {
+    pub filter: ListFilter,
+    pub selected: usize,
+}
+
+/// What a quick-jump entry activates. Carries the whole item (not just a
+/// URI) so activation never needs a second lookup back into `AppState`
+/// after the overlay that found it has already closed.
+#[derive(Clone)]
+pub enum QuickJumpKind {
+    Screen(Screen),
+    Playlist(crate::api::library::PlaylistSummary),
+    Track(TrackResult),
+    Artist { uri: String },
+    Album { uri: String },
+    Device(crate::api::devices::DeviceSummary),
+}
+
+#[derive(Clone)]
+pub struct QuickJumpEntry {
+    /// Category-prefixed display+search text (e.g. "[Playlist] Chill
+    /// vibes") -- the prefix keeps a mixed-kind list scannable and does
+    /// not interfere with substring matching against the real name.
+    pub label: String,
+    pub kind: QuickJumpKind,
+}
+
+/// Every fixed nav destination a "place to go" -- every fieldless
+/// `Screen` variant that isn't itself a drill-down target reached only
+/// via a specific track/artist/album/playlist.
+const QUICK_JUMP_SCREENS: &[(&str, Screen)] = &[
+    ("Now Playing", Screen::NowPlaying),
+    ("Search", Screen::Search),
+    ("Library", Screen::Library),
+    ("Liked Songs", Screen::LikedSongs),
+    ("Saved Albums", Screen::SavedAlbums),
+    ("Followed Artists", Screen::FollowedArtists),
+    ("Your Playlists", Screen::YourPlaylists),
+    ("Queue", Screen::Queue),
+    ("Devices", Screen::Devices),
+    ("Help", Screen::Help),
+];
+
+/// Builds the flattened, filterable pool quick jump searches. Deliberately
+/// category-ordered (screens, then playlists, artists, albums, devices,
+/// tracks last) rather than scored -- there's no numeric relevance score
+/// with plain substring matching, so build order *is* the display order.
+/// When `filter.query` is empty, returns only the 10 fixed screen
+/// entries and skips building the dynamic categories entirely -- cheap
+/// by construction the instant the overlay opens, not just capped at
+/// display time; the dynamic pool (which can be hundreds to thousands of
+/// items on a real account) is only ever built once the user has actually
+/// started typing.
+pub fn quick_jump_entries(app: &AppState, filter: &ListFilter) -> Vec<QuickJumpEntry> {
+    let mut entries: Vec<QuickJumpEntry> = QUICK_JUMP_SCREENS
+        .iter()
+        .map(|(label, screen)| QuickJumpEntry { label: format!("[Go] {label}"), kind: QuickJumpKind::Screen(*screen) })
+        .collect();
+    if filter.query.is_empty() {
+        return entries;
+    }
+    if let Fetch::Ready(items) = &app.library.playlists {
+        entries.extend(
+            items
+                .iter()
+                .map(|p| QuickJumpEntry { label: format!("[Playlist] {}", p.name), kind: QuickJumpKind::Playlist(p.clone()) }),
+        );
+    }
+    if let Fetch::Ready(items) = &app.library.followed_artists {
+        entries.extend(items.iter().map(|a| QuickJumpEntry {
+            label: format!("[Artist] {}", a.name),
+            kind: QuickJumpKind::Artist { uri: a.uri.clone() },
+        }));
+    }
+    if let Fetch::Ready(items) = &app.library.saved_albums {
+        entries.extend(items.iter().map(|a| QuickJumpEntry {
+            label: format!("[Album] {} \u{2014} {}", a.name, a.artist),
+            kind: QuickJumpKind::Album { uri: a.uri.clone() },
+        }));
+    }
+    if let Fetch::Ready(items) = &app.devices.fetch {
+        entries.extend(
+            items.iter().map(|d| QuickJumpEntry { label: format!("[Device] {}", d.name), kind: QuickJumpKind::Device(d.clone()) }),
+        );
+    }
+    if let Fetch::Ready(items) = &app.library.liked_songs {
+        entries.extend(items.iter().map(|t| QuickJumpEntry {
+            label: format!("[Track] {} \u{2014} {}", t.artist, t.title),
+            kind: QuickJumpKind::Track(t.clone()),
+        }));
+    }
+    entries
+}
+
 #[cfg(test)]
 mod text_prompt_tests {
     use super::*;
@@ -1292,6 +1394,9 @@ pub struct AppState {
     pub pending_confirm: Option<PendingConfirm>,
     pub text_prompt: Option<TextPrompt>,
     pub playlist_picker: Option<PlaylistPicker>,
+    /// Phase 12's global quick-jump palette (`Ctrl+P`) -- a fourth
+    /// sibling overlay at the same tier as the three above.
+    pub quick_jump: Option<QuickJump>,
     /// Transient (message, is_error) shown in the status line, cleared on
     /// the next keypress. Every Phase 5 mutation's result -- success or
     /// failure -- surfaces here; there was no general status/toast field
@@ -1326,6 +1431,7 @@ pub struct ScrollState {
     pub playlists: ListState,
     pub playlist_detail: ListState,
     pub playlist_picker: ListState,
+    pub quick_jump: ListState,
     pub queue: ListState,
     pub devices: ListState,
     pub artist_detail: ListState,
@@ -1415,7 +1521,7 @@ pub fn render_startup(frame: &mut Frame, tick: usize) {
 pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState, images: &mut ImageState) {
     if app.fullscreen && *app.nav.top() == Screen::NowPlaying {
         render_fullscreen(frame, app, images);
-        render_overlays(frame, app, &mut scroll.playlist_picker);
+        render_overlays(frame, app, &mut scroll.playlist_picker, &mut scroll.quick_jump);
         return;
     }
 
@@ -1484,20 +1590,27 @@ pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState, image
     }
     render_playbar(frame, app, playbar_area);
     render_status(frame, app, status_area);
-    render_overlays(frame, app, &mut scroll.playlist_picker);
+    render_overlays(frame, app, &mut scroll.playlist_picker, &mut scroll.quick_jump);
 }
 
-/// Draws whichever Phase 5 overlay is active (at most one in practice --
-/// see the field order comment on `AppState`) centered on top of
-/// whatever's already been drawn this frame, fullscreen included. Called
-/// last specifically so it paints over everything else.
-fn render_overlays(frame: &mut Frame, app: &AppState, picker_list_state: &mut ListState) {
+/// Draws whichever overlay is active (at most one in practice -- see the
+/// field order comment on `AppState`) centered on top of whatever's
+/// already been drawn this frame, fullscreen included. Called last
+/// specifically so it paints over everything else.
+fn render_overlays(
+    frame: &mut Frame,
+    app: &AppState,
+    picker_list_state: &mut ListState,
+    quick_jump_list_state: &mut ListState,
+) {
     if let Some(confirm) = &app.pending_confirm {
         render_confirm_overlay(frame, confirm);
     } else if let Some(prompt) = &app.text_prompt {
         render_text_prompt_overlay(frame, prompt);
     } else if let Some(picker) = &app.playlist_picker {
         render_playlist_picker_overlay(frame, app, picker, picker_list_state);
+    } else if let Some(qj) = &app.quick_jump {
+        render_quick_jump_overlay(frame, app, qj, quick_jump_list_state);
     }
 }
 
@@ -1731,6 +1844,30 @@ fn render_playlist_picker_overlay(
     }
 }
 
+/// Phase 12's quick-jump palette. Modeled directly on
+/// `render_playlist_picker_overlay` above -- same `centered_rect` +
+/// `Clear` + trailing-cursor filter header + `render_display_list` shape
+/// -- but over the flattened, heterogeneous pool `quick_jump_entries`
+/// builds fresh from live `AppState` every render, so a background fetch
+/// (eager-triggered on open) landing while this is open shows up on the
+/// very next frame with no extra plumbing.
+fn render_quick_jump_overlay(frame: &mut Frame, app: &AppState, qj: &QuickJump, list_state: &mut ListState) {
+    let area = centered_rect(frame.area(), 50, 16);
+    frame.render_widget(Clear, area);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(ACCENT)).title("Quick jump");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks =
+        Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(1)]).split(inner);
+    frame.render_widget(Paragraph::new(format!("/{}\u{2588}", qj.filter.query)), chunks[0]);
+
+    let entries = quick_jump_entries(app, &qj.filter);
+    let label = |e: &QuickJumpEntry| e.label.clone();
+    let display = filtered_sorted(&entries, &qj.filter, &label);
+    render_display_list(frame, chunks[1], &display, qj.selected, &label, qj.filter.query.is_empty(), list_state);
+}
+
 /// Keep this in sync as new keys get wired -- Phase 4's whole point was
 /// moving Help to right after this session's current point in the build
 /// rather than writing it once at the end from a settled keybind table,
@@ -1760,6 +1897,10 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             (
                 "f",
                 "fullscreen Now Playing/lyrics -- jumps there from anywhere; toggles off if already there",
+            ),
+            (
+                "Ctrl+P",
+                "quick jump -- search any playlist/liked track/artist/album/device/screen by name and jump straight to it (works even mid-query on Search; press again to close)",
             ),
         ],
     ),

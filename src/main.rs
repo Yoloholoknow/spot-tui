@@ -29,9 +29,9 @@ use rspotify::AuthCodeSpotify;
 use api::library::{FollowedArtist, PlaylistSummary, SavedAlbumSummary};
 use api::search::TrackResult;
 use ui::{
-    filtered_sorted, pinned_first, AlbumDetailState, AppState, ArtistDetailState, ConfirmAction, Fetch, Focus,
-    LibraryState, ListFilter, LyricsState, Nav, PendingConfirm, PlaylistDetailState, PlaylistPicker, Screen,
-    SearchState, TextPrompt, TextPromptAction, LIBRARY_ENTRIES,
+    filtered_sorted, pinned_first, quick_jump_entries, AlbumDetailState, AppState, ArtistDetailState, ConfirmAction,
+    Fetch, Focus, LibraryState, ListFilter, LyricsState, Nav, PendingConfirm, PlaylistDetailState, PlaylistPicker,
+    QuickJump, QuickJumpEntry, QuickJumpKind, Screen, SearchState, TextPrompt, TextPromptAction, LIBRARY_ENTRIES,
 };
 
 enum LibraryFetchResult {
@@ -856,6 +856,180 @@ fn handle_picker_key(
     }
 }
 
+/// `true` for the global quick-jump trigger (`Ctrl+P`) -- checked both to
+/// open the overlay and, while it's already open, to close it again
+/// (toggle), rather than letting a repeat press fall through to the
+/// filter's own `Char` arm and insert a stray `p`.
+fn is_quick_jump_trigger(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    code == KeyCode::Char('p') && modifiers.contains(KeyModifiers::CONTROL)
+}
+
+/// Length of the currently filtered quick-jump list -- computed via an
+/// immutable borrow of `app` before any `&mut app.quick_jump` borrow is
+/// taken, same ordering `handle_picker_key`'s own `count` closure uses to
+/// dodge the exact same borrow conflict.
+fn quick_jump_count(app: &AppState) -> usize {
+    let Some(qj) = &app.quick_jump else { return 0 };
+    let entries = quick_jump_entries(app, &qj.filter);
+    let label = |e: &QuickJumpEntry| e.label.clone();
+    filtered_sorted(&entries, &qj.filter, &label).len()
+}
+
+/// Fires whatever the picked quick-jump entry means -- exactly what that
+/// entity's own home screen's `Enter` already does, no new activation
+/// semantics invented. `Playlist`/`Artist`/`Album` collapse the nav stack
+/// to `[NowPlaying]` first (`goto`) so the destination lands at a clean
+/// `[NowPlaying, X]`, matching "teleport" semantics rather than stacking
+/// on top of whatever drill-down depth the overlay happened to be opened
+/// from -- unlike `Screen::Help`, which drills in and returns to wherever
+/// it was opened from, matching its existing global `?` convention.
+fn activate_quick_jump(
+    app: &mut AppState,
+    kind: QuickJumpKind,
+    spirc: &Spirc,
+    crud_tx: &mpsc::Sender<CrudResult>,
+    library_tx: &mpsc::Sender<LibraryFetchResult>,
+    spotify_client: &Option<AuthCodeSpotify>,
+) {
+    match kind {
+        QuickJumpKind::Screen(Screen::Help) => {
+            app.nav.push(Screen::Help);
+            app.nav.focus = Focus::Main;
+        }
+        QuickJumpKind::Screen(screen) => {
+            app.nav.goto(screen);
+            app.nav.focus = Focus::Main;
+            if screen == Screen::Search {
+                app.search.query.clear();
+                app.search.cursor = 0;
+                app.search.results.clear();
+                app.search.error = None;
+            }
+            if screen == Screen::Devices && matches!(app.devices.fetch, Fetch::NotStarted) {
+                refetch_devices(app, library_tx, spotify_client);
+            }
+        }
+        QuickJumpKind::Playlist(playlist) => {
+            app.nav.goto(Screen::NowPlaying);
+            open_playlist_detail(app, library_tx, spotify_client, playlist);
+            app.nav.focus = Focus::Main;
+        }
+        QuickJumpKind::Artist { uri } => {
+            app.nav.goto(Screen::NowPlaying);
+            open_artist_detail(app, library_tx, spotify_client, uri);
+            app.nav.focus = Focus::Main;
+        }
+        QuickJumpKind::Album { uri } => {
+            app.nav.goto(Screen::NowPlaying);
+            open_album_detail(app, library_tx, spotify_client, uri);
+            app.nav.focus = Focus::Main;
+        }
+        // Single-track context, matching Liked Songs' own Enter handler
+        // exactly -- `context_label` names its real origin rather than
+        // something generic like "Quick Jump", since that's what the
+        // user would see had they navigated to Liked Songs and pressed
+        // Enter there instead.
+        QuickJumpKind::Track(track) => {
+            let _ = spirc.activate();
+            let _ = spirc.load(LoadRequest::from_context_uri(track.uri, Default::default()));
+            let _ = spirc.play();
+            app.context_label = Some("Liked Songs".to_string());
+            app.nav.goto(Screen::NowPlaying);
+        }
+        // Matches the Devices screen's own Enter handler exactly --
+        // stays wherever the user was, doesn't navigate away.
+        QuickJumpKind::Device(device) => {
+            if let Some(client) = spotify_client.clone() {
+                app.status = Some(("transferring playback\u{2026}".to_string(), false));
+                let tx = crud_tx.clone();
+                let device_id = device.id;
+                tokio::spawn(async move {
+                    let result = api::devices::transfer_to(&client, &device_id).await;
+                    let _ = tx.send(CrudResult::DeviceTransferred(result));
+                });
+            } else {
+                app.status = Some(("Spotify client not ready yet".to_string(), true));
+            }
+        }
+    }
+}
+
+/// `Up`/`Down` move the selection; `Char`/`Backspace` edit the filter
+/// (resetting `selected` to 0, same as the picker); `Left`/`Right` move
+/// the filter's text cursor; `Enter` activates; `Esc` or the trigger key
+/// again (`Ctrl+P`) closes. Mirrors `handle_picker_key`'s shape exactly,
+/// widened to take `modifiers` (not just `code`) -- the one thing none of
+/// the three Phase 5 overlay handlers needed before this, since none of
+/// them has a "press the same key again to close" convention.
+fn handle_quick_jump_key(
+    app: &mut AppState,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    spirc: &Spirc,
+    crud_tx: &mpsc::Sender<CrudResult>,
+    library_tx: &mpsc::Sender<LibraryFetchResult>,
+    spotify_client: &Option<AuthCodeSpotify>,
+) {
+    if is_quick_jump_trigger(code, modifiers) {
+        app.quick_jump = None;
+        return;
+    }
+    match code {
+        KeyCode::Esc => {
+            app.quick_jump = None;
+        }
+        KeyCode::Up => {
+            if let Some(qj) = &mut app.quick_jump {
+                qj.selected = qj.selected.saturating_sub(1);
+            }
+        }
+        KeyCode::Down => {
+            let count = quick_jump_count(app);
+            if let Some(qj) = &mut app.quick_jump
+                && count > 0 {
+                    qj.selected = (qj.selected + 1).min(count - 1);
+                }
+        }
+        KeyCode::Left => {
+            if let Some(qj) = &mut app.quick_jump {
+                qj.filter.cursor_left();
+            }
+        }
+        KeyCode::Right => {
+            if let Some(qj) = &mut app.quick_jump {
+                qj.filter.cursor_right();
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(qj) = &mut app.quick_jump {
+                qj.filter.backspace_at_cursor();
+                qj.selected = 0;
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(qj) = &mut app.quick_jump {
+                qj.filter.insert_at_cursor(c);
+                qj.selected = 0;
+            }
+        }
+        KeyCode::Enter => {
+            let picked_kind = match &app.quick_jump {
+                Some(qj) => {
+                    let entries = quick_jump_entries(app, &qj.filter);
+                    let label = |e: &QuickJumpEntry| e.label.clone();
+                    filtered_sorted(&entries, &qj.filter, &label).get(qj.selected).map(|&(_, e)| e.kind.clone())
+                }
+                None => None,
+            };
+            app.quick_jump = None;
+            if let Some(kind) = picked_kind {
+                activate_quick_jump(app, kind, spirc, crud_tx, library_tx, spotify_client);
+            }
+        }
+        _ => {}
+    }
+}
+
 enum LoopExit {
     Quit,
     Disconnected,
@@ -1128,6 +1302,7 @@ async fn main() -> std::io::Result<()> {
         pending_confirm: None,
         text_prompt: None,
         playlist_picker: None,
+        quick_jump: None,
         status: None,
     };
 
@@ -1696,11 +1871,45 @@ async fn main() -> std::io::Result<()> {
                     handle_text_prompt_key(&mut app, key.code, &crud_tx, &spotify_client);
                 } else if app.playlist_picker.is_some() {
                     handle_picker_key(&mut app, key.code, &crud_tx, &library_tx, &spotify_client);
+                // Phase 12's quick-jump palette -- same tier as the three
+                // overlays above (it's a fourth sibling, not a `Screen`),
+                // so it also owns the keypress outright while open,
+                // including its own toggle-close on a repeat `Ctrl+P`.
+                } else if app.quick_jump.is_some() {
+                    handle_quick_jump_key(
+                        &mut app,
+                        key.code,
+                        key.modifiers,
+                        &spirc,
+                        &crud_tx,
+                        &library_tx,
+                        &spotify_client,
+                    );
                 // Tab is a distinct KeyCode, never a `Char(_)` -- safe to
                 // intercept before anything else without ever eating a
                 // literal keystroke a text field might want.
                 } else if key.code == KeyCode::Tab {
                     app.nav.toggle_focus();
+                // Quick jump's own open trigger -- checked before `q` and
+                // Sidebar/Main so it works globally, including mid-query
+                // on Search (Ctrl+P is a distinct KeyEvent from a plain
+                // 'p', so it never reaches Search's own char-insertion
+                // arm). Eagerly kicks off a fetch for any of the three
+                // lazy-loaded categories that haven't been visited yet
+                // this session, mirroring the Devices sidebar entry's own
+                // `if NotStarted { refetch }` precedent, so they show up
+                // in results without needing to visit those screens first.
+                } else if is_quick_jump_trigger(key.code, key.modifiers) {
+                    if matches!(app.library.saved_albums, Fetch::NotStarted) {
+                        refetch_saved_albums(&mut app, &library_tx, &spotify_client);
+                    }
+                    if matches!(app.library.followed_artists, Fetch::NotStarted) {
+                        refetch_followed_artists(&mut app, &library_tx, &spotify_client);
+                    }
+                    if matches!(app.devices.fetch, Fetch::NotStarted) {
+                        refetch_devices(&mut app, &library_tx, &spotify_client);
+                    }
+                    app.quick_jump = Some(QuickJump { filter: ListFilter::default(), selected: 0 });
                 // `q` asks first, same as every other destructive action,
                 // when enabled (default on; `confirm_quit = false` in
                 // config.toml restores the old immediate-quit behavior).

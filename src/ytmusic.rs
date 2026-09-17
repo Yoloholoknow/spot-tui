@@ -326,7 +326,19 @@ fn timed_lyrics_blocking(browse_id: &str) -> Result<Option<Vec<(f64, String)>>, 
         "browseId": browse_id,
     });
     let response = yt_post(&agent, "browse", body)?;
-    Ok(find_timed_lines(&response))
+    let lines = find_timed_lines(&response);
+    // Real gap found live: this exact miss fires with zero visibility into
+    // *why* -- a wrong field-name guess and "this browseId genuinely has
+    // no timed lyrics" both look identical from the caller's side. Log the
+    // response's real top-level shape (truncated -- these bodies can be
+    // large) so the next miss is fixable from the log instead of another
+    // guess at field names that may already be correct.
+    if lines.is_none() {
+        let dump = serde_json::to_string(&response).unwrap_or_default();
+        let truncated = if dump.len() > 2000 { &dump[..2000] } else { &dump[..] };
+        log::info!("timed_lyrics_blocking[{browse_id}]: no timedLyricsData found; response (truncated)={truncated}");
+    }
+    Ok(lines)
 }
 
 /// YouTube Music as a lyrics source -- tried after Spotify-direct fails,

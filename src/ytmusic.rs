@@ -86,25 +86,33 @@ struct YtSongCandidate {
     duration_secs: f64,
 }
 
-/// Picks the closest-duration candidate within `tolerance_secs` of
-/// `target_duration_secs` -- same shape of check `best_search_candidate`
-/// already does for lrclib, not a new invention. Only `video_id` and
+/// Picks the *first* candidate (in YouTube's own search-ranked order)
+/// whose duration is within `tolerance_secs` of `target_duration_secs` --
+/// not the globally closest-by-duration candidate across the whole
+/// result set. Real bug found live (a track's lyrics came back for a
+/// completely different song, "neon skies"): picking by duration
+/// proximity alone treats every candidate as equally likely to be the
+/// right song and discards YouTube's own relevance ranking (title/artist/
+/// channel match against the text query) entirely -- a same-titled or
+/// even unrelated video whose runtime happens to land a hair closer to
+/// the target can outrank the actual correct, top-ranked hit. Duration
+/// stays as a real filter (rejects a cover/remix/wrong version even if it
+/// search-ranks first), just no longer the primary sort key -- the first
+/// tolerance-passing result in ranked order wins. Only `video_id` and
 /// duration are extracted from search results at all: title/artist text
 /// would need YouTube's own heuristic "flex column run" classification
 /// (real, genuine complexity flagged in this phase's design), but
 /// matching by duration alone against a query already built from the
 /// real artist+title doesn't need it.
+/// Returns the winning candidate's rank alongside it -- purely for
+/// diagnostics (logging exactly which position in YouTube's own ranked
+/// results actually won), not used to change the decision itself.
 fn best_song_candidate(
     candidates: &[YtSongCandidate],
     target_duration_secs: f64,
     tolerance_secs: f64,
-) -> Option<&YtSongCandidate> {
-    candidates
-        .iter()
-        .map(|c| (c, (c.duration_secs - target_duration_secs).abs()))
-        .filter(|(_, diff)| *diff <= tolerance_secs)
-        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-        .map(|(c, _)| c)
+) -> Option<(usize, &YtSongCandidate)> {
+    candidates.iter().enumerate().find(|(_, c)| (c.duration_secs - target_duration_secs).abs() <= tolerance_secs)
 }
 
 const SEARCH_SECTIONS: &[NavStep] = &[
@@ -332,7 +340,9 @@ fn timed_lyrics_blocking(browse_id: &str) -> Result<Option<Vec<(f64, String)>>, 
 /// evidence to fix against rather than another guess.
 pub async fn ytmusic_lyrics(artist: &str, title: &str, duration_secs: f64) -> Option<CachedLyrics> {
     let query = format!("{artist} {title}");
-    let candidates = match tokio::task::spawn_blocking(move || search_song_blocking(&query)).await {
+    log::info!("ytmusic_lyrics: searching {query:?} (target duration {duration_secs:.1}s)");
+    let query_for_call = query.clone();
+    let candidates = match tokio::task::spawn_blocking(move || search_song_blocking(&query_for_call)).await {
         Ok(Ok(c)) => c,
         Ok(Err(e)) => {
             log::info!("ytmusic_lyrics: search failed: {e}");
@@ -343,13 +353,23 @@ pub async fn ytmusic_lyrics(artist: &str, title: &str, duration_secs: f64) -> Op
             return None;
         }
     };
-    let candidate_count = candidates.len();
-    let Some(best) = best_song_candidate(&candidates, duration_secs, DURATION_TOLERANCE_SECS) else {
+    // Full candidate dump, in the real rank order YouTube returned them --
+    // this is exactly the evidence a "wrong song matched" report needs:
+    // whether the right video was even in the result set at all, and if
+    // so, at what rank (a real bug found live picked a same-titled wrong
+    // song purely on duration proximity; this log line is what would have
+    // shown that immediately instead of needing a second live round).
+    for (i, c) in candidates.iter().enumerate() {
+        log::info!("ytmusic_lyrics: candidate[{i}] video_id={} duration={:.1}s", c.video_id, c.duration_secs);
+    }
+    let Some((best_rank, best)) = best_song_candidate(&candidates, duration_secs, DURATION_TOLERANCE_SECS) else {
         log::info!(
-            "ytmusic_lyrics: no candidate within {DURATION_TOLERANCE_SECS}s of target duration ({candidate_count} candidates)"
+            "ytmusic_lyrics: no candidate within {DURATION_TOLERANCE_SECS}s of target duration ({} candidates)",
+            candidates.len()
         );
         return None;
     };
+    log::info!("ytmusic_lyrics: picked candidate[{best_rank}] video_id={}", best.video_id);
     let video_id = best.video_id.clone();
 
     let browse_id = {
@@ -442,10 +462,23 @@ mod best_song_candidate_tests {
     }
 
     #[test]
-    fn picks_the_closest_duration_within_tolerance() {
-        let candidates = vec![candidate("a", 200.0), candidate("b", 225.0), candidate("c", 300.0)];
-        let best = best_song_candidate(&candidates, 224.0, 5.0);
-        assert_eq!(best.map(|c| c.video_id.as_str()), Some("b"));
+    fn picks_the_first_in_rank_order_within_tolerance_not_the_globally_closest() {
+        // "b" is a worse duration match than "c" (diff 2 vs diff 1), but
+        // "b" is YouTube's higher-ranked result and both are within
+        // tolerance -- rank order must win, not duration proximity. This
+        // is the exact bug found live: picking the globally closest
+        // duration handed a same-titled wrong song priority over the
+        // real, correctly-ranked top hit.
+        let candidates = vec![candidate("a", 100.0), candidate("b", 223.0), candidate("c", 224.0)];
+        let best = best_song_candidate(&candidates, 225.0, 5.0);
+        assert_eq!(best.map(|(rank, c)| (rank, c.video_id.as_str())), Some((1, "b")));
+    }
+
+    #[test]
+    fn skips_an_earlier_out_of_tolerance_candidate_for_a_later_in_tolerance_one() {
+        let candidates = vec![candidate("a", 100.0), candidate("b", 226.0)];
+        let best = best_song_candidate(&candidates, 225.0, 5.0);
+        assert_eq!(best.map(|(rank, c)| (rank, c.video_id.as_str())), Some((1, "b")));
     }
 
     #[test]

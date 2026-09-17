@@ -5,6 +5,7 @@ mod position;
 mod api;
 mod spike;
 mod ui;
+mod ytmusic;
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -1486,13 +1487,18 @@ async fn main() -> std::io::Result<()> {
                 // gates would accept. Real, closed dead end -- not a bug
                 // left half-fixed. Tried in order: Spotify's own first-party
                 // catalog (Phase 17, session.spclient().get_lyrics), then
-                // lrclib via the background thread below. `None` means "no
-                // usable synced result from this source," not "no lyrics at
-                // all" -- falls through to the next. A track_id that fails
-                // to parse (shouldn't happen for a real spotify:track: uri,
-                // but this is exactly the kind of external-shape assumption
-                // this codebase never trusts blindly) skips straight to the
-                // lrclib fallback.
+                // YouTube Music (Phase 22, a different licensing catalog --
+                // LyricFind, not Spotify's historical Musixmatch backing --
+                // so it has real incremental-coverage odds rather than just
+                // duplicating Spotify's own result), then lrclib via the
+                // background thread below, as the last, community-database
+                // tier. `None` at each step means "no usable synced result
+                // from this source," not "no lyrics at all" -- falls
+                // through to the next. A track_id that fails to parse
+                // (shouldn't happen for a real spotify:track: uri, but this
+                // is exactly the kind of external-shape assumption this
+                // codebase never trusts blindly) skips straight to the
+                // lrclib fallback, bypassing both of the others.
                 let track_id = librespot_core::SpotifyUri::from_uri(&meta.track_id)
                     .ok()
                     .and_then(|uri| librespot_core::SpotifyId::try_from(&uri).ok());
@@ -1502,14 +1508,18 @@ async fn main() -> std::io::Result<()> {
                         let fallback_tx = fetch_tx.clone();
                         let result_tx = fetch_res_tx.clone();
                         tokio::spawn(async move {
-                            match spotify_lyrics(&session, track_id).await {
-                                Some(cached) => {
-                                    let _ = result_tx.send((fetch_gen, cached));
-                                }
-                                None => {
-                                    let _ = fallback_tx.send((fetch_gen, meta));
-                                }
+                            if let Some(cached) = spotify_lyrics(&session, track_id).await {
+                                let _ = result_tx.send((fetch_gen, cached));
+                                return;
                             }
+                            let duration_secs = meta.duration_ms as f64 / 1000.0;
+                            if let Some(cached) =
+                                ytmusic::ytmusic_lyrics(&meta.artist, &meta.title, duration_secs).await
+                            {
+                                let _ = result_tx.send((fetch_gen, cached));
+                                return;
+                            }
+                            let _ = fallback_tx.send((fetch_gen, meta));
                         });
                     }
                     None => {

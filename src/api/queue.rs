@@ -1,21 +1,18 @@
 //! The Connect queue (Phase 7): what's currently playing plus what's up
-//! next. Read-only -- this app doesn't call `add_item_to_queue` yet
-//! (adding a *new* track to the queue from Search/Liked Songs/etc is a
-//! real, viable feature, deferred as future scope rather than half-wired
-//! with no keybind reaching it). There is no remove or reorder endpoint
-//! anywhere in rspotify's `OAuthClient` for the queue at all (confirmed
-//! by reading its full method list), matching the official app's own
-//! inability to manually reorder or pluck a single item back out of the
-//! queue once it's there -- that part is a real platform gap, not
-//! something deferred by choice, the same category as Liked Songs having
-//! no reorder capability at all.
+//! next, and `add_to_queue` for appending a new track to it. There is no
+//! remove or reorder endpoint anywhere in rspotify's `OAuthClient` for
+//! the queue at all (confirmed by reading its full method list),
+//! matching the official app's own inability to manually reorder or
+//! pluck a single item back out of the queue once it's there -- that
+//! part is a real platform gap, not something deferred by choice, the
+//! same category as Liked Songs having no reorder capability at all.
 
 use rspotify::clients::OAuthClient;
-use rspotify::model::PlayableItem;
+use rspotify::model::{PlayableId, PlayableItem, TrackId};
 use rspotify::prelude::Id;
 use rspotify::AuthCodeSpotify;
 
-use super::ensure_fresh;
+use super::{describe_client_error, ensure_fresh};
 use super::search::TrackResult;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -96,6 +93,25 @@ fn lenient_track_from_raw(raw: &serde_json::Value) -> Option<TrackResult> {
         .unwrap_or_default()
         .to_string();
     Some(TrackResult { uri, title, artist, album, artist_uri, album_uri })
+}
+
+/// Appends `track_uri` to the user's playback queue (played after
+/// whatever's currently up, before the surrounding context resumes).
+/// Targets the user's active device (`device_id: None`) -- spot-tui
+/// itself is a Connect device and reclaims active state on launch, so
+/// that's normally this app. The most likely real failure is no active
+/// device at all (or a non-Premium account), which Spotify reports as a
+/// bare 404/403 -- `describe_client_error` surfaces the actual reason
+/// from the response body rather than a status code alone.
+pub async fn add_to_queue(client: &AuthCodeSpotify, track_uri: &str) -> Result<(), String> {
+    if let Err(e) = ensure_fresh(client).await {
+        log::warn!("token refresh before add_to_queue failed, trying with existing token anyway: {e}");
+    }
+    let track = TrackId::from_id_or_uri(track_uri).map_err(|e| e.to_string())?;
+    match client.add_item_to_queue(PlayableId::Track(track), None).await {
+        Ok(()) => Ok(()),
+        Err(e) => Err(describe_client_error(e).await),
+    }
 }
 
 #[cfg(test)]

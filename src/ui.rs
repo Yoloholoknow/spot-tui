@@ -2201,6 +2201,10 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "a",
                 "add the selected queued track to a playlist -- the public Web API has no remove or reorder for the queue itself",
             ),
+            (
+                "Shift+Q",
+                "add the selected track to the queue -- from Liked Songs, Playlist Detail, or Album Detail (Alt+\u{2193} from Search, where every letter types into the query box)",
+            ),
             ("refreshes", "automatically every 5s while this screen is open"),
         ],
     ),

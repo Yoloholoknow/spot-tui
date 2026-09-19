@@ -394,6 +394,59 @@ pub fn move_item_down<T>(items: &mut [T], selected: usize) -> usize {
     selected + 1
 }
 
+/// Validates a typed 1-based "move to position" answer against a list of
+/// `len` items and returns the 0-based index to splice to. Positions are
+/// 1-based on purpose -- that's how the list reads on screen and how a
+/// person counts -- so the range in the error message is too. Whole,
+/// positive integers only: no signs, decimals, or embedded spaces.
+pub fn parse_move_position(input: &str, len: usize) -> Result<usize, String> {
+    let range_error = || format!("enter a position from 1 to {len}");
+    let position: usize = input.trim().parse().map_err(|_| range_error())?;
+    if position == 0 || position > len {
+        return Err(range_error());
+    }
+    Ok(position - 1)
+}
+
+#[cfg(test)]
+mod parse_move_position_tests {
+    use super::*;
+
+    #[test]
+    fn a_one_based_position_becomes_a_zero_based_index() {
+        assert_eq!(parse_move_position("3", 5), Ok(2));
+    }
+
+    #[test]
+    fn both_ends_of_the_range_are_valid() {
+        assert_eq!(parse_move_position("1", 5), Ok(0));
+        assert_eq!(parse_move_position("5", 5), Ok(4));
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_ignored() {
+        assert_eq!(parse_move_position("  4 ", 5), Ok(3));
+    }
+
+    #[test]
+    fn zero_and_past_the_end_are_rejected_with_the_real_range() {
+        assert_eq!(parse_move_position("0", 5), Err("enter a position from 1 to 5".to_string()));
+        assert_eq!(parse_move_position("6", 5), Err("enter a position from 1 to 5".to_string()));
+    }
+
+    #[test]
+    fn non_numbers_are_rejected() {
+        for bad in ["", "abc", "-2", "2.5", "1 2"] {
+            assert!(parse_move_position(bad, 5).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn an_empty_list_has_no_valid_position() {
+        assert!(parse_move_position("1", 0).is_err());
+    }
+}
+
 /// Walks the item at `selected` back to `target` one adjacent swap at a
 /// time. Used to cancel move-mode (`Esc`): since only one item has
 /// actually been relocated -- an insertion-sort-style move, not
@@ -629,6 +682,9 @@ pub struct TextPrompt {
 pub enum TextPromptAction {
     CreatePlaylist,
     RenamePlaylist(crate::api::library::PlaylistSummary),
+    /// Playlist Detail's move-mode `g`: a purely local splice, no network
+    /// call -- unlike the other two, this needs no Spotify client at all.
+    MoveToPosition,
 }
 
 impl TextPrompt {
@@ -2199,6 +2255,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         "Move mode (Playlist Detail, after `m`)",
         &[
             ("\u{2191} / \u{2193}", "relocate the track one slot at a time, locally -- no network call per keystroke"),
+            ("g", "jump the track straight to a typed position (1 = top) instead of nudging it slot by slot -- still local, still confirmed or cancelled with Enter/Esc afterward"),
             ("Enter", "confirm -- one reorder call for the net displacement"),
             ("Esc", "cancel -- walks the track back to where it started"),
         ],
@@ -3004,7 +3061,7 @@ fn render_status(frame: &mut Frame, app: &AppState, area: Rect) {
             Paragraph::new(Line::from(vec![
                 Span::styled("MOVE MODE", Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
                 Span::styled(
-                    "  \u{2191}/\u{2193} relocate, Enter confirm, Esc cancel",
+                    "  \u{2191}/\u{2193} relocate, g jump to position, Enter confirm, Esc cancel",
                     Style::default().fg(DIM),
                 ),
             ])),

@@ -658,6 +658,27 @@ fn handle_confirm_key(
     }
 }
 
+/// Move-mode's `g`: splices the track being moved straight to a typed
+/// 1-based position instead of nudging it one slot per keystroke -- moving
+/// a track 49 slots was 49 keypresses, the single most quantifiable place
+/// this app was slower than dragging in Spotify's own UI. Purely a local
+/// reorder of the already-fetched list via the same `move_item_to` the
+/// `Esc`-cancel path uses; move-mode stays active afterward, so `Enter`
+/// still sends exactly one `reorder_track(start, end)` for the net
+/// displacement and `Esc` still walks the track back to where it began.
+/// A bad answer leaves the list untouched and says why.
+fn apply_move_to_position(app: &mut AppState, input: &str) {
+    let Some(pd) = &mut app.playlist_detail else { return };
+    if pd.move_mode.is_none() {
+        return;
+    }
+    let Fetch::Ready(items) = &mut pd.tracks else { return };
+    match ui::parse_move_position(input, items.len()) {
+        Ok(target) => pd.selected = ui::move_item_to(items, pd.selected, target),
+        Err(message) => app.status = Some((message, true)),
+    }
+}
+
 /// `Enter` submits (fires create/rename); `Esc` cancels outright -- unlike
 /// `ListFilter`'s filter box, there's no "keep it applied" middle state
 /// for a name that was never submitted. Every other key edits the field,
@@ -674,6 +695,13 @@ fn handle_text_prompt_key(
         }
         KeyCode::Enter => {
             let Some(prompt) = app.text_prompt.take() else { return };
+            // Purely local, needs no Spotify client and no name -- handled
+            // before either of the checks below, which only make sense for
+            // the two prompts that actually call the API.
+            if matches!(prompt.action, TextPromptAction::MoveToPosition) {
+                apply_move_to_position(app, &prompt.query);
+                return;
+            }
             let name = prompt.query.trim().to_string();
             if name.is_empty() {
                 app.status = Some(("name can't be empty".to_string(), true));
@@ -700,6 +728,8 @@ fn handle_text_prompt_key(
                         let _ = tx.send(CrudResult::PlaylistRenamed { playlist_uri, new_name: name, result });
                     });
                 }
+                // Already handled and returned above.
+                TextPromptAction::MoveToPosition => {}
             }
         }
         KeyCode::Backspace => {
@@ -3245,6 +3275,23 @@ async fn main() -> std::io::Result<()> {
                                                 pd.selected = ui::move_item_to(items, pd.selected, start);
                                             }
                                     resume_normal_display_index(&mut app);
+                                }
+                                // Must sit ahead of the catch-all just below, which
+                                // swallows every other character while moving.
+                                KeyCode::Char('g') if move_mode_active => {
+                                    let len = match app.playlist_detail.as_ref().map(|pd| &pd.tracks) {
+                                        Some(Fetch::Ready(items)) => items.len(),
+                                        _ => 0,
+                                    };
+                                    if len > 1 {
+                                        app.text_prompt = Some(TextPrompt::new(
+                                            format!("Move to position (1-{len})"),
+                                            "",
+                                            TextPromptAction::MoveToPosition,
+                                        ));
+                                    } else {
+                                        app.status = Some(("only one track -- nowhere to move it".to_string(), true));
+                                    }
                                 }
                                 KeyCode::Char(_) if move_mode_active => {}
                                 KeyCode::Char('m') => {

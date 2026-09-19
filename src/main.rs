@@ -78,6 +78,7 @@ enum CrudResult {
     LikeToggled { track_uri: String, liked: bool, result: Result<(), String> },
     FollowToggled { artist_uri: String, followed: bool, result: Result<(), String> },
     SaveToggled { album_uri: String, saved: bool, result: Result<(), String> },
+    QueueAdded { track_uri: String, result: Result<(), String> },
 }
 
 /// Owned result of resolving a Sidebar row into an action -- computed in
@@ -656,6 +657,31 @@ fn handle_confirm_key(
         }
         _ => false,
     }
+}
+
+/// Appends `track_uri` to the playback queue. Shared by every screen with
+/// a selected track (Liked Songs, Playlist Detail, Album Detail, Search) --
+/// four identical spawn-then-report bodies otherwise. Fires immediately with
+/// no confirm, same as `a` (add-to-playlist) and like: adding is
+/// non-destructive, and the queue can't be un-added-to from this app
+/// anyway (no remove endpoint exists), so a confirm here would only be
+/// friction with nothing to protect.
+fn fire_add_to_queue(
+    app: &mut AppState,
+    crud_tx: &mpsc::Sender<CrudResult>,
+    spotify_client: &Option<AuthCodeSpotify>,
+    track_uri: String,
+) {
+    let Some(client) = spotify_client.clone() else {
+        app.status = Some(("Spotify client not ready yet".to_string(), true));
+        return;
+    };
+    app.status = Some(("adding to queue\u{2026}".to_string(), false));
+    let tx = crud_tx.clone();
+    tokio::spawn(async move {
+        let result = api::queue::add_to_queue(&client, &track_uri).await;
+        let _ = tx.send(CrudResult::QueueAdded { track_uri, result });
+    });
 }
 
 /// Move-mode's `g`: splices the track being moved straight to a typed
@@ -1928,6 +1954,14 @@ async fn main() -> std::io::Result<()> {
                 CrudResult::DeviceTransferred(Err(e)) => {
                     app.status = Some((format!("transfer failed: {e}"), true));
                 }
+                CrudResult::QueueAdded { result: Ok(()), track_uri } => {
+                    log::info!("add_to_queue[{track_uri}]: ok");
+                    app.status = Some(("added to queue".to_string(), false));
+                }
+                CrudResult::QueueAdded { result: Err(e), track_uri } => {
+                    log::warn!("add_to_queue[{track_uri}]: failed: {e}");
+                    app.status = Some((format!("couldn't add to queue: {e}"), true));
+                }
                 CrudResult::LikeToggled { result: Ok(()), liked, track_uri } => {
                     log::info!("like_track[{track_uri}]: liked={liked}");
                     app.status = Some((if liked { "liked".to_string() } else { "unliked".to_string() }, false));
@@ -2278,6 +2312,17 @@ async fn main() -> std::io::Result<()> {
                                 if let Some(track) = app.search.results.get(app.search.selected).cloned() {
                                     app.playlist_picker =
                                         Some(PlaylistPicker { track_uri: track.uri, selected: 0, filter: ListFilter::default() });
+                                }
+                            }
+                            // Alt+Down: add to the queue -- the sibling of Ctrl+Down
+                            // (add to a playlist) just above, for the same reason:
+                            // every plain letter has to reach the query box here. Has
+                            // to sit before the plain `Down` arm below, which matches
+                            // regardless of modifiers.
+                            KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
+                                if let Some(track) = app.search.results.get(app.search.selected) {
+                                    let uri = track.uri.clone();
+                                    fire_add_to_queue(&mut app, &crud_tx, &spotify_client, uri);
                                 }
                             }
                             KeyCode::Down => {
@@ -2639,6 +2684,23 @@ async fn main() -> std::io::Result<()> {
                                                 action: ConfirmAction::UnlikeTrack { track_uri: track.uri },
                                             });
                                         }
+                                    }
+                                }
+                                // Add the selected track to the playback queue. Matches
+                                // the literal 'Q' only, not `is_shift_char` like the
+                                // other Shift+letter keys: that helper also accepts
+                                // lowercase-plus-SHIFT, and lowercase `q` means quit.
+                                KeyCode::Char('Q') => {
+                                    let track_uri = match &app.library.liked_songs {
+                                        Fetch::Ready(items) => {
+                                            filtered_sorted(items, &app.library.liked_songs_filter, &label)
+                                                .get(app.library.liked_songs_selected)
+                                                .map(|&(_, t)| t.uri.clone())
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(uri) = track_uri {
+                                        fire_add_to_queue(&mut app, &crud_tx, &spotify_client, uri);
                                     }
                                 }
                                 KeyCode::Char('l') => {
@@ -3397,6 +3459,26 @@ async fn main() -> std::io::Result<()> {
                                         });
                                     }
                                 }
+                                // Add to queue -- literal 'Q' only, see Liked Songs' arm.
+                                // Sits after the move-mode catch-all above, so it can't
+                                // fire mid-reorder.
+                                KeyCode::Char('Q') => {
+                                    let track_uri = app.playlist_detail.as_ref().and_then(|pd| {
+                                        if let Fetch::Ready(items) = &pd.tracks {
+                                            let display = pinned_first(
+                                                filtered_sorted(items, &pd.filter, &label),
+                                                &app.pinned_tracks,
+                                                |t| t.uri.as_str(),
+                                            );
+                                            display.get(pd.selected).map(|&(_, t)| t.uri.clone())
+                                        } else {
+                                            None
+                                        }
+                                    });
+                                    if let Some(uri) = track_uri {
+                                        fire_add_to_queue(&mut app, &crud_tx, &spotify_client, uri);
+                                    }
+                                }
                                 KeyCode::Char('l') => {
                                     app.nav.goto(Screen::Library);
                                 }
@@ -3979,6 +4061,17 @@ async fn main() -> std::io::Result<()> {
                                         let result = api::library::like_track(&client, &track_uri).await;
                                         let _ = tx.send(CrudResult::LikeToggled { track_uri, liked: true, result });
                                     });
+                                }
+                            }
+                            // Add the selected track to the queue -- literal 'Q'
+                            // only, see Liked Songs' arm.
+                            KeyCode::Char('Q') => {
+                                let track_uri = app.album_detail.as_ref().and_then(|state| match &state.detail {
+                                    Fetch::Ready(album) => album.tracks.get(state.selected).map(|t| t.uri.clone()),
+                                    _ => None,
+                                });
+                                if let Some(uri) = track_uri {
+                                    fire_add_to_queue(&mut app, &crud_tx, &spotify_client, uri);
                                 }
                             }
                             KeyCode::Char('l') => {

@@ -7,7 +7,7 @@ mod spike;
 mod ui;
 mod ytmusic;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, ExecutableCommand};
 use librespot_connect::{ConnectConfig, LoadRequest, LoadRequestOptions, PlayingTrack, Spirc};
@@ -199,7 +199,7 @@ struct TerminalGuard;
 impl TerminalGuard {
     fn new() -> std::io::Result<Self> {
         enable_raw_mode()?;
-        execute!(stdout(), EnterAlternateScreen)?;
+        execute!(stdout(), EnterAlternateScreen, EnableFocusChange)?;
         Ok(Self)
     }
 }
@@ -207,6 +207,7 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
+        let _ = stdout().execute(DisableFocusChange);
         let _ = stdout().execute(LeaveAlternateScreen);
     }
 }
@@ -1036,6 +1037,89 @@ enum LoopExit {
     Disconnected,
 }
 
+/// Drains every currently-queued `PlayerEvent`, applying each exactly as
+/// the main loop always has (`VolumeChanged` updates the gauge,
+/// `TrackChanged` refreshes every piece of track state plus kicks off
+/// the cover-art fetch and the debounced lyrics fetch, every event feeds
+/// `tracker`). Extracted as its own function -- not just the main inner
+/// loop's own inline block -- so the startup track-settle wait (right
+/// after the very first `spirc.transfer`, see its own doc comment) can
+/// call the identical logic instead of drifting out of sync with a
+/// second, hand-copied version. Returns whether a `TrackChanged` was
+/// among the drained events, which is the only thing the settle-wait
+/// needs to know.
+#[allow(clippy::too_many_arguments)]
+fn drain_player_events(
+    app: &mut AppState,
+    images: &ui::ImageState,
+    tracker: &mut PositionTracker,
+    generation: &mut u64,
+    cover_tx: &mpsc::Sender<(u64, image::DynamicImage)>,
+    pending_fetch: &mut Option<(u64, TrackMeta, Instant)>,
+    player_events: &mut librespot_playback::player::PlayerEventChannel,
+) -> bool {
+    let mut track_changed = false;
+    while let Ok(event) = player_events.try_recv() {
+        let now = Instant::now();
+
+        if let PlayerEvent::VolumeChanged { volume } = &event {
+            app.volume = *volume;
+        }
+
+        if let PlayerEvent::TrackChanged { audio_item } = &event {
+            let (artist, album) = match &audio_item.unique_fields {
+                UniqueFields::Track { artists, album, .. } => (
+                    artists.0.first().map(|a| a.name.clone()).unwrap_or_default(),
+                    Some(album.clone()),
+                ),
+                _ => (String::new(), None),
+            };
+            app.track_title = Some(audio_item.name.clone());
+            app.track_artist = if artist.is_empty() { None } else { Some(artist.clone()) };
+            app.track_album = album.clone();
+            app.current_track_uri = Some(audio_item.track_id.to_string());
+            app.duration = Duration::from_millis(audio_item.duration_ms as u64);
+            app.lyrics = LyricsState::Loading;
+            *generation += 1;
+
+            // Real album art, only worth fetching at all if a real
+            // graphics protocol is actually in use -- `covers` is
+            // already sorted largest-first by librespot itself.
+            if images.picker.is_some()
+                && let Some(cover_url) = audio_item.covers.first().map(|c| c.url.clone()) {
+                    let tx = cover_tx.clone();
+                    let cover_gen = *generation;
+                    tokio::task::spawn_blocking(move || {
+                        let fetched = ureq::get(&cover_url).call().ok().and_then(|resp| {
+                            let mut bytes = Vec::new();
+                            resp.into_reader().read_to_end(&mut bytes).ok()?;
+                            image::load_from_memory(&bytes).ok()
+                        });
+                        if let Some(img) = fetched {
+                            let _ = tx.send((cover_gen, img));
+                        }
+                    });
+                }
+
+            *pending_fetch = Some((
+                *generation,
+                TrackMeta {
+                    track_id: audio_item.track_id.to_string(),
+                    artist,
+                    title: audio_item.name.clone(),
+                    album,
+                    duration_ms: audio_item.duration_ms,
+                },
+                Instant::now() + DEBOUNCE,
+            ));
+            track_changed = true;
+        }
+
+        tracker.on_event(&event, now);
+    }
+    track_changed
+}
+
 /// Full librespot/Connect bootstrap, extracted so it can be retried:
 /// Tier 4 resilience -- a session drop (laptop sleep, wifi blip) used to
 /// leave the app permanently in `SessionEnded` with nothing to recover
@@ -1311,7 +1395,13 @@ async fn main() -> std::io::Result<()> {
     // separately from `app` -- see `ui::ScrollState`'s own doc comment
     // for why this isn't just more fields on `AppState`.
     let mut scroll = ui::ScrollState::default();
-    let mut images = ui::ImageState { picker, cover_image: None, sized_covers: Vec::new() };
+    let mut images = ui::ImageState {
+        picker,
+        cover_image: None,
+        sized_covers: Vec::new(),
+        startup_retransmit_at: None,
+        startup_retransmit_done: false,
+    };
 
     let mut generation: u64 = 0;
     let mut pending_fetch: Option<(u64, TrackMeta, Instant)> = None;
@@ -1336,6 +1426,10 @@ async fn main() -> std::io::Result<()> {
     // reconnects after a later drop should stay as fast/invisible as
     // they already are, not get padded every time.
     let mut first_connect = true;
+    // Separate from `first_connect`/`STARTUP_MIN_VISIBLE` (which only
+    // covers "is Spirc connected") -- see the real wait-loop below this
+    // guards, right after the very first session's `spirc.transfer`.
+    let mut shown_first_track = false;
     // Long enough to give Ghostty's kitty-graphics subsystem a real
     // window to finish initializing before the first real frame (with
     // real album art) ever gets drawn -- see `ui::render_startup`'s own
@@ -1346,6 +1440,23 @@ async fn main() -> std::io::Result<()> {
     // warm-up window entirely.
     const STARTUP_MIN_VISIBLE: Duration = Duration::from_millis(600);
     const STARTUP_TICK: Duration = Duration::from_millis(80);
+    // How long with no *further* TrackChanged before the first-ever
+    // track is considered settled -- same debounce idea `DEBOUNCE`
+    // already uses for lyrics fetches on rapid track changes, applied
+    // here to what actually gets shown. librespot-connect's own
+    // resume/autoplay-context handshake can emit more than one
+    // TrackChanged in quick succession right after connect (confirmed
+    // live from the log: a resumed track, then a failed Autoplay
+    // context-resolve, then a retry that lands on the real one) --
+    // waiting for events to stop arriving, not just for one to arrive,
+    // is what actually skips past the intermediate track instead of
+    // briefly showing it.
+    const STARTUP_TRACK_SETTLE: Duration = Duration::from_millis(400);
+    // Escape hatch for the real case where nothing ever settles (no
+    // resumed session, nothing playing at all) -- without this, that
+    // case would hang the splash forever waiting for a TrackChanged
+    // that's never coming.
+    const STARTUP_TRACK_MAX_WAIT: Duration = Duration::from_secs(4);
 
     'outer: loop {
         let connect_result = if first_connect {
@@ -1408,69 +1519,72 @@ async fn main() -> std::io::Result<()> {
         app.lyrics = LyricsState::Idle;
         tracker = PositionTracker::new();
 
+        // Real bug reported live: on boot, Now Playing briefly shows
+        // "nothing playing yet," then flashes whatever track
+        // librespot-connect's own resume/autoplay-context handshake
+        // first lands on, before swapping to the actual settled track.
+        // The startup splash above already exited by this point -- its
+        // own "done" signal is just "Spirc connected," not "the first
+        // real track is known" -- and there's a real, separate gap after
+        // that: `spirc.transfer` above resumes the last session, and
+        // librespot-connect then does its own async context-resolution
+        // (confirmed live from the log: a resumed track, then a failed
+        // Autoplay context-resolve, then a retry that lands on the real
+        // one -- two real `TrackChanged` events, a couple of seconds
+        // apart, both firing before either the idle screen or the main
+        // loop would otherwise have started drawing). This bridges that
+        // gap: keeps the splash up, applying every event exactly as the
+        // main loop below would, until no further `TrackChanged` has
+        // arrived for `STARTUP_TRACK_SETTLE` straight (the intermediate
+        // track's own cover/lyrics fetches still fire and get
+        // superseded harmlessly, same as any rapid track change already
+        // handles). Runs at most once, ever, for this process -- not on
+        // a later reconnect, matching `first_connect`'s own scoping.
+        if !shown_first_track {
+            shown_first_track = true;
+            let wait_start = Instant::now();
+            let mut last_track_change: Option<Instant> = None;
+            let mut tick: usize = 0;
+            loop {
+                if spirc_handle.is_finished() {
+                    break;
+                }
+                if drain_player_events(
+                    &mut app,
+                    &images,
+                    &mut tracker,
+                    &mut generation,
+                    &cover_tx,
+                    &mut pending_fetch,
+                    &mut player_events,
+                ) {
+                    last_track_change = Some(Instant::now());
+                }
+                let settled = last_track_change.is_some_and(|t| t.elapsed() >= STARTUP_TRACK_SETTLE);
+                if settled || wait_start.elapsed() >= STARTUP_TRACK_MAX_WAIT {
+                    break;
+                }
+                tick = tick.wrapping_add(1);
+                terminal.draw(|f| ui::render_startup(f, tick))?;
+                tokio::time::sleep(STARTUP_TICK).await;
+            }
+        }
+
     let exit: LoopExit = 'inner: loop {
         if spirc_handle.is_finished() {
             log::warn!("Spirc task ended -- Connect session dropped, reconnecting");
             break 'inner LoopExit::Disconnected;
         }
 
-        while let Ok(event) = player_events.try_recv() {
-            let now = Instant::now();
-
-            if let PlayerEvent::VolumeChanged { volume } = &event {
-                app.volume = *volume;
-            }
-
-            if let PlayerEvent::TrackChanged { audio_item } = &event {
-                let (artist, album) = match &audio_item.unique_fields {
-                    UniqueFields::Track { artists, album, .. } => (
-                        artists.0.first().map(|a| a.name.clone()).unwrap_or_default(),
-                        Some(album.clone()),
-                    ),
-                    _ => (String::new(), None),
-                };
-                app.track_title = Some(audio_item.name.clone());
-                app.track_artist = if artist.is_empty() { None } else { Some(artist.clone()) };
-                app.track_album = album.clone();
-                app.current_track_uri = Some(audio_item.track_id.to_string());
-                app.duration = Duration::from_millis(audio_item.duration_ms as u64);
-                app.lyrics = LyricsState::Loading;
-                generation += 1;
-
-                // Real album art, only worth fetching at all if a real
-                // graphics protocol is actually in use -- `covers` is
-                // already sorted largest-first by librespot itself.
-                if images.picker.is_some()
-                    && let Some(cover_url) = audio_item.covers.first().map(|c| c.url.clone()) {
-                        let tx = cover_tx.clone();
-                        let cover_gen = generation;
-                        tokio::task::spawn_blocking(move || {
-                            let fetched = ureq::get(&cover_url).call().ok().and_then(|resp| {
-                                let mut bytes = Vec::new();
-                                resp.into_reader().read_to_end(&mut bytes).ok()?;
-                                image::load_from_memory(&bytes).ok()
-                            });
-                            if let Some(img) = fetched {
-                                let _ = tx.send((cover_gen, img));
-                            }
-                        });
-                    }
-
-                pending_fetch = Some((
-                    generation,
-                    TrackMeta {
-                        track_id: audio_item.track_id.to_string(),
-                        artist,
-                        title: audio_item.name.clone(),
-                        album,
-                        duration_ms: audio_item.duration_ms,
-                    },
-                    Instant::now() + DEBOUNCE,
-                ));
-            }
-
-            tracker.on_event(&event, now);
-        }
+        let _ = drain_player_events(
+            &mut app,
+            &images,
+            &mut tracker,
+            &mut generation,
+            &cover_tx,
+            &mut pending_fetch,
+            &mut player_events,
+        );
 
         if let Some((fetch_gen, meta, deadline)) = pending_fetch.clone()
             && Instant::now() >= deadline {
@@ -1860,8 +1974,26 @@ async fn main() -> std::io::Result<()> {
 
         terminal.draw(|f| ui::render(f, &app, &mut scroll, &mut images))?;
 
-        if event::poll(TICK)?
-            && let Event::Key(key) = event::read()? {
+        if event::poll(TICK)? {
+            let ev = event::read()?;
+            // Real bug reported live: switching tmux *windows* away and
+            // back drops a previously-placed kitty-graphics image --
+            // tmux doesn't track image placements as part of its own
+            // redrawable screen state (a real, documented tmux/kitty
+            // limitation), so redrawing this pane on switch-back leaves
+            // the image slot blank with no signal to this app that
+            // anything needs to happen. `focus-events` (already on via
+            // tmux-sensible, confirmed live) makes tmux emit a real
+            // focus-gained sequence on exactly this transition, and
+            // crossterm already parses it natively. Clearing the sized-
+            // cover cache forces the very next render to rebuild and
+            // retransmit fresh -- the same recovery a manual track
+            // skip-then-back already provides, just triggered by the
+            // actual event that causes the problem instead of a timer.
+            if ev == Event::FocusGained {
+                images.sized_covers.clear();
+            }
+            if let Event::Key(key) = ev {
                 // A mutation's result message (success or failure) shows
                 // until the next keypress, same lifetime a status line
                 // conventionally gets.
@@ -3454,12 +3586,20 @@ async fn main() -> std::io::Result<()> {
                                 _ => {}
                             }
                         }
+                        // The one confirmed behavior change in an
+                        // otherwise styling-only pass: Help had no
+                        // scrolling at all, and with 14 sections the tail
+                        // was permanently unreachable on most terminals.
+                        // Offset is clamped inside `render_help` itself
+                        // against the real rendered height, so these
+                        // handlers can move it blindly.
                         Screen::Help => match key.code {
                             KeyCode::Char('q') => break 'inner LoopExit::Quit,
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 break 'inner LoopExit::Quit
                             }
                             KeyCode::Esc | KeyCode::Left => {
+                                scroll.help = 0;
                                 app.nav.escape();
                             }
                             KeyCode::Char(' ') => {
@@ -3481,11 +3621,24 @@ async fn main() -> std::io::Result<()> {
                                 toggle_or_enter_fullscreen(&mut app);
                             }
                             KeyCode::Char('l') => {
+                                scroll.help = 0;
                                 app.nav.goto(Screen::Library);
                             }
                             KeyCode::Char('c') => {
                                 app.text_prompt =
                                     Some(TextPrompt::new("New playlist name", "", TextPromptAction::CreatePlaylist));
+                            }
+                            KeyCode::Up => {
+                                scroll.help = scroll.help.saturating_sub(1);
+                            }
+                            KeyCode::Down => {
+                                scroll.help = scroll.help.saturating_add(1);
+                            }
+                            KeyCode::PageUp => {
+                                scroll.help = scroll.help.saturating_sub(10);
+                            }
+                            KeyCode::PageDown => {
+                                scroll.help = scroll.help.saturating_add(10);
                             }
                             _ => {}
                         },
@@ -3863,6 +4016,7 @@ async fn main() -> std::io::Result<()> {
                     }
                 }
             }
+        }
     };
 
         let _ = spirc.shutdown();

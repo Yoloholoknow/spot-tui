@@ -5,7 +5,7 @@ use crate::api::search::TrackResult;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 use std::time::Duration;
 
@@ -1226,6 +1226,20 @@ const ACCENT: Color = Color::Indexed(35); // a spotify-adjacent green
 /// alone signals how carefully to read the message before answering,
 /// instead of every confirm using the same red regardless of stakes.
 const WARN: Color = Color::Indexed(214); // amber, same 256-color-safe reasoning as ACCENT
+/// Irreversible/failed -- the severity tier above WARN. Named rather than
+/// a new value: this is the exact `Color::Red` the error box, the Danger
+/// confirm tier, and the status line already used literally, so naming
+/// it changes zero pixels and makes the next call site that needs it
+/// obvious rather than another bare `Color::Red`.
+const DANGER: Color = Color::Red;
+/// Secondary/dim text: captions, meta facts beside a title, empty-state
+/// copy. `Color::DarkGray`, matching the dozen call sites that already
+/// reach for it literally. Deliberately not a second, dimmer tone
+/// matching the mockup's `--text-dim`/`--text-faint` split -- both
+/// terminal equivalents are theme-remapped colors (in many palettes
+/// they'd be indistinguishable or inverted), so this ports the
+/// hierarchy (primary vs. secondary), not the literal two-step scale.
+const DIM: Color = Color::DarkGray;
 
 /// `mm:ss`, minutes uncapped (a >59min track just shows e.g. "61:05"
 /// rather than growing an hours field nobody needs here).
@@ -1436,6 +1450,14 @@ pub struct ScrollState {
     pub devices: ListState,
     pub artist_detail: ListState,
     pub album_detail: ListState,
+    /// Help's scroll offset in rendered rows -- a plain `u16` for
+    /// `Paragraph::scroll`, not a `ListState`: Help is a reference the
+    /// user scans, not a list they navigate item by item (the mockup's
+    /// own reasoning for giving it a two-column layout with no
+    /// per-row selection at all). Clamped inside `render_help` against
+    /// the real rendered height, so the key handler in `main.rs` can
+    /// increment/decrement blindly without knowing the content size.
+    pub help: u16,
 }
 
 /// Real album art via a terminal graphics protocol, threaded through
@@ -1473,7 +1495,37 @@ pub struct ImageState {
     pub picker: Option<ratatui_image::picker::Picker>,
     pub cover_image: Option<(String, image::DynamicImage)>,
     pub sized_covers: Vec<(String, u16, u16, ratatui_image::protocol::StatefulProtocol)>,
+    /// One-shot, whole-process-lifetime retransmit: armed the first time
+    /// this run builds any sized cover at all (in practice, the boot
+    /// track's cover), fired once `STARTUP_RETRANSMIT_DELAY` later by
+    /// clearing the entire cache so the very next render misses and
+    /// rebuilds+retransmits fresh -- exactly what manually skipping a
+    /// track and back already does to "fix" a blank cover, just
+    /// automatic. A near-identical mechanism was tried once before this
+    /// session at a 700ms delay and reverted: that gap was still short
+    /// enough to land while Ghostty's own kitty image-compositing state
+    /// from the *first* transmission was still settling, and a second
+    /// full transmission landing in that window corrupted every
+    /// subsequent cover for the rest of the session (the same trigger
+    /// Phase 18 already found once, for a different cause). Reattempted
+    /// here at a real multi-second delay specifically because that's
+    /// the property that makes a *manual* skip-then-back safe -- by the
+    /// time a human notices and acts, real seconds have passed, not
+    /// milliseconds. The exact minimum safe gap isn't independently
+    /// confirmed; this is a live experiment against real hardware, not
+    /// a proven fix -- if blank art recurs, the delay needs widening
+    /// further; if pixelation/corruption recurs instead, the gap is
+    /// still too short and this needs reverting again.
+    pub startup_retransmit_at: Option<std::time::Instant>,
+    pub startup_retransmit_done: bool,
 }
+
+/// How long to wait, after this process's very first cover-art
+/// transmission, before automatically clearing the cache and
+/// retransmitting once -- see `ImageState::startup_retransmit_at`'s own
+/// doc comment for why this specific value is a judgment call, not a
+/// derived or confirmed-safe number.
+const STARTUP_RETRANSMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(2000);
 
 /// How many distinct `(track, size)` encoded protocols `ImageState`
 /// keeps at once -- comfortably more than the handful of distinct art
@@ -1513,7 +1565,7 @@ pub fn render_startup(frame: &mut Frame, tick: usize) {
     frame.render_widget(
         Paragraph::new(format!("{spinner} connecting to spotify\u{2026}"))
             .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(DIM)),
         rows[2],
     );
 }
@@ -1582,7 +1634,7 @@ pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState, image
         ),
         Screen::YourPlaylists => render_your_playlists(frame, app, &mut scroll.playlists, main_area),
         Screen::PlaylistDetail => render_playlist_detail(frame, app, &mut scroll.playlist_detail, main_area),
-        Screen::Help => render_help(frame, main_area),
+        Screen::Help => render_help(frame, main_area, &mut scroll.help),
         Screen::Queue => render_queue(frame, app, &mut scroll.queue, main_area),
         Screen::Devices => render_devices(frame, app, &mut scroll.devices, main_area),
         Screen::ArtistDetail => render_artist_detail(frame, app, &mut scroll.artist_detail, main_area),
@@ -1624,48 +1676,106 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
     Rect { x, y, width, height }
 }
 
+// Every overlay used its own bare width/height literals (40x13, 50x16,
+// 50x3, and confirm's own self-sizing) with nothing shared -- one width
+// for the two list-shaped overlays (picker, quick jump) so they read as
+// one system, and a named horizontal-padding amount applied to all four.
+const OVERLAY_LIST_WIDTH: u16 = 50;
+const OVERLAY_LIST_HEIGHT: u16 = 16;
+const OVERLAY_PROMPT_WIDTH: u16 = 50;
+const OVERLAY_PROMPT_HEIGHT: u16 = 3; // 1 content row + 2 borders -- no vertical padding
+const OVERLAY_CONFIRM_MIN_WIDTH: u16 = 24;
+const OVERLAY_CONFIRM_MAX_WIDTH: u16 = 70;
+/// Horizontal-only: a blank row costs real percentage height in a
+/// 13-16-row list overlay for no benefit the border doesn't already
+/// give; horizontal has a real payoff since content otherwise sits flush
+/// against the border everywhere else in the app doesn't.
+const OVERLAY_PAD_X: u16 = 1;
+/// Borders (2) + horizontal padding (2x `OVERLAY_PAD_X`) -- everything
+/// between an overlay's outer width and its usable text width. The
+/// confirm overlay predicts its own wrapped height by hand rather than
+/// going through `Block::inner` (the other three overlays get padding
+/// subtracted for free), so this constant must stay the single source
+/// of truth for both its width-clamp formula and the width it feeds to
+/// `wrapped_line_count` -- if vertical padding is ever added, the `+ 2`
+/// in `render_confirm_overlay`'s height formula must become `+ 4` at the
+/// same time, or long messages clip again.
+const OVERLAY_CHROME_X: u16 = 2 + 2 * OVERLAY_PAD_X;
+
 fn render_text_prompt_overlay(frame: &mut Frame, prompt: &TextPrompt) {
-    let area = centered_rect(frame.area(), 50, 3);
+    let area = centered_rect(frame.area(), OVERLAY_PROMPT_WIDTH, OVERLAY_PROMPT_HEIGHT);
     frame.render_widget(Clear, area);
-    let byte_pos = prompt
-        .query
-        .char_indices()
-        .nth(prompt.cursor)
-        .map(|(b, _)| b)
-        .unwrap_or(prompt.query.len());
-    let (before, after) = prompt.query.split_at(byte_pos);
-    let text = format!("{before}\u{2588}{after}");
+    let text = cursor_text(&prompt.query, prompt.cursor);
     frame.render_widget(
         Paragraph::new(text).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(ACCENT))
+                .padding(Padding::horizontal(OVERLAY_PAD_X))
                 .title(prompt.title.clone()),
         ),
         area,
     );
 }
 
-/// Greedy word-wrap line count, matching `Paragraph`'s own `Wrap` behavior
-/// closely enough to size the box correctly -- there's no way to ask
-/// ratatui how many lines a `Paragraph` will wrap to before rendering it,
-/// so this has to be predicted separately.
-fn wrapped_line_count(text: &str, width: u16) -> u16 {
-    let width = width.max(1) as usize;
-    let mut lines: u16 = 1;
-    let mut current = 0usize;
+/// Greedy word-wrap into the actual line strings, matching `Paragraph`'s
+/// own `Wrap` behavior closely enough to predict it -- there's no way to
+/// ask ratatui how many lines (or which lines) a `Paragraph` will wrap to
+/// before rendering it, so both count and content are predicted here
+/// separately. A word longer than `width` still gets its own line rather
+/// than being split mid-word, matching `Wrap`'s own behavior.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
     for word in text.split_whitespace() {
-        let word_len = word.chars().count();
-        if current == 0 {
-            current = word_len;
-        } else if current + 1 + word_len <= width {
-            current += 1 + word_len;
+        if current.is_empty() {
+            current.push_str(word);
+        } else if current.chars().count() + 1 + word.chars().count() <= width {
+            current.push(' ');
+            current.push_str(word);
         } else {
-            lines += 1;
-            current = word_len;
+            lines.push(std::mem::take(&mut current));
+            current.push_str(word);
         }
     }
-    lines.max(1)
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+fn wrapped_line_count(text: &str, width: u16) -> u16 {
+    (wrap_words(text, width as usize).len() as u16).max(1)
+}
+
+#[cfg(test)]
+mod wrap_words_tests {
+    use super::*;
+
+    #[test]
+    fn fits_on_one_line() {
+        assert_eq!(wrap_words("Quit spot-tui? y/n", 60), vec!["Quit spot-tui? y/n".to_string()]);
+    }
+
+    #[test]
+    fn wraps_into_the_exact_pieces() {
+        let text = "aaaa aaaa aaaa aaaa aaaa";
+        assert_eq!(
+            wrap_words(text, 10),
+            vec!["aaaa aaaa".to_string(), "aaaa aaaa".to_string(), "aaaa".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_word_longer_than_the_width_gets_its_own_line_not_split() {
+        assert_eq!(wrap_words("supercalifragilisticexpialidocious", 10), vec!["supercalifragilisticexpialidocious".to_string()]);
+    }
+
+    #[test]
+    fn empty_text_is_one_empty_line_not_zero() {
+        assert_eq!(wrap_words("", 20), vec![String::new()]);
+    }
 }
 
 /// Wraps a `Fetch::Failed` message in a bordered box instead of a bare
@@ -1675,11 +1785,35 @@ fn wrapped_line_count(text: &str, width: u16) -> u16 {
 fn render_fetch_error(frame: &mut Frame, area: Rect, message: &str) {
     frame.render_widget(
         Paragraph::new(format!("failed to load: {message}"))
-            .style(Style::default().fg(Color::Red))
+            .style(Style::default().fg(DANGER))
             .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Red))),
+            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(DANGER))),
         area,
     );
+}
+
+/// The app's one loading state -- previously inlined separately at every
+/// call site with three different treatments (bare default-color text,
+/// bare text in the body while a bold "loading…" sat in the header row,
+/// or nothing styled at all). One dim, lowercase, wordless-except-the-
+/// ellipsis line, matching `render_fetch_error`'s own restraint.
+fn render_loading(frame: &mut Frame, area: Rect) {
+    frame.render_widget(Paragraph::new("loading\u{2026}").style(Style::default().fg(DIM)), area);
+}
+
+/// A designed empty state: a dim headline naming what's absent, then an
+/// optional fainter-in-spirit (same DIM color, second line) hint naming
+/// the actual key that fixes it. `hint` is `None` where no key genuinely
+/// applies -- never a fabricated "press X" that would be a lie at that
+/// call site. Lowercase throughout, matching the mockup's own copy
+/// convention (`ui.rs`'s existing "no matches"/"nothing here yet" now
+/// route through this instead of being bare unstyled strings).
+fn render_empty_state(frame: &mut Frame, area: Rect, headline: &str, hint: Option<&str>) {
+    let mut lines = vec![Line::from(Span::styled(headline.to_string(), Style::default().fg(DIM)))];
+    if let Some(hint) = hint {
+        lines.push(Line::from(Span::styled(hint.to_string(), Style::default().fg(DIM))));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
 }
 
 fn render_confirm_overlay(frame: &mut Frame, confirm: &PendingConfirm) {
@@ -1690,13 +1824,13 @@ fn render_confirm_overlay(frame: &mut Frame, confirm: &PendingConfirm) {
     // ran off both edges of the box with no way to read the rest,
     // reported live as "completely cutoff." Now wraps, and the box grows
     // to fit however many lines that takes instead of assuming one.
-    let max_width = frame_area.width.saturating_sub(4).clamp(24, 70);
-    let width = (confirm.message.chars().count() as u16 + 4).clamp(24, max_width);
-    let inner_width = width.saturating_sub(2);
+    let max_width = frame_area.width.saturating_sub(4).clamp(OVERLAY_CONFIRM_MIN_WIDTH, OVERLAY_CONFIRM_MAX_WIDTH);
+    let width = (confirm.message.chars().count() as u16 + 4).clamp(OVERLAY_CONFIRM_MIN_WIDTH, max_width);
+    let inner_width = width.saturating_sub(OVERLAY_CHROME_X);
     let height = (wrapped_line_count(&confirm.message, inner_width) + 2).min(frame_area.height);
     let area = centered_rect(frame_area, width, height);
     let color = match confirm.action.severity() {
-        ConfirmSeverity::Danger => Color::Red,
+        ConfirmSeverity::Danger => DANGER,
         ConfirmSeverity::Warn => WARN,
         ConfirmSeverity::Neutral => ACCENT,
     };
@@ -1706,7 +1840,12 @@ fn render_confirm_overlay(frame: &mut Frame, confirm: &PendingConfirm) {
             .alignment(Alignment::Center)
             .style(Style::default().fg(color))
             .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(color))),
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(color))
+                    .padding(Padding::horizontal(OVERLAY_PAD_X)),
+            ),
         area,
     );
 }
@@ -1783,34 +1922,49 @@ mod playlist_has_track_tests {
     }
 }
 
+/// Draws the shared shape both list-style overlays (picker, quick jump)
+/// use -- `Clear`, a bordered+padded block with a title, and the live
+/// filter line with a real mid-string cursor (previously trailing-only
+/// on both, which actively lied: both key handlers already support real
+/// `Left`/`Right` cursor movement) -- and hands back the `Rect` the
+/// caller should draw its own genuinely-different body into.
+/// Deliberately stops at the chrome: the picker has real `Fetch`-state
+/// arms of its own and quick jump doesn't, so pushing that into a shared
+/// enum would be more machinery than the duplication it removes.
+fn filter_overlay_body(frame: &mut Frame, title: &str, filter: &ListFilter) -> Rect {
+    let area = centered_rect(frame.area(), OVERLAY_LIST_WIDTH, OVERLAY_LIST_HEIGHT);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .padding(Padding::horizontal(OVERLAY_PAD_X))
+        .title(title.to_string());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let chunks =
+        Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(1)]).split(inner);
+    frame.render_widget(Paragraph::new(format!("/{}", cursor_text(&filter.query, filter.cursor))), chunks[0]);
+    chunks[1]
+}
+
 fn render_playlist_picker_overlay(
     frame: &mut Frame,
     app: &AppState,
     picker: &PlaylistPicker,
     list_state: &mut ListState,
 ) {
-    let area = centered_rect(frame.area(), 40, 13);
-    frame.render_widget(Clear, area);
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(ACCENT)).title("Add to playlist");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let chunks =
-        Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(1)]).split(inner);
-    // Trailing cursor only, same as every other ListFilter-backed field --
-    // this one is always "editing," there's no separate committed state.
-    frame.render_widget(Paragraph::new(format!("/{}\u{2588}", picker.filter.query)), chunks[0]);
+    let body = filter_overlay_body(frame, "Add to playlist", &picker.filter);
 
     let label = |p: &crate::api::library::PlaylistSummary| p.name.clone();
     match &app.library.playlists {
         Fetch::NotStarted | Fetch::Loading => {
-            frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
+            render_loading(frame, body);
         }
         Fetch::Failed(e) => {
-            render_fetch_error(frame, chunks[1], e);
+            render_fetch_error(frame, body, e);
         }
         Fetch::Ready(items) if items.is_empty() => {
-            frame.render_widget(Paragraph::new("no playlists yet -- press c to create one"), chunks[1]);
+            render_empty_state(frame, body, "no playlists yet", Some("press c to create one"));
         }
         Fetch::Ready(items) => {
             let ordered =
@@ -1833,7 +1987,7 @@ fn render_playlist_picker_overlay(
             };
             render_display_list(
                 frame,
-                chunks[1],
+                body,
                 &ordered,
                 picker.selected,
                 &pin_label,
@@ -1844,29 +1998,32 @@ fn render_playlist_picker_overlay(
     }
 }
 
-/// Phase 12's quick-jump palette. Modeled directly on
-/// `render_playlist_picker_overlay` above -- same `centered_rect` +
-/// `Clear` + trailing-cursor filter header + `render_display_list` shape
-/// -- but over the flattened, heterogeneous pool `quick_jump_entries`
-/// builds fresh from live `AppState` every render, so a background fetch
-/// (eager-triggered on open) landing while this is open shows up on the
-/// very next frame with no extra plumbing.
+/// Phase 12's quick-jump palette. Built on `filter_overlay_body` -- the
+/// same shared chrome `render_playlist_picker_overlay` uses -- over the
+/// flattened, heterogeneous pool `quick_jump_entries` builds fresh from
+/// live `AppState` every render, so a background fetch (eager-triggered
+/// on open) landing while this is open shows up on the very next frame
+/// with no extra plumbing.
 fn render_quick_jump_overlay(frame: &mut Frame, app: &AppState, qj: &QuickJump, list_state: &mut ListState) {
-    let area = centered_rect(frame.area(), 50, 16);
-    frame.render_widget(Clear, area);
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(ACCENT)).title("Quick jump");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let chunks =
-        Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(1)]).split(inner);
-    frame.render_widget(Paragraph::new(format!("/{}\u{2588}", qj.filter.query)), chunks[0]);
-
+    let body = filter_overlay_body(frame, "Quick jump", &qj.filter);
     let entries = quick_jump_entries(app, &qj.filter);
     let label = |e: &QuickJumpEntry| e.label.clone();
     let display = filtered_sorted(&entries, &qj.filter, &label);
-    render_display_list(frame, chunks[1], &display, qj.selected, &label, qj.filter.query.is_empty(), list_state);
+    render_display_list(frame, body, &display, qj.selected, &label, qj.filter.query.is_empty(), list_state);
 }
+
+/// Fixed key column, in cells -- the one place this screen deliberately
+/// breaks the app's spacing grid, same exception the mockup's own 108px
+/// `.help-key` column makes and for the same reason: an aligned key
+/// column is what makes a dense reference actually scannable.
+const HELP_KEY_WIDTH: usize = 14;
+/// Below this main-area width, Help renders as a single scrolling
+/// column instead of two -- two columns need roughly a 118-column
+/// terminal once the 22-column sidebar is accounted for, and unlike the
+/// browser mockup (no narrow case to worry about), this app has to
+/// handle a genuinely narrow terminal without the content becoming
+/// unreadable.
+const HELP_TWO_COLUMN_MIN_WIDTH: u16 = 96;
 
 /// Keep this in sync as new keys get wired -- Phase 4's whole point was
 /// moving Help to right after this session's current point in the build
@@ -2071,20 +2228,142 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("Esc", "Search: back. Filters: stop editing AND clear the filter back to the full list"),
         ],
     ),
+    (
+        "Help screen (this one)",
+        &[
+            ("\u{2191} / \u{2193}", "scroll one row"),
+            ("PageUp / PageDown", "scroll ten rows"),
+        ],
+    ),
 ];
 
-fn render_help(frame: &mut Frame, area: Rect) {
-    let mut lines: Vec<Line> = Vec::new();
-    for (section, rows) in HELP_SECTIONS {
-        if !lines.is_empty() {
-            lines.push(Line::from(""));
-        }
-        lines.push(Line::from(Span::styled(*section, Style::default().add_modifier(Modifier::BOLD))));
-        for (key, desc) in *rows {
-            lines.push(Line::from(format!("  {:14} {}", key, desc)));
+/// One section's rendered lines: an ACCENT+BOLD title, then one row per
+/// binding with the key padded to `HELP_KEY_WIDTH` and the description
+/// in `DIM`, hand-wrapped (not `Paragraph`'s own `Wrap`) with a hanging
+/// indent so continuation lines stay under the description column
+/// instead of resetting to column 0. Hand-wrapping is also what makes
+/// the rendered height exactly `lines.len()`, which is what makes the
+/// scroll clamp in `render_help` correct.
+fn help_section_lines(title: &str, rows: &[(&str, &str)], width: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        title.to_string(),
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+    ))];
+    let desc_width = width.saturating_sub(HELP_KEY_WIDTH + 1).max(1);
+    let indent = " ".repeat(HELP_KEY_WIDTH + 1);
+    for (key, desc) in rows {
+        let wrapped = wrap_words(desc, desc_width);
+        for (i, piece) in wrapped.into_iter().enumerate() {
+            if i == 0 {
+                lines.push(Line::from(vec![
+                    Span::raw(format!("{key:<HELP_KEY_WIDTH$} ")),
+                    Span::styled(piece, Style::default().fg(DIM)),
+                ]));
+            } else {
+                lines.push(Line::from(vec![Span::raw(indent.clone()), Span::styled(piece, Style::default().fg(DIM))]));
+            }
         }
     }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
+    lines
+}
+
+/// Index of the first section that starts column 2, chosen so the two
+/// columns come out as close to equal real rendered height as possible
+/// -- sections range from 2 to 10 rows each, so the mockup's own
+/// `ceil(section_count / 2)` split (an even *section* count) is not an
+/// even *height* split. Pure and greedy: keep adding sections to column
+/// 1 until doing so would reach or pass half the total height.
+fn help_column_split(section_heights: &[usize]) -> usize {
+    let total: usize = section_heights.iter().sum();
+    let target = total / 2;
+    let mut running = 0;
+    for (i, h) in section_heights.iter().enumerate() {
+        running += h;
+        if running >= target {
+            return i + 1;
+        }
+    }
+    section_heights.len()
+}
+
+#[cfg(test)]
+mod help_column_split_tests {
+    use super::*;
+
+    #[test]
+    fn balances_by_real_height_not_section_count() {
+        // total=21, half=10.5 -- splitting after the 3rd section (15 vs
+        // 6) is closer to even than after the 2nd (5 vs 16) despite
+        // being an uneven *section* count either way.
+        assert_eq!(help_column_split(&[2, 3, 10, 4, 2]), 3);
+    }
+
+    #[test]
+    fn even_heights_split_down_the_middle() {
+        assert_eq!(help_column_split(&[5, 5, 5, 5]), 2);
+    }
+
+    #[test]
+    fn no_sections_is_a_no_op_split() {
+        assert_eq!(help_column_split(&[]), 0);
+    }
+
+    #[test]
+    fn a_single_section_all_goes_in_column_one() {
+        assert_eq!(help_column_split(&[5]), 1);
+    }
+}
+
+fn render_help(frame: &mut Frame, area: Rect, offset: &mut u16) {
+    let shell =
+        Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(1)]).split(area);
+    frame.render_widget(Paragraph::new(screen_header_line("Keybinds", None)), shell[0]);
+    let body_area = shell[1];
+
+    if body_area.width < HELP_TWO_COLUMN_MIN_WIDTH {
+        let width = body_area.width as usize;
+        let mut lines: Vec<Line> = Vec::new();
+        for &(title, rows) in HELP_SECTIONS {
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.extend(help_section_lines(title, rows, width));
+        }
+        let max_offset = (lines.len() as u16).saturating_sub(body_area.height);
+        *offset = (*offset).min(max_offset);
+        frame.render_widget(Paragraph::new(lines).scroll((*offset, 0)), body_area);
+        return;
+    }
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(1), Constraint::Length(4), Constraint::Min(1)])
+        .split(body_area);
+    let col_width = cols[0].width as usize;
+
+    let section_lines: Vec<Vec<Line>> =
+        HELP_SECTIONS.iter().map(|&(title, rows)| help_section_lines(title, rows, col_width)).collect();
+    let section_heights: Vec<usize> = section_lines.iter().map(Vec::len).collect();
+    let split = help_column_split(&section_heights);
+
+    let build_column = |sections: &[Vec<Line<'static>>]| -> Vec<Line<'static>> {
+        let mut out = Vec::new();
+        for lines in sections {
+            if !out.is_empty() {
+                out.push(Line::from(""));
+            }
+            out.extend(lines.iter().cloned());
+        }
+        out
+    };
+    let col1 = build_column(&section_lines[..split]);
+    let col2 = build_column(&section_lines[split..]);
+    let tallest = col1.len().max(col2.len()) as u16;
+    let max_offset = tallest.saturating_sub(body_area.height);
+    *offset = (*offset).min(max_offset);
+
+    frame.render_widget(Paragraph::new(col1).scroll((*offset, 0)), cols[0]);
+    frame.render_widget(Paragraph::new(col2).scroll((*offset, 0)), cols[2]);
 }
 
 fn render_library_home(frame: &mut Frame, app: &AppState, area: Rect) {
@@ -2128,12 +2407,18 @@ fn render_playlist_detail(frame: &mut Frame, app: &AppState, list_state: &mut Li
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
     if pd.move_mode.is_some() {
+        // Key hints moved to the status bar (`render_status`'s own
+        // move-mode takeover) -- this row is `Constraint::Length(1)` with
+        // no wrap, so the hint text was already silently truncated on a
+        // narrow terminal; three distinct weights (name, badge, nothing
+        // else) read more clearly than one undifferentiated ACCENT+BOLD
+        // line ever did.
         frame.render_widget(
-            Paragraph::new(format!(
-                "{} \u{2014} MOVE MODE: \u{2191}/\u{2193} relocate, Enter confirm, Esc cancel",
-                pd.playlist.name
-            ))
-            .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Paragraph::new(Line::from(vec![
+                Span::styled(pd.playlist.name.clone(), Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw("  "),
+                Span::styled("MOVE MODE", Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
+            ])),
             chunks[0],
         );
     } else {
@@ -2145,7 +2430,7 @@ fn render_playlist_detail(frame: &mut Frame, app: &AppState, list_state: &mut Li
     }
     match &pd.tracks {
         Fetch::NotStarted | Fetch::Loading => {
-            frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
+            render_loading(frame, chunks[1]);
         }
         Fetch::Failed(e) => {
             render_fetch_error(frame, chunks[1], e);
@@ -2159,24 +2444,44 @@ fn render_playlist_detail(frame: &mut Frame, app: &AppState, list_state: &mut Li
             // what's pinned, rather than blocking reorder whenever
             // anything in the playlist happens to be pinned.
             let natural = filtered_sorted(items, &pd.filter, &label);
-            let display = if pd.move_mode.is_some() {
-                natural
+            if pd.move_mode.is_some() {
+                // The moving row gets a WARN `\u{2192}` marker independent
+                // of selection (the second caller of `render_display_list_lines`,
+                // after Devices) -- previously this row was visually
+                // identical to any other selected row. `pd.selected` is a
+                // real index into `natural` here (move mode's whole point
+                // is keeping display position == real array position), so
+                // the moving track's URI is looked up once, not per-row.
+                let moving_uri = natural.get(pd.selected).map(|(_, t)| t.uri.as_str());
+                let move_line = |t: &TrackResult| {
+                    let marker = if Some(t.uri.as_str()) == moving_uri { "\u{2192} " } else { "  " };
+                    Line::from(vec![Span::styled(marker, Style::default().fg(WARN)), Span::raw(label(t))])
+                };
+                render_display_list_lines(
+                    frame,
+                    chunks[1],
+                    &natural,
+                    pd.selected,
+                    &move_line,
+                    pd.filter.query.is_empty(),
+                    list_state,
+                );
             } else {
-                pinned_first(natural, &app.pinned_tracks, |t| t.uri.as_str())
-            };
-            let pin_label = |t: &TrackResult| {
-                let marker = if app.pinned_tracks.contains(&t.uri) { "* " } else { "  " };
-                format!("{marker}{}", label(t))
-            };
-            render_display_list(
-                frame,
-                chunks[1],
-                &display,
-                pd.selected,
-                &pin_label,
-                pd.filter.query.is_empty(),
-                list_state,
-            );
+                let display = pinned_first(natural, &app.pinned_tracks, |t| t.uri.as_str());
+                let pin_label = |t: &TrackResult| {
+                    let marker = if app.pinned_tracks.contains(&t.uri) { "* " } else { "  " };
+                    format!("{marker}{}", label(t))
+                };
+                render_display_list(
+                    frame,
+                    chunks[1],
+                    &display,
+                    pd.selected,
+                    &pin_label,
+                    pd.filter.query.is_empty(),
+                    list_state,
+                );
+            }
         }
     }
 }
@@ -2200,7 +2505,7 @@ fn render_your_playlists(frame: &mut Frame, app: &AppState, list_state: &mut Lis
     );
     match &app.library.playlists {
         Fetch::NotStarted | Fetch::Loading => {
-            frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
+            render_loading(frame, chunks[1]);
         }
         Fetch::Failed(e) => {
             render_fetch_error(frame, chunks[1], e);
@@ -2235,30 +2540,39 @@ fn render_your_playlists(frame: &mut Frame, app: &AppState, list_state: &mut Lis
 /// public Web API has no remove/reorder endpoint for it), so it's the
 /// one list screen that's genuinely just a view.
 fn render_queue(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)])
-        .split(area);
-    frame.render_widget(
-        Paragraph::new("Queue").style(Style::default().add_modifier(Modifier::BOLD)),
-        chunks[0],
-    );
+    let chunks =
+        Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(1)]).split(area);
+    frame.render_widget(Paragraph::new(screen_header_line("Queue", Some("auto-refreshing"))), chunks[0]);
     match &app.queue.fetch {
+        // Full-height body, not squeezed into a 1-row caption slot --
+        // `render_fetch_error`'s bordered box needs real rows to draw a
+        // border in, which it never had before this fix.
         Fetch::NotStarted | Fetch::Loading => {
-            frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
+            render_loading(frame, chunks[1]);
         }
         Fetch::Failed(e) => {
             render_fetch_error(frame, chunks[1], e);
         }
         Fetch::Ready(summary) => {
-            let now_playing = match &summary.currently_playing {
-                Some(t) => format!("Now playing: {} \u{2014} {}", t.artist, t.title),
-                None => "Now playing: (nothing)".to_string(),
-            };
-            frame.render_widget(Paragraph::new(now_playing).style(Style::default().fg(ACCENT)), chunks[1]);
+            let body = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(chunks[1]);
+            let now_playing = Line::from(vec![
+                Span::styled("now playing  ", Style::default().fg(DIM)),
+                Span::raw(match &summary.currently_playing {
+                    Some(t) => format!("{} \u{2014} {}", t.artist, t.title),
+                    None => "(nothing)".to_string(),
+                }),
+            ]);
+            frame.render_widget(Paragraph::new(now_playing), body[0]);
+            if summary.queue.is_empty() {
+                render_empty_state(frame, body[1], "queue is empty", None);
+                return;
+            }
             let label = |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title);
             let display: Vec<(usize, &TrackResult)> = summary.queue.iter().enumerate().collect();
-            render_display_list(frame, chunks[2], &display, app.queue.selected, &label, true, list_state);
+            render_display_list(frame, body[1], &display, app.queue.selected, &label, true, list_state);
         }
     }
 }
@@ -2272,25 +2586,89 @@ fn render_devices(frame: &mut Frame, app: &AppState, list_state: &mut ListState,
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
     frame.render_widget(
-        Paragraph::new("Devices  (Enter: transfer playback here, r: refresh)")
-            .style(Style::default().add_modifier(Modifier::BOLD)),
+        Paragraph::new(screen_header_line("Devices", Some("Enter transfer playback, r refresh"))),
         chunks[0],
     );
     match &app.devices.fetch {
         Fetch::NotStarted | Fetch::Loading => {
-            frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
+            render_loading(frame, chunks[1]);
         }
         Fetch::Failed(e) => {
             render_fetch_error(frame, chunks[1], e);
         }
+        Fetch::Ready(items) if items.is_empty() => {
+            render_empty_state(
+                frame,
+                chunks[1],
+                "no devices found",
+                Some("open Spotify on another device, or press r to check again"),
+            );
+        }
         Fetch::Ready(items) => {
-            let label = |d: &crate::api::devices::DeviceSummary| {
+            // The active marker keeps ACCENT whether or not this row is
+            // also selected -- an explicitly-styled span's own color
+            // patches over the row's selection style per-cell, so
+            // `render_display_list_lines` (not the plain-string
+            // `render_display_list`) is what makes this possible.
+            // Previously the marker was plain text baked into the label,
+            // so an active-but-unselected device read identically to an
+            // inactive one except for the bare glyph.
+            let line = |d: &crate::api::devices::DeviceSummary| {
                 let marker = if d.is_active { "\u{25cf} " } else { "  " };
                 let volume = d.volume_percent.map(|v| format!(", {v}%")).unwrap_or_default();
-                format!("{marker}{} ({}{volume})", d.name, d.kind)
+                Line::from(vec![
+                    Span::styled(marker, Style::default().fg(ACCENT)),
+                    Span::raw(format!("{} ({}{volume})", d.name, d.kind)),
+                ])
             };
             let display: Vec<(usize, &crate::api::devices::DeviceSummary)> = items.iter().enumerate().collect();
-            render_display_list(frame, chunks[1], &display, app.devices.selected, &label, true, list_state);
+            render_display_list_lines(frame, chunks[1], &display, app.devices.selected, &line, true, list_state);
+        }
+    }
+}
+
+/// The two drill-down detail screens (Artist, Album) share this shape: a
+/// one-row styled header over a plain list of the thing's children.
+/// Previously duplicated in full, including re-rendering the header
+/// separately inside each of the three `Fetch` arms -- second concrete
+/// case of the identical shell, past this codebase's own established
+/// "extract on the second case" bar. `fallback_title` is what the header
+/// shows before the real name is known (loading/error), so it's never
+/// blank and never written three times.
+#[allow(clippy::too_many_arguments)]
+fn render_detail_screen<D, T>(
+    frame: &mut Frame,
+    area: Rect,
+    detail: &Fetch<D>,
+    selected: usize,
+    list_state: &mut ListState,
+    fallback_title: &str,
+    header: impl Fn(&D) -> Line<'static>,
+    items: impl Fn(&D) -> &[T],
+    label: impl Fn(&T) -> String,
+    empty_headline: &str,
+    empty_hint: Option<&str>,
+) {
+    let chunks =
+        Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(1)]).split(area);
+    match detail {
+        Fetch::NotStarted | Fetch::Loading => {
+            frame.render_widget(Paragraph::new(screen_header_line(fallback_title, None)), chunks[0]);
+            render_loading(frame, chunks[1]);
+        }
+        Fetch::Failed(e) => {
+            frame.render_widget(Paragraph::new(screen_header_line(fallback_title, None)), chunks[0]);
+            render_fetch_error(frame, chunks[1], e);
+        }
+        Fetch::Ready(d) => {
+            frame.render_widget(Paragraph::new(header(d)), chunks[0]);
+            let child_items = items(d);
+            if child_items.is_empty() {
+                render_empty_state(frame, chunks[1], empty_headline, empty_hint);
+                return;
+            }
+            let display: Vec<(usize, &T)> = child_items.iter().enumerate().collect();
+            render_display_list(frame, chunks[1], &display, selected, &label, true, list_state);
         }
     }
 }
@@ -2303,31 +2681,22 @@ fn render_artist_detail(frame: &mut Frame, app: &AppState, list_state: &mut List
         frame.render_widget(Paragraph::new("no artist selected"), area);
         return;
     };
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(area);
-    match &state.detail {
-        Fetch::NotStarted | Fetch::Loading => {
-            frame.render_widget(Paragraph::new("loading\u{2026}").style(Style::default().add_modifier(Modifier::BOLD)), chunks[0]);
-            frame.render_widget(Paragraph::new(""), chunks[1]);
-        }
-        Fetch::Failed(e) => {
-            frame.render_widget(Paragraph::new("Artist").style(Style::default().add_modifier(Modifier::BOLD)), chunks[0]);
-            render_fetch_error(frame, chunks[1], e);
-        }
-        Fetch::Ready(artist) => {
-            let genres = if artist.genres.is_empty() { String::new() } else { format!("  ({})", artist.genres.join(", ")) };
-            frame.render_widget(
-                Paragraph::new(format!("{}{genres}", artist.name)).style(Style::default().add_modifier(Modifier::BOLD)),
-                chunks[0],
-            );
-            let label = |a: &crate::api::library::SavedAlbumSummary| a.name.clone();
-            let display: Vec<(usize, &crate::api::library::SavedAlbumSummary)> =
-                artist.albums.iter().enumerate().collect();
-            render_display_list(frame, chunks[1], &display, state.selected, &label, true, list_state);
-        }
-    }
+    render_detail_screen(
+        frame,
+        area,
+        &state.detail,
+        state.selected,
+        list_state,
+        "Artist",
+        |artist: &crate::api::artist::ArtistDetail| {
+            let genres = (!artist.genres.is_empty()).then(|| artist.genres.join(", "));
+            screen_header_line(&artist.name, genres.as_deref())
+        },
+        |artist: &crate::api::artist::ArtistDetail| artist.albums.as_slice(),
+        |a: &crate::api::library::SavedAlbumSummary| a.name.clone(),
+        "no albums for this artist",
+        None,
+    );
 }
 
 /// Album Detail (Phase 9): name + artist in the header, the track list
@@ -2339,30 +2708,26 @@ fn render_album_detail(frame: &mut Frame, app: &AppState, list_state: &mut ListS
         frame.render_widget(Paragraph::new("no album selected"), area);
         return;
     };
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(area);
-    match &state.detail {
-        Fetch::NotStarted | Fetch::Loading => {
-            frame.render_widget(Paragraph::new("loading\u{2026}").style(Style::default().add_modifier(Modifier::BOLD)), chunks[0]);
-            frame.render_widget(Paragraph::new(""), chunks[1]);
-        }
-        Fetch::Failed(e) => {
-            frame.render_widget(Paragraph::new("Album").style(Style::default().add_modifier(Modifier::BOLD)), chunks[0]);
-            render_fetch_error(frame, chunks[1], e);
-        }
-        Fetch::Ready(album) => {
-            frame.render_widget(
-                Paragraph::new(format!("{}  \u{2014}  {} (v: view artist)", album.name, album.artist))
-                    .style(Style::default().add_modifier(Modifier::BOLD)),
-                chunks[0],
-            );
-            let label = |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title);
-            let display: Vec<(usize, &TrackResult)> = album.tracks.iter().enumerate().collect();
-            render_display_list(frame, chunks[1], &display, state.selected, &label, true, list_state);
-        }
-    }
+    render_detail_screen(
+        frame,
+        area,
+        &state.detail,
+        state.selected,
+        list_state,
+        "Album",
+        |album: &crate::api::album::AlbumDetail| {
+            // Single-space em dash, matching every track label in the
+            // app (including this same screen's own list) -- the
+            // previous double-padded "  --  " was the only one of its
+            // kind in the file.
+            let meta = format!("\u{2014} {} \u{00b7} {} tracks \u{00b7} v view artist", album.artist, album.tracks.len());
+            screen_header_line(&album.name, Some(&meta))
+        },
+        |album: &crate::api::album::AlbumDetail| album.tracks.as_slice(),
+        |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title),
+        "no tracks on this album",
+        None,
+    );
 }
 
 /// Renders one of the 4 uniform fetched-list screens (Liked Songs, Saved
@@ -2389,7 +2754,7 @@ fn render_list_screen<T>(
     );
     match fetch {
         Fetch::NotStarted | Fetch::Loading => {
-            frame.render_widget(Paragraph::new("loading\u{2026}"), chunks[1]);
+            render_loading(frame, chunks[1]);
         }
         Fetch::Failed(e) => {
             render_fetch_error(frame, chunks[1], e);
@@ -2409,6 +2774,60 @@ fn render_list_screen<T>(
     }
 }
 
+/// Renders `query` with a block cursor sitting at char index `cursor` --
+/// the app's one real text-input convention. Previously open-coded
+/// separately at every call site (`filter_header`, Search's own query
+/// line, the text-prompt overlay); the playlist-picker and quick-jump
+/// overlays skipped this entirely and drew a trailing-only cursor, which
+/// actively lied -- both already support real `Left`/`Right` cursor
+/// movement in their key handlers.
+fn cursor_text(query: &str, cursor: usize) -> String {
+    let byte_pos = query.char_indices().nth(cursor).map(|(b, _)| b).unwrap_or(query.len());
+    let (before, after) = query.split_at(byte_pos);
+    format!("{before}\u{2588}{after}")
+}
+
+#[cfg(test)]
+mod cursor_text_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_at_zero_leads() {
+        assert_eq!(cursor_text("hello", 0), "\u{2588}hello");
+    }
+
+    #[test]
+    fn cursor_mid_string_splits_there() {
+        assert_eq!(cursor_text("hello", 2), "he\u{2588}llo");
+    }
+
+    #[test]
+    fn cursor_past_the_end_trails() {
+        assert_eq!(cursor_text("hello", 99), "hello\u{2588}");
+    }
+
+    #[test]
+    fn char_boundary_safe_on_multibyte_text() {
+        // Same real fixture the SearchState cursor tests already use --
+        // chars are 0:友 1:人 2:A 3:君, so cursor=2 sits immediately
+        // before 'A', not mid-codepoint.
+        assert_eq!(cursor_text("\u{53cb}\u{4eba}A\u{541b}", 2), "\u{53cb}\u{4eba}\u{2588}A\u{541b}");
+    }
+}
+
+/// The app's screen-header row: title bold, an optional secondary fact
+/// demoted beside it in `DIM` -- replaces screens that were cramming key
+/// hints or extra facts into the title string at equal visual weight
+/// (Devices' "(Enter: transfer, r: refresh)", Album Detail's "(v: view
+/// artist)").
+fn screen_header_line(title: &str, meta: Option<&str>) -> Line<'static> {
+    let mut spans = vec![Span::styled(title.to_string(), Style::default().add_modifier(Modifier::BOLD))];
+    if let Some(meta) = meta {
+        spans.push(Span::styled(format!("  {meta}"), Style::default().fg(DIM)));
+    }
+    Line::from(spans)
+}
+
 /// `/` (start typing a filter) shows the live query with a cursor, same
 /// convention as the global Search screen's own query line. Otherwise
 /// shows whatever filter/sort is currently applied, if any.
@@ -2416,14 +2835,7 @@ fn filter_header(title: &str, filter: &ListFilter) -> String {
     if filter.editing {
         // Cursor renders at its real position, same as Search's own
         // query line -- Left/Right move it mid-string here too.
-        let byte_pos = filter
-            .query
-            .char_indices()
-            .nth(filter.cursor)
-            .map(|(b, _)| b)
-            .unwrap_or(filter.query.len());
-        let (before, after) = filter.query.split_at(byte_pos);
-        format!("{title}  /{before}\u{2588}{after}")
+        format!("{title}  /{}", cursor_text(&filter.query, filter.cursor))
     } else if !filter.query.is_empty() || filter.sort_alpha {
         let mut parts = Vec::new();
         if !filter.query.is_empty() {
@@ -2438,25 +2850,35 @@ fn filter_header(title: &str, filter: &ListFilter) -> String {
     }
 }
 
-fn render_display_list<T>(
+/// Same contract as `render_display_list`, but rows arrive as `Line`s
+/// instead of a plain label string -- lets a screen color one span (a
+/// pin/playing/moving marker) independently of whether that row happens
+/// to be selected. Ratatui patches an explicitly-styled span's own color
+/// over the row's base style per-cell, so a marker span with its own
+/// `.fg(...)` keeps that color even on a selected (ACCENT+BOLD) row,
+/// while any unstyled span in the same line still follows selection
+/// normally. This is what makes Devices' active-device marker and
+/// move-mode's moving-row arrow possible without changing
+/// `render_display_list`'s own signature or its 9 existing callers.
+fn render_display_list_lines<T>(
     frame: &mut Frame,
     area: Rect,
     display: &[(usize, &T)],
     selected: usize,
-    label: &impl Fn(&T) -> String,
+    line: &impl Fn(&T) -> Line<'static>,
     filter_empty: bool,
     list_state: &mut ListState,
 ) {
     if display.is_empty() {
-        let msg = if filter_empty { "(empty)" } else { "(no matches)" };
-        frame.render_widget(Paragraph::new(msg), area);
+        let msg = if filter_empty { "nothing here yet" } else { "no matches" };
+        render_empty_state(frame, area, msg, None);
         return;
     }
     let list_items: Vec<ListItem> = display
         .iter()
         .enumerate()
         .map(|(i, (_, it))| {
-            let text = label(it);
+            let text = line(it);
             if i == selected {
                 ListItem::new(text).style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
             } else {
@@ -2473,13 +2895,25 @@ fn render_display_list<T>(
     frame.render_stateful_widget(List::new(list_items), area, list_state);
 }
 
+fn render_display_list<T>(
+    frame: &mut Frame,
+    area: Rect,
+    display: &[(usize, &T)],
+    selected: usize,
+    label: &impl Fn(&T) -> String,
+    filter_empty: bool,
+    list_state: &mut ListState,
+) {
+    render_display_list_lines(frame, area, display, selected, &|it: &T| Line::from(label(it)), filter_empty, list_state);
+}
+
 fn render_sidebar(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
     let rows = sidebar_rows(app);
     let mut items: Vec<ListItem> = Vec::with_capacity(rows.len() + 1);
     let mut saw_playlists_header = false;
     for (i, row) in rows.iter().enumerate() {
         if matches!(row, SidebarRow::Playlist(_)) && !saw_playlists_header {
-            items.push(ListItem::new("PLAYLISTS").style(Style::default().fg(Color::DarkGray)));
+            items.push(ListItem::new("PLAYLISTS").style(Style::default().fg(DIM)));
             saw_playlists_header = true;
         }
         // "Is this what's currently showing in Main" -- checked against
@@ -2537,7 +2971,7 @@ fn focus_border_style(active: bool) -> Style {
     if active {
         Style::default().fg(ACCENT)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(DIM)
     }
 }
 
@@ -2557,16 +2991,37 @@ fn render_playbar(frame: &mut Frame, app: &AppState, area: Rect) {
 }
 
 fn render_status(frame: &mut Frame, app: &AppState, area: Rect) {
+    // Move mode's key hints live here, not in the header row (which is
+    // `Constraint::Length(1)` with no wrap, so the old placement was
+    // already silently truncated on a narrow terminal) -- checked before
+    // `app.status` since both `Enter`/`Esc` in move mode already call
+    // `pd.move_mode.take()` before dispatching a reorder, so no mutation
+    // result can ever land while this branch would also be showing.
+    if *app.nav.top() == Screen::PlaylistDetail
+        && app.playlist_detail.as_ref().is_some_and(|pd| pd.move_mode.is_some())
+    {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("MOVE MODE", Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "  \u{2191}/\u{2193} relocate, Enter confirm, Esc cancel",
+                    Style::default().fg(DIM),
+                ),
+            ])),
+            area,
+        );
+        return;
+    }
     // A Phase 5 mutation's result (success or failure) takes over this
     // line until the next keypress, same lifetime a status line
     // conventionally gets -- the depth readout resumes once it's gone.
     if let Some((message, is_error)) = &app.status {
-        let color = if *is_error { Color::Red } else { ACCENT };
+        let color = if *is_error { DANGER } else { ACCENT };
         frame.render_widget(Paragraph::new(message.clone()).style(Style::default().fg(color)), area);
         return;
     }
     let text = format!("stack depth {} \u{2014} Tab switch pane, Esc back", app.nav.depth());
-    frame.render_widget(Paragraph::new(text).style(Style::default().fg(Color::DarkGray)), area);
+    frame.render_widget(Paragraph::new(text).style(Style::default().fg(DIM)), area);
 }
 
 fn render_search(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
@@ -2577,29 +3032,25 @@ fn render_search(frame: &mut Frame, app: &AppState, list_state: &mut ListState, 
 
     // Cursor renders at its real position, not always trailing -- Left/Right
     // now move it mid-string (arrow-key editing, reported live as missing).
-    let byte_pos = app
-        .search
-        .query
-        .char_indices()
-        .nth(app.search.cursor)
-        .map(|(b, _)| b)
-        .unwrap_or(app.search.query.len());
-    let (before, after) = app.search.query.split_at(byte_pos);
-    let query_line = format!("/ {before}\u{2588}{after}");
+    let query_line = format!("/ {}", cursor_text(&app.search.query, app.search.cursor));
     frame.render_widget(
         Paragraph::new(query_line).block(Block::default().borders(Borders::ALL).title("search")),
         chunks[0],
     );
 
-    let body = if app.search.searching {
-        vec![Line::from("searching\u{2026}")]
-    } else if let Some(err) = &app.search.error {
-        vec![Line::from(format!("search failed: {err}"))]
-    } else if app.search.results.is_empty() {
-        vec![Line::from(if !app.search.client_ready {
-            "search not ready yet (loading Spotify auth\u{2026})".to_string()
+    if app.search.searching {
+        render_loading(frame, chunks[1]);
+        return;
+    }
+    if let Some(err) = &app.search.error {
+        render_fetch_error(frame, chunks[1], err);
+        return;
+    }
+    if app.search.results.is_empty() {
+        let headline = if !app.search.client_ready {
+            "search not ready yet (loading Spotify auth\u{2026})"
         } else if app.search.query.is_empty() {
-            "type a query, then Enter to search, Esc to cancel".to_string()
+            "type a query, then Enter to search, Esc to cancel"
         } else {
             // Distinct from the empty-query message on purpose: this is
             // the state reported live as "have to click enter first and
@@ -2607,14 +3058,9 @@ fn render_search(frame: &mut Frame, app: &AppState, list_state: &mut ListState, 
             // (there's a real Web API call to make, not a local list to
             // narrow) rather than leaving it looking broken or identical
             // to having typed nothing at all.
-            "press Enter to search \u{2014} this hits Spotify directly, not a live filter like Library's /".to_string()
-        })]
-    } else {
-        vec![]
-    };
-
-    if !body.is_empty() {
-        frame.render_widget(Paragraph::new(body), chunks[1]);
+            "press Enter to search \u{2014} this hits Spotify directly, not a live filter like Library's /"
+        };
+        render_empty_state(frame, chunks[1], headline, None);
         return;
     }
 
@@ -2672,7 +3118,7 @@ fn progress_ratio(app: &AppState) -> f64 {
 
 fn progress_gauge(app: &AppState) -> Gauge<'static> {
     let color = if app.playing == Some(false) {
-        Color::DarkGray // frozen/paused reads as visually "asleep"
+        DIM // frozen/paused reads as visually "asleep"
     } else {
         ACCENT
     };
@@ -2687,7 +3133,7 @@ fn progress_gauge(app: &AppState) -> Gauge<'static> {
 /// ends. The border always outlines the full capsule regardless of how
 /// little of it is filled.
 fn progress_gauge_bordered(app: &AppState) -> Gauge<'static> {
-    progress_gauge(app).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)))
+    progress_gauge(app).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(DIM)))
 }
 
 fn body_lines(app: &AppState) -> Vec<Line<'static>> {
@@ -2756,7 +3202,7 @@ fn lyric_tier_color(distance: usize) -> Color {
         0 => ACCENT,
         1 => Color::White,
         2..=3 => Color::Gray,
-        _ => Color::DarkGray,
+        _ => DIM,
     }
 }
 
@@ -3286,10 +3732,17 @@ mod cover_crop_tests {
 /// terminal, no cover fetched yet for this track, or the fetch/decode
 /// itself failing.
 fn render_art(frame: &mut Frame, app: &AppState, images: &mut ImageState, artist: &str, album: &str, area: Rect) {
+    if let Some(deadline) = images.startup_retransmit_at
+        && std::time::Instant::now() >= deadline
+    {
+        images.startup_retransmit_at = None;
+        images.startup_retransmit_done = true;
+        images.sized_covers.clear();
+    }
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray));
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(DIM));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
@@ -3357,6 +3810,12 @@ fn render_art(frame: &mut Frame, app: &AppState, images: &mut ImageState, artist
             }
             let built = picker.new_resize_protocol(image);
             images.sized_covers.push((uri, inner.width, inner.height, built));
+            // Arms only off this process's very first-ever cache build,
+            // never again -- see `ImageState::startup_retransmit_at`'s
+            // own doc comment for the full reasoning.
+            if images.startup_retransmit_at.is_none() && !images.startup_retransmit_done {
+                images.startup_retransmit_at = Some(std::time::Instant::now() + STARTUP_RETRANSMIT_DELAY);
+            }
             &mut images.sized_covers.last_mut().unwrap().3
         };
 
@@ -3565,13 +4024,13 @@ fn render_now_playing_hero(
     };
     frame.render_widget(
         Paragraph::new(truncate_ellipsis(&artist_album, meta_area.width as usize))
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(DIM)),
         meta_chunks[2],
     );
     if let Some(label) = &app.context_label {
         frame.render_widget(
             Paragraph::new(truncate_ellipsis(&format!("Playing from {label}"), meta_area.width as usize))
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(DIM)),
             meta_chunks[3],
         );
     }
@@ -3767,14 +4226,14 @@ fn render_fullscreen_hero(
     frame.render_widget(
         Paragraph::new(truncate_ellipsis(&artist_album, cols[0].width as usize))
             .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(DIM)),
         side_rows[4],
     );
     if let Some(label) = &app.context_label {
         frame.render_widget(
             Paragraph::new(truncate_ellipsis(&format!("Playing from {label}"), cols[0].width as usize))
                 .alignment(Alignment::Center)
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(DIM)),
             side_rows[5],
         );
     }
@@ -3964,14 +4423,14 @@ fn render_fullscreen_hero_stacked(
     frame.render_widget(
         Paragraph::new(truncate_ellipsis(&artist_album, meta_area.width as usize))
             .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(DIM)),
         meta_chunks[2],
     );
     if let Some(label) = &app.context_label {
         frame.render_widget(
             Paragraph::new(truncate_ellipsis(&format!("Playing from {label}"), meta_area.width as usize))
                 .alignment(Alignment::Center)
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(DIM)),
             meta_chunks[3],
         );
     }

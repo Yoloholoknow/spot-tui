@@ -394,6 +394,77 @@ pub fn move_item_down<T>(items: &mut [T], selected: usize) -> usize {
     selected + 1
 }
 
+/// Repeat as the three states a person actually cycles through (off /
+/// the whole album or playlist / this one song), collapsed from the
+/// player's two independent booleans (`repeating_context`,
+/// `repeating_track`) -- four flag combinations, but only three of them
+/// mean anything different to a listener.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RepeatMode {
+    #[default]
+    Off,
+    Context,
+    Track,
+}
+
+impl RepeatMode {
+    /// The track flag wins: repeat-one is on whenever it's set, whether or
+    /// not the context flag came along with it.
+    pub fn from_flags(context: bool, track: bool) -> Self {
+        if track {
+            RepeatMode::Track
+        } else if context {
+            RepeatMode::Context
+        } else {
+            RepeatMode::Off
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            RepeatMode::Off => RepeatMode::Context,
+            RepeatMode::Context => RepeatMode::Track,
+            RepeatMode::Track => RepeatMode::Off,
+        }
+    }
+
+    /// `(repeat context, repeat track)`. Repeat-one sets both, matching how
+    /// Spotify's own clients report it.
+    pub fn flags(self) -> (bool, bool) {
+        match self {
+            RepeatMode::Off => (false, false),
+            RepeatMode::Context => (true, false),
+            RepeatMode::Track => (true, true),
+        }
+    }
+
+    pub fn status_label(self) -> &'static str {
+        match self {
+            RepeatMode::Off => "off",
+            RepeatMode::Context => "album/playlist",
+            RepeatMode::Track => "this song",
+        }
+    }
+}
+
+/// The playbar's always-visible shuffle and repeat toggles, as Spotify
+/// shows them: both glyphs are drawn in every state, and the `bool` says
+/// whether that one is currently on (accent) or off (dim) -- the caller
+/// does the coloring. Repeat's slot is a fixed two cells wide (`↻ ` for off
+/// and album/playlist, `↻1` for this song) so the readout never changes
+/// width and the track title's truncation point doesn't jump around as
+/// modes change.
+pub fn playback_modes(shuffle: bool, repeat: RepeatMode) -> [(&'static str, bool); 2] {
+    let repeat_glyph = match repeat {
+        RepeatMode::Track => "\u{21bb}1",
+        RepeatMode::Off | RepeatMode::Context => "\u{21bb} ",
+    };
+    [("\u{21c4}", shuffle), (repeat_glyph, repeat != RepeatMode::Off)]
+}
+
+/// Cells `playback_modes` always occupies: shuffle (1), a space, repeat (2).
+const PLAYBACK_MODES_WIDTH: usize = 4;
+
 /// Validates a typed 1-based "move to position" answer against a list of
 /// `len` items and returns the 0-based index to splice to. Positions are
 /// 1-based on purpose -- that's how the list reads on screen and how a
@@ -1413,6 +1484,13 @@ pub struct AppState {
     /// using and don't touch this field, so it correctly persists across
     /// a skip and only changes on the next deliberate play action.
     pub context_label: Option<String>,
+    /// Kept in step with the player via `ShuffleChanged`/`RepeatChanged`
+    /// events (which librespot also emits once at connect with the real
+    /// resumed state, and when another device changes them), plus an
+    /// optimistic update at the keypress so a quick second press cycles
+    /// from the state just requested rather than a stale one.
+    pub shuffle: bool,
+    pub repeat: RepeatMode,
     pub lyrics: LyricsState,
     pub current_line: Option<usize>,
     pub fullscreen: bool,
@@ -2114,6 +2192,11 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             (
                 "Ctrl+P",
                 "quick jump -- search any playlist/liked track/artist/album/device/screen by name and jump straight to it (works even mid-query on Search; press again to close)",
+            ),
+            ("z", "shuffle on / off -- works from any screen (not while typing in Search or a filter)"),
+            (
+                "Shift+R",
+                "cycle repeat: off, then the whole album/playlist, then this one song, then off. The playbar always shows \u{21c4} (shuffle) and \u{21bb} (repeat, \u{21bb}1 for this song) -- bright when on, dim when off",
             ),
         ],
     ),
@@ -3036,17 +3119,104 @@ fn focus_border_style(active: bool) -> Style {
     }
 }
 
+#[cfg(test)]
+mod repeat_mode_tests {
+    use super::*;
+
+    #[test]
+    fn flags_map_to_the_mode_the_player_is_really_in() {
+        assert_eq!(RepeatMode::from_flags(false, false), RepeatMode::Off);
+        assert_eq!(RepeatMode::from_flags(true, false), RepeatMode::Context);
+        assert_eq!(RepeatMode::from_flags(true, true), RepeatMode::Track);
+    }
+
+    #[test]
+    fn a_track_flag_alone_still_means_repeat_song() {
+        // Another device (or a mid-toggle event) can report the track flag
+        // without the context flag; the track flag wins either way.
+        assert_eq!(RepeatMode::from_flags(false, true), RepeatMode::Track);
+    }
+
+    #[test]
+    fn next_cycles_off_album_song_off() {
+        assert_eq!(RepeatMode::Off.next(), RepeatMode::Context);
+        assert_eq!(RepeatMode::Context.next(), RepeatMode::Track);
+        assert_eq!(RepeatMode::Track.next(), RepeatMode::Off);
+    }
+
+    #[test]
+    fn each_mode_survives_a_round_trip_through_its_own_flags() {
+        for mode in [RepeatMode::Off, RepeatMode::Context, RepeatMode::Track] {
+            let (context, track) = mode.flags();
+            assert_eq!(RepeatMode::from_flags(context, track), mode);
+        }
+    }
+}
+
+#[cfg(test)]
+mod playback_modes_tests {
+    use super::*;
+
+    #[test]
+    fn both_glyphs_are_always_present_even_with_everything_off() {
+        let [shuffle, repeat] = playback_modes(false, RepeatMode::Off);
+        assert_eq!(shuffle, ("\u{21c4}", false));
+        assert_eq!(repeat, ("\u{21bb} ", false));
+    }
+
+    #[test]
+    fn shuffle_lights_up_on_its_own() {
+        let [shuffle, repeat] = playback_modes(true, RepeatMode::Off);
+        assert!(shuffle.1);
+        assert!(!repeat.1);
+    }
+
+    #[test]
+    fn repeat_album_and_repeat_song_are_both_active_but_only_song_gets_the_one() {
+        let [_, context] = playback_modes(false, RepeatMode::Context);
+        let [_, track] = playback_modes(false, RepeatMode::Track);
+        assert_eq!(context, ("\u{21bb} ", true));
+        assert_eq!(track, ("\u{21bb}1", true));
+    }
+
+    #[test]
+    fn the_readout_is_the_same_width_in_every_state() {
+        // A fixed-width readout is what lets the playbar reserve its room
+        // once -- otherwise the track title's truncation point would jump
+        // every time shuffle or repeat changed.
+        let width = |shuffle, repeat| {
+            playback_modes(shuffle, repeat).iter().map(|(text, _)| text.chars().count()).sum::<usize>()
+        };
+        let expected = width(false, RepeatMode::Off);
+        for shuffle in [false, true] {
+            for repeat in [RepeatMode::Off, RepeatMode::Context, RepeatMode::Track] {
+                assert_eq!(width(shuffle, repeat), expected, "shuffle={shuffle} repeat={repeat:?}");
+            }
+        }
+    }
+}
+
 fn render_playbar(frame: &mut Frame, app: &AppState, area: Rect) {
-    let title_room = (area.width as usize).saturating_sub(28);
-    let text = format!(
-        "{} {}   {}   {}",
-        playing_icon(app),
-        header(app, title_room),
-        time_readout(app),
-        volume_readout(app),
-    );
+    // 28 is the room the icon, time, and volume readouts already need; the
+    // always-present shuffle/repeat toggles (plus their 3-space gap) come
+    // out of the title's share.
+    let title_room = (area.width as usize).saturating_sub(28 + 3 + PLAYBACK_MODES_WIDTH);
+    let [shuffle, repeat] = playback_modes(app.shuffle, app.repeat);
+    let toggle_style = |on: bool| Style::default().fg(if on { ACCENT } else { DIM });
+    let spans = vec![
+        Span::raw(format!(
+            "{} {}   {}   {}   ",
+            playing_icon(app),
+            header(app, title_room),
+            time_readout(app),
+            volume_readout(app),
+        )),
+        Span::styled(shuffle.0, toggle_style(shuffle.1)),
+        Span::raw(" "),
+        Span::styled(repeat.0, toggle_style(repeat.1)),
+    ];
     frame.render_widget(
-        Paragraph::new(text).block(Block::default().borders(Borders::TOP)),
+        Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::TOP)),
         area,
     );
 }

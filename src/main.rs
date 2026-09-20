@@ -32,7 +32,8 @@ use api::search::TrackResult;
 use ui::{
     filtered_sorted, pinned_first, quick_jump_entries, AlbumDetailState, AppState, ArtistDetailState, ConfirmAction,
     Fetch, Focus, LibraryState, ListFilter, LyricsState, Nav, PendingConfirm, PlaylistDetailState, PlaylistPicker,
-    QuickJump, QuickJumpEntry, QuickJumpKind, Screen, SearchState, TextPrompt, TextPromptAction, LIBRARY_ENTRIES,
+    QuickJump, QuickJumpEntry, QuickJumpKind, RepeatMode, Screen, SearchState, TextPrompt, TextPromptAction,
+    LIBRARY_ENTRIES,
 };
 
 enum LibraryFetchResult {
@@ -659,6 +660,62 @@ fn handle_confirm_key(
     }
 }
 
+/// Whether a printable key is about to be typed into a text field right
+/// now -- Search's query box, or a list's `/` filter -- so a global letter
+/// binding (shuffle) has to stay out of the way. Scoped to the screen
+/// that's actually on top with focus in Main, not just "any filter's
+/// `editing` flag is set": `Tab` moves focus to the Sidebar without
+/// clearing a filter that was mid-edit, and a stale flag would otherwise
+/// leave the key silently dead until that filter got an `Esc`.
+fn text_input_active(app: &AppState) -> bool {
+    if app.nav.focus != Focus::Main {
+        return false;
+    }
+    match *app.nav.top() {
+        Screen::Search => true,
+        Screen::LikedSongs => app.library.liked_songs_filter.editing,
+        Screen::SavedAlbums => app.library.saved_albums_filter.editing,
+        Screen::FollowedArtists => app.library.followed_artists_filter.editing,
+        Screen::YourPlaylists => app.library.playlists_filter.editing,
+        Screen::PlaylistDetail => app.playlist_detail.as_ref().is_some_and(|pd| pd.filter.editing),
+        _ => false,
+    }
+}
+
+/// `z`: shuffle off <-> on. The player is the source of truth (its
+/// `ShuffleChanged` event lands in `app.shuffle` and drives the playbar),
+/// but the flag is also set here so a quick second press toggles back from
+/// what was just requested instead of a not-yet-updated value. Note
+/// librespot emits that event with the *requested* value before it
+/// validates the change, so a toggle the current context disallows (its
+/// restrictions can forbid shuffling) would still read as on here while
+/// the player quietly refuses -- a real librespot quirk, not something
+/// this app can detect from its side.
+fn toggle_shuffle(app: &mut AppState, spirc: &Spirc) {
+    let target = !app.shuffle;
+    match spirc.shuffle(target) {
+        Ok(()) => {
+            app.shuffle = target;
+            app.status = Some((format!("shuffle {}", if target { "on" } else { "off" }), false));
+        }
+        Err(e) => app.status = Some((format!("couldn't change shuffle: {e}"), true)),
+    }
+}
+
+/// `Shift+R`: repeat off -> album/playlist -> this song -> off. The player
+/// keeps repeat as two independent flags, so each step sets both.
+fn cycle_repeat(app: &mut AppState, spirc: &Spirc) {
+    let next = app.repeat.next();
+    let (context, track) = next.flags();
+    match spirc.repeat(context).and_then(|()| spirc.repeat_track(track)) {
+        Ok(()) => {
+            app.repeat = next;
+            app.status = Some((format!("repeat {}", next.status_label()), false));
+        }
+        Err(e) => app.status = Some((format!("couldn't change repeat: {e}"), true)),
+    }
+}
+
 /// Appends `track_uri` to the playback queue. Shared by every screen with
 /// a selected track (Liked Songs, Playlist Detail, Album Detail, Search) --
 /// four identical spawn-then-report bodies otherwise. Fires immediately with
@@ -1121,6 +1178,12 @@ fn drain_player_events(
         if let PlayerEvent::VolumeChanged { volume } = &event {
             app.volume = *volume;
         }
+        if let PlayerEvent::ShuffleChanged { shuffle } = &event {
+            app.shuffle = *shuffle;
+        }
+        if let PlayerEvent::RepeatChanged { context, track } = &event {
+            app.repeat = RepeatMode::from_flags(*context, *track);
+        }
 
         if let PlayerEvent::TrackChanged { audio_item } = &event {
             let (artist, album) = match &audio_item.unique_fields {
@@ -1421,6 +1484,8 @@ async fn main() -> std::io::Result<()> {
         track_album: None,
         current_track_uri: None,
         context_label: None,
+        shuffle: false,
+        repeat: RepeatMode::Off,
         lyrics: LyricsState::Idle,
         current_line: None,
         fullscreen: false,
@@ -2116,6 +2181,22 @@ async fn main() -> std::io::Result<()> {
                         refetch_devices(&mut app, &library_tx, &spotify_client);
                     }
                     app.quick_jump = Some(QuickJump { filter: ListFilter::default(), selected: 0 });
+                // Shuffle and repeat are global, so they live here in the one
+                // top-level chain instead of being copied into every screen's
+                // own arm the way space/n/p/+/- were (about twenty copies).
+                // The guard is what makes that safe: while a text field owns
+                // the keyboard, `z` is just a letter. Ctrl/Alt are excluded
+                // so Ctrl+Z (or an Alt+Z chord) isn't mistaken for it.
+                } else if key.code == KeyCode::Char('z')
+                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && !text_input_active(&app)
+                {
+                    toggle_shuffle(&mut app, &spirc);
+                // `Shift+R` via `is_shift_char`, like every other Shift+letter
+                // here (some terminals report it as lowercase-plus-SHIFT). Plain
+                // `r` is untouched -- it still means rename/refresh per screen.
+                } else if is_shift_char(key.code, key.modifiers, 'R', 'r') && !text_input_active(&app) {
+                    cycle_repeat(&mut app, &spirc);
                 // `q` asks first, same as every other destructive action,
                 // when enabled (default on; `confirm_quit = false` in
                 // config.toml restores the old immediate-quit behavior).

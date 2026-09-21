@@ -1372,12 +1372,13 @@ fn romanize_status(on: bool, lyrics: &LyricsState) -> String {
     if !on {
         return "romanized lyrics off".to_string();
     }
+    let no_cjk = "romanized lyrics on (this track has no Japanese, Chinese or Korean lyrics)";
     match lyrics {
         LyricsState::Synced(lines) if romanize::sheet_has_cjk(lines) => "romanized lyrics on".to_string(),
-        LyricsState::Synced(_) => {
-            "romanized lyrics on (this track has no Japanese, Chinese or Korean lyrics)".to_string()
-        }
-        _ => "romanized lyrics on (needs synced lyrics)".to_string(),
+        LyricsState::Plain(text) if romanize::has_cjk(text) => "romanized lyrics on".to_string(),
+        LyricsState::Synced(_) | LyricsState::Plain(_) => no_cjk.to_string(),
+        LyricsState::Loading => "romanized lyrics on (applies when the lyrics load)".to_string(),
+        _ => "romanized lyrics on (no lyrics to romanize)".to_string(),
     }
 }
 
@@ -1394,17 +1395,25 @@ fn request_romanization(
     if !app.romanize_lyrics || app.romanized_lines.is_some() || *requested == Some(generation) {
         return;
     }
-    let LyricsState::Synced(lines) = &app.lyrics else {
-        return;
-    };
-    if !romanize::sheet_has_cjk(lines) {
-        return;
+    let tx = tx.clone();
+    match &app.lyrics {
+        LyricsState::Synced(lines) if romanize::sheet_has_cjk(lines) => {
+            *requested = Some(generation);
+            let lines = lines.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send((generation, romanize::romanize_lyric_lines(&lines)));
+            });
+        }
+        // Unsynced lyrics romanize the same way, one entry per text line.
+        LyricsState::Plain(text) if romanize::has_cjk(text) => {
+            *requested = Some(generation);
+            let text = text.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send((generation, romanize::romanize_plain_lines(&text)));
+            });
+        }
+        _ => {}
     }
-    *requested = Some(generation);
-    let (lines, tx) = (lines.clone(), tx.clone());
-    std::thread::spawn(move || {
-        let _ = tx.send((generation, romanize::romanize_lyric_lines(&lines)));
-    });
 }
 
 fn to_lyrics_state(cached: CachedLyrics) -> LyricsState {
@@ -4570,9 +4579,25 @@ mod romanize_status_tests {
     }
 
     #[test]
-    fn unsynced_or_missing_lyrics_say_that_synced_lyrics_are_needed() {
-        for lyrics in [LyricsState::Loading, LyricsState::Plain("x".to_string()), LyricsState::NotFound, LyricsState::Idle] {
-            assert!(romanize_status(true, &lyrics).contains("needs synced lyrics"));
+    fn unsynced_lyrics_with_cjk_romanize_just_like_synced_ones() {
+        assert_eq!(romanize_status(true, &LyricsState::Plain("\u{541b}\nStay".to_string())), "romanized lyrics on");
+    }
+
+    #[test]
+    fn unsynced_lyrics_without_cjk_say_there_is_nothing_to_romanize() {
+        let status = romanize_status(true, &LyricsState::Plain("Stay in the middle".to_string()));
+        assert!(status.contains("no Japanese, Chinese or Korean"), "{status}");
+    }
+
+    #[test]
+    fn lyrics_still_loading_say_it_will_apply_when_they_arrive() {
+        assert!(romanize_status(true, &LyricsState::Loading).contains("applies when the lyrics load"));
+    }
+
+    #[test]
+    fn no_lyrics_at_all_says_there_is_nothing_to_romanize() {
+        for lyrics in [LyricsState::NotFound, LyricsState::Idle, LyricsState::Instrumental] {
+            assert!(romanize_status(true, &lyrics).contains("no lyrics to romanize"));
         }
     }
 }

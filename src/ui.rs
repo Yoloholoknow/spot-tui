@@ -1549,6 +1549,10 @@ pub struct AppState {
     pub smart_shuffle: bool,
     pub repeat: RepeatMode,
     pub lyrics: LyricsState,
+    /// "Where these lyrics came from" (e.g. `Apple Music via Spicy Lyrics`),
+    /// shown dim under the lyrics. `Some` only for a result whose source
+    /// asks to be credited; cleared with `lyrics` on every track change.
+    pub lyrics_credit: Option<String>,
     pub current_line: Option<usize>,
     pub fullscreen: bool,
     /// `None` = no track loaded yet (device is connected regardless --
@@ -4400,9 +4404,10 @@ fn render_now_playing_hero(
     frame.render_widget(progress_gauge_bordered(app), gauge_area);
 
     frame.render_widget(Block::default().borders(Borders::TOP), outer[1]);
+    let lyrics_area = render_lyrics_credit(frame, app, outer[2], Alignment::Left);
     let lines = body_lines(app);
-    let offset = top_anchored_offset(&lines, current_body_line_row(app), outer[2].height, outer[2].width);
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }).scroll((offset, 0)), outer[2]);
+    let offset = top_anchored_offset(&lines, current_body_line_row(app), lyrics_area.height, lyrics_area.width);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }).scroll((offset, 0)), lyrics_area);
 }
 
 fn render_fullscreen(frame: &mut Frame, app: &AppState, images: &mut ImageState) {
@@ -4615,6 +4620,29 @@ fn render_fullscreen_hero(
     render_fullscreen_lyrics(frame, app, lyrics_area, Alignment::Left);
 }
 
+/// Splits off the last row of a lyrics pane for the credit line. Fewer than
+/// three rows and the credit gives way instead: two rows of lyrics is the
+/// least worth keeping.
+fn credit_split(area: Rect, has_credit: bool) -> (Rect, Option<Rect>) {
+    if !has_credit || area.height < 3 {
+        return (area, None);
+    }
+    let lyrics = Rect { height: area.height - 1, ..area };
+    let credit = Rect { y: area.y + area.height - 1, height: 1, ..area };
+    (lyrics, Some(credit))
+}
+
+/// Draws the dim "where these lyrics came from" line (when there is one)
+/// and returns the area left for the lyrics themselves.
+fn render_lyrics_credit(frame: &mut Frame, app: &AppState, area: Rect, alignment: Alignment) -> Rect {
+    let (lyrics, credit_area) = credit_split(area, app.lyrics_credit.is_some());
+    if let (Some(credit_area), Some(credit)) = (credit_area, app.lyrics_credit.as_deref()) {
+        let text = truncate_ellipsis(credit, credit_area.width as usize);
+        frame.render_widget(Paragraph::new(text).style(Style::default().fg(DIM)).alignment(alignment), credit_area);
+    }
+    lyrics
+}
+
 // Six attempts at "bigger" here, in order -- see git history for each
 // one's full detail. First: `tui-big-text` enlarged only the current
 // line, jarringly inconsistent next to its normal-size neighbors.
@@ -4650,6 +4678,7 @@ fn render_fullscreen_hero(
 // investment Phase 11 already tracks for album art specifically, not
 // attempted here without discussing that scope and cost first.
 fn render_fullscreen_lyrics(frame: &mut Frame, app: &AppState, area: Rect, alignment: Alignment) {
+    let area = render_lyrics_credit(frame, app, area, alignment);
     let (lines, offset) =
         center_current_line(bold_lines(body_lines(app)), current_body_line_row(app), area.height, area.width);
     frame.render_widget(
@@ -4801,4 +4830,42 @@ fn render_fullscreen_hero_stacked(
 
     frame.render_widget(Block::default().borders(Borders::TOP), outer[1]);
     render_fullscreen_lyrics(frame, app, outer[2], Alignment::Center);
+}
+
+#[cfg(test)]
+mod credit_split_tests {
+    use super::*;
+
+    fn area(height: u16) -> Rect {
+        Rect { x: 4, y: 10, width: 60, height }
+    }
+
+    #[test]
+    fn no_credit_leaves_the_lyrics_area_untouched() {
+        assert_eq!(credit_split(area(20), false), (area(20), None));
+    }
+
+    #[test]
+    fn a_credit_takes_exactly_the_last_row() {
+        let (lyrics, credit) = credit_split(area(20), true);
+        assert_eq!(lyrics, Rect { height: 19, ..area(20) });
+        assert_eq!(credit, Some(Rect { x: 4, y: 29, width: 60, height: 1 }));
+    }
+
+    #[test]
+    fn the_two_never_overlap_and_together_fill_the_area() {
+        let (lyrics, credit) = credit_split(area(12), true);
+        let credit = credit.unwrap();
+        assert_eq!(lyrics.y + lyrics.height, credit.y);
+        assert_eq!(credit.y + credit.height, area(12).y + area(12).height);
+    }
+
+    #[test]
+    fn a_pane_too_short_to_spare_a_row_shows_lyrics_only() {
+        // Two rows of lyrics is the least worth keeping; below that the
+        // credit gives way rather than squeezing the lyrics out.
+        assert_eq!(credit_split(area(2), true), (area(2), None));
+        assert_eq!(credit_split(area(0), true), (area(0), None));
+        assert!(credit_split(area(3), true).1.is_some());
+    }
 }

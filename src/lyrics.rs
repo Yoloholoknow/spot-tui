@@ -3,10 +3,25 @@
 
 use std::time::Duration;
 
+/// One timed piece of a lyric line -- a word, or a syllable of one -- for
+/// word-by-word highlighting. `text` carries its own trailing space, so a
+/// line's segments concatenate to exactly the line's text (the renderer
+/// relies on that: styling per segment must never change what is drawn or
+/// how it wraps). Times are seconds from the start of the track.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WordSeg {
+    pub text: String,
+    pub start: f64,
+    pub end: f64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LyricLine {
     pub timestamp: Duration,
     pub text: String,
+    /// Word timing for word-by-word highlighting; empty when this line is
+    /// only timed as a whole (every source but a Spicy Lyrics syllable sync).
+    pub words: Vec<WordSeg>,
 }
 
 /// Parses LRC-format synced lyrics. Metadata tags (`[ar:]`, `[ti:]`,
@@ -40,6 +55,7 @@ pub fn parse_lrc(input: &str) -> Vec<LyricLine> {
             lines.push(LyricLine {
                 timestamp: ts,
                 text: text.clone(),
+                words: Vec::new(),
             });
         }
     }
@@ -99,6 +115,11 @@ pub enum CachedLyrics {
     /// load, and omitted when absent so other sources' files are unchanged.
     Synced {
         lines: Vec<(f64, String)>,
+        /// Word timing, parallel to `lines` (one entry per line), for
+        /// word-by-word highlighting; empty when the sync is line-level
+        /// only, which is every source but a Spicy Lyrics syllable sync.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        words: Vec<Vec<WordSeg>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credit: Option<String>,
     },
@@ -161,10 +182,18 @@ pub fn store_synced(
     cache_dir: &std::path::Path,
     track_uri: &str,
     lines: Vec<(f64, String)>,
+    words: Vec<Vec<WordSeg>>,
     credit: Option<String>,
     now_unix: u64,
 ) -> std::io::Result<()> {
-    write_cache(cache_dir, track_uri, &CachedLyrics::Synced { lines, credit }, now_unix)
+    write_cache(cache_dir, track_uri, &CachedLyrics::Synced { lines, words, credit }, now_unix)
+}
+
+/// The cache key for a Spicy Lyrics result. Its own namespace, so entries
+/// written before word timing existed (under the plain track uri) are never
+/// served without words, and a lrclib entry can't be mistaken for one.
+pub fn spicy_cache_key(track_uri: &str) -> String {
+    format!("spicy:{track_uri}")
 }
 
 pub struct LyricsClient {
@@ -268,7 +297,7 @@ fn classify(entry: &LrcLibEntry) -> CachedLyrics {
             .into_iter()
             .map(|l| (l.timestamp.as_secs_f64(), l.text))
             .collect();
-        return CachedLyrics::Synced { lines, credit: None };
+        return CachedLyrics::Synced { lines, credit: None, words: Vec::new() };
     }
     if let Some(plain) = &entry.plain_lyrics {
         return CachedLyrics::Plain {
@@ -326,7 +355,7 @@ fn classify_spotify(body: SpotifyLyricsBody) -> Option<CachedLyrics> {
     if lines.is_empty() {
         return None;
     }
-    Some(CachedLyrics::Synced { lines, credit: None })
+    Some(CachedLyrics::Synced { lines, credit: None, words: Vec::new() })
 }
 
 /// Spotify's own first-party catalog lyrics, via librespot's already-
@@ -407,7 +436,7 @@ mod spotify_lyrics_tests {
     #[test]
     fn line_synced_with_real_lines_converts_ms_to_seconds() {
         let result = classify_spotify(body("LINE_SYNCED", vec![("960", "One, two, three, four")]));
-        assert_eq!(result, Some(CachedLyrics::Synced { lines: vec![(0.96, "One, two, three, four".to_string())], credit: None }));
+        assert_eq!(result, Some(CachedLyrics::Synced { lines: vec![(0.96, "One, two, three, four".to_string())], credit: None, words: Vec::new() }));
     }
 
     #[test]
@@ -425,7 +454,7 @@ mod spotify_lyrics_tests {
         let mut b = body("LINE_SYNCED", vec![("960", "good line")]);
         b.lines.push(SpotifyLyricsLine { start_time_ms: "not-a-number".to_string(), words: "bad line".to_string() });
         let result = classify_spotify(b);
-        assert_eq!(result, Some(CachedLyrics::Synced { lines: vec![(0.96, "good line".to_string())], credit: None }));
+        assert_eq!(result, Some(CachedLyrics::Synced { lines: vec![(0.96, "good line".to_string())], credit: None, words: Vec::new() }));
     }
 
     #[test]
@@ -451,9 +480,9 @@ mod current_line_tests {
 
     fn lines() -> Vec<LyricLine> {
         vec![
-            LyricLine { timestamp: Duration::from_secs(10), text: "a".into() },
-            LyricLine { timestamp: Duration::from_secs(20), text: "b".into() },
-            LyricLine { timestamp: Duration::from_secs(30), text: "c".into() },
+            LyricLine { timestamp: Duration::from_secs(10), text: "a".into(), words: Vec::new() },
+            LyricLine { timestamp: Duration::from_secs(20), text: "b".into(), words: Vec::new() },
+            LyricLine { timestamp: Duration::from_secs(30), text: "c".into(), words: Vec::new() },
         ]
     }
 
@@ -592,6 +621,7 @@ mod client_tests {
         let _ = std::fs::remove_dir_all(&dir);
         let result = CachedLyrics::Synced {
             lines: vec![(1.0, "hi".to_string())],
+            words: Vec::new(),
             credit: None,
         };
         write_cache(&dir, "spotify:track:x", &result, 1_000_000).unwrap();
@@ -768,13 +798,14 @@ mod spicy_cache_tests {
     fn cache_files_written_before_credits_existed_still_load() {
         let old = r#"{"kind":"Synced","lines":[[1.0,"a"]]}"#;
         let parsed: CachedLyrics = serde_json::from_str(old).unwrap();
-        assert_eq!(parsed, CachedLyrics::Synced { lines: vec![(1.0, "a".to_string())], credit: None });
+        assert_eq!(parsed, CachedLyrics::Synced { lines: vec![(1.0, "a".to_string())], credit: None, words: Vec::new() });
     }
 
     #[test]
     fn a_credit_survives_a_round_trip() {
         let original = CachedLyrics::Synced {
             lines: vec![(1.0, "a".to_string())],
+            words: Vec::new(),
             credit: Some("Apple Music via Spicy Lyrics".to_string()),
         };
         let back: CachedLyrics = serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
@@ -783,7 +814,7 @@ mod spicy_cache_tests {
 
     #[test]
     fn no_credit_is_left_out_of_the_file_entirely() {
-        let json = serde_json::to_string(&CachedLyrics::Synced { lines: vec![], credit: None }).unwrap();
+        let json = serde_json::to_string(&CachedLyrics::Synced { lines: vec![], credit: None, words: Vec::new() }).unwrap();
         assert!(!json.contains("credit"), "{json}");
     }
 
@@ -810,11 +841,71 @@ mod spicy_cache_tests {
     #[test]
     fn a_synced_entry_is_a_hit_and_keeps_its_credit() {
         let dir = fresh_dir("synced");
-        store_synced(&dir, URI, vec![(2.5, "line".to_string())], Some("credit".to_string()), 100).unwrap();
+        store_synced(&dir, URI, vec![(2.5, "line".to_string())], Vec::new(), Some("credit".to_string()), 100)
+            .unwrap();
         assert_eq!(
             cached_synced(&dir, URI, 101),
-            Some(CachedLyrics::Synced { lines: vec![(2.5, "line".to_string())], credit: Some("credit".to_string()) })
+            Some(CachedLyrics::Synced {
+                lines: vec![(2.5, "line".to_string())],
+                words: Vec::new(),
+                credit: Some("credit".to_string())
+            })
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn seg(text: &str, start: f64, end: f64) -> WordSeg {
+        WordSeg { text: text.to_string(), start, end }
+    }
+
+    #[test]
+    fn word_timing_survives_a_round_trip() {
+        let original = CachedLyrics::Synced {
+            lines: vec![(1.0, "hi there".to_string())],
+            words: vec![vec![seg("hi ", 1.0, 1.4), seg("there", 1.4, 2.0)]],
+            credit: None,
+        };
+        let back: CachedLyrics = serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn no_word_timing_is_left_out_of_the_file_so_other_sources_are_unchanged() {
+        let json = serde_json::to_string(&CachedLyrics::Synced {
+            lines: vec![(1.0, "a".to_string())],
+            words: Vec::new(),
+            credit: None,
+        })
+        .unwrap();
+        assert!(!json.contains("words"), "{json}");
+    }
+
+    #[test]
+    fn cache_files_written_before_word_timing_existed_still_load() {
+        let old = r#"{"kind":"Synced","lines":[[1.0,"a"]],"credit":"Apple Music via Spicy Lyrics"}"#;
+        let parsed: CachedLyrics = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            parsed,
+            CachedLyrics::Synced {
+                lines: vec![(1.0, "a".to_string())],
+                words: Vec::new(),
+                credit: Some("Apple Music via Spicy Lyrics".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn spicy_results_live_under_their_own_key() {
+        // The Phase 26 entries (line-level only, already on disk) sit under the
+        // plain track uri. A different key means they are ignored and simply
+        // refreshed -- "missing words" can't be read as "stale", because an
+        // Apple Music line sync legitimately has none.
+        assert_eq!(spicy_cache_key(URI), format!("spicy:{URI}"));
+        let dir = fresh_dir("keys");
+        store_synced(&dir, URI, vec![(1.0, "old line-level".to_string())], Vec::new(), None, 100).unwrap();
+        assert_eq!(cached_synced(&dir, &spicy_cache_key(URI), 101), None);
+        store_synced(&dir, &spicy_cache_key(URI), vec![(1.0, "new".to_string())], Vec::new(), None, 102).unwrap();
+        assert!(cached_synced(&dir, &spicy_cache_key(URI), 103).is_some());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -823,7 +914,7 @@ mod spicy_cache_tests {
         let dir = fresh_dir("upgrade");
         write_cache(&dir, URI, &CachedLyrics::Plain { text: "unsynced".to_string() }, 100).unwrap();
         assert_eq!(cached_synced(&dir, URI, 101), None);
-        store_synced(&dir, URI, vec![(1.0, "now synced".to_string())], None, 102).unwrap();
+        store_synced(&dir, URI, vec![(1.0, "now synced".to_string())], Vec::new(), None, 102).unwrap();
         assert!(matches!(cached_synced(&dir, URI, 103), Some(CachedLyrics::Synced { .. })));
         let _ = std::fs::remove_dir_all(dir);
     }

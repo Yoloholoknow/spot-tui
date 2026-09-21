@@ -3541,7 +3541,19 @@ fn body_lines(app: &AppState) -> Vec<Line<'static>> {
             let mut out = Vec::with_capacity(lines.len() * 2);
             for (i, line) in lines.iter().enumerate() {
                 let text = if line.text.is_empty() { "\u{266a}".to_string() } else { line.text.clone() };
-                let styled = if i == current {
+                let styled = if i == current && !line.words.is_empty() {
+                    // Word-by-word: same text, coloured by how far the voice
+                    // has got. Sung = accent, still to come = white, both bold
+                    // so nothing shifts as the sweep passes.
+                    let sung = Style::default().fg(ACCENT).add_modifier(Modifier::BOLD);
+                    let unsung = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+                    Line::from(
+                        sweep_runs(&line.words, app.position.as_secs_f64())
+                            .into_iter()
+                            .map(|(run, fill)| Span::styled(run, if fill == Fill::Sung { sung } else { unsung }))
+                            .collect::<Vec<_>>(),
+                    )
+                } else if i == current {
                     Line::from(Span::styled(text, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))
                 } else {
                     Line::from(Span::styled(text, Style::default().fg(lyric_tier_color(i.abs_diff(current)))))
@@ -3565,6 +3577,66 @@ fn lyric_tier_color(distance: usize) -> Color {
         1 => Color::White,
         2..=3 => Color::Gray,
         _ => DIM,
+    }
+}
+
+/// Whether a stretch of the current line has been sung yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fill {
+    Sung,
+    Unsung,
+}
+
+/// The current line as contiguous runs of sung / unsung text at `pos_secs`,
+/// for word-by-word highlighting. Inside the word being sung, the sung part
+/// is `floor(fraction * chars)` characters -- a real sweep, since a terminal
+/// can colour per character -- and a word's trailing space is only sung once
+/// the word is finished. Each segment is judged on its own clock, so a
+/// background vocal that overlaps the lead sweeps independently. The runs
+/// always concatenate to exactly the segments' text (the renderer must never
+/// change what is drawn or how it wraps), and adjacent runs with the same
+/// fill are merged.
+pub fn sweep_runs(words: &[crate::lyrics::WordSeg], pos_secs: f64) -> Vec<(String, Fill)> {
+    fn push(runs: &mut Vec<(String, Fill)>, text: &str, fill: Fill) {
+        if text.is_empty() {
+            return;
+        }
+        match runs.last_mut() {
+            Some((last, last_fill)) if *last_fill == fill => last.push_str(text),
+            _ => runs.push((text.to_string(), fill)),
+        }
+    }
+
+    let mut runs = Vec::new();
+    for word in words {
+        if pos_secs >= word.end && pos_secs >= word.start {
+            push(&mut runs, &word.text, Fill::Sung);
+        } else if pos_secs <= word.start {
+            push(&mut runs, &word.text, Fill::Unsung);
+        } else {
+            let body = word.text.trim_end();
+            let chars = body.chars().count();
+            let fraction = (pos_secs - word.start) / (word.end - word.start);
+            let sung = ((fraction * chars as f64).floor() as usize).min(chars);
+            let split = body.char_indices().nth(sung).map_or(body.len(), |(i, _)| i);
+            push(&mut runs, &word.text[..split], Fill::Sung);
+            push(&mut runs, &word.text[split..], Fill::Unsung);
+        }
+    }
+    runs
+}
+
+/// True while a word sweep is actually moving: playing, and the current line
+/// has word timing. Only then does the event loop redraw faster than its
+/// normal tick, so nothing else (line-level lyrics, paused playback) pays for
+/// the extra frames.
+pub fn word_sweep_active(lyrics: &LyricsState, current_line: Option<usize>, playing: Option<bool>) -> bool {
+    if playing != Some(true) {
+        return false;
+    }
+    match (lyrics, current_line) {
+        (LyricsState::Synced(lines), Some(i)) => lines.get(i).is_some_and(|line| !line.words.is_empty()),
+        _ => false,
     }
 }
 
@@ -4867,5 +4939,155 @@ mod credit_split_tests {
         assert_eq!(credit_split(area(2), true), (area(2), None));
         assert_eq!(credit_split(area(0), true), (area(0), None));
         assert!(credit_split(area(3), true).1.is_some());
+    }
+}
+
+#[cfg(test)]
+mod sweep_tests {
+    use super::*;
+    use crate::lyrics::WordSeg;
+
+    fn seg(text: &str, start: f64, end: f64) -> WordSeg {
+        WordSeg { text: text.to_string(), start, end }
+    }
+
+    fn hi_there() -> Vec<WordSeg> {
+        vec![seg("hi ", 1.0, 1.4), seg("there", 1.4, 2.0)]
+    }
+
+    fn run(text: &str, fill: Fill) -> (String, Fill) {
+        (text.to_string(), fill)
+    }
+
+    fn joined(runs: &[(String, Fill)]) -> String {
+        runs.iter().map(|(t, _)| t.as_str()).collect()
+    }
+
+    #[test]
+    fn before_the_first_word_the_whole_line_is_unsung() {
+        assert_eq!(sweep_runs(&hi_there(), 0.5), vec![run("hi there", Fill::Unsung)]);
+        assert_eq!(sweep_runs(&hi_there(), 1.0), vec![run("hi there", Fill::Unsung)]);
+    }
+
+    #[test]
+    fn after_the_last_word_the_whole_line_is_sung() {
+        assert_eq!(sweep_runs(&hi_there(), 2.0), vec![run("hi there", Fill::Sung)]);
+        assert_eq!(sweep_runs(&hi_there(), 60.0), vec![run("hi there", Fill::Sung)]);
+    }
+
+    #[test]
+    fn inside_a_word_that_fraction_of_its_characters_is_sung() {
+        // "there" is 1.4..2.0; at 1.7 it is half done: floor(0.5 * 5) = 2 chars.
+        assert_eq!(
+            sweep_runs(&hi_there(), 1.7),
+            vec![run("hi th", Fill::Sung), run("ere", Fill::Unsung)]
+        );
+    }
+
+    #[test]
+    fn a_word_s_trailing_space_is_not_sung_until_the_word_is_finished() {
+        let words = vec![seg("hi ", 1.0, 1.4), seg("there", 1.4, 2.0)];
+        // Half through "hi": floor(0.5 * 2) = 1 char of "hi", the space still unsung.
+        assert_eq!(sweep_runs(&words, 1.2), vec![run("h", Fill::Sung), run("i there", Fill::Unsung)]);
+        // Exactly at the end of "hi ": the space is sung with it.
+        assert_eq!(sweep_runs(&words, 1.4), vec![run("hi ", Fill::Sung), run("there", Fill::Unsung)]);
+    }
+
+    #[test]
+    fn multibyte_text_is_split_on_characters_not_bytes() {
+        let words = vec![seg("\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}", 0.0, 1.0)];
+        assert_eq!(
+            sweep_runs(&words, 0.5),
+            vec![run("\u{3053}\u{3093}", Fill::Sung), run("\u{306b}\u{3061}\u{306f}", Fill::Unsung)]
+        );
+    }
+
+    #[test]
+    fn a_zero_length_word_flips_at_its_start() {
+        let words = vec![seg("a ", 1.0, 1.0), seg("b", 2.0, 2.0)];
+        assert_eq!(sweep_runs(&words, 0.9), vec![run("a b", Fill::Unsung)]);
+        assert_eq!(sweep_runs(&words, 1.0), vec![run("a ", Fill::Sung), run("b", Fill::Unsung)]);
+        assert_eq!(sweep_runs(&words, 2.0), vec![run("a b", Fill::Sung)]);
+    }
+
+    #[test]
+    fn an_overlapping_background_vocal_sweeps_on_its_own_clock() {
+        // The background starts while the lead is still going.
+        let words = vec![seg("Hey ", 1.0, 1.4), seg("(Oh)", 1.1, 1.9)];
+        assert_eq!(
+            sweep_runs(&words, 1.5),
+            vec![run("Hey (O", Fill::Sung), run("h)", Fill::Unsung)]
+        );
+    }
+
+    #[test]
+    fn the_runs_always_re_form_the_line_whatever_the_position() {
+        let words = vec![seg("I ", 27.395, 27.549), seg("been ", 27.549, 27.74), seg("try", 27.74, 27.908), seg("na ", 27.908, 28.077), seg("call", 28.077, 28.96)];
+        let text: String = words.iter().map(|w| w.text.as_str()).collect();
+        let mut pos = 26.0;
+        while pos < 30.0 {
+            assert_eq!(joined(&sweep_runs(&words, pos)), text, "at {pos}");
+            pos += 0.037;
+        }
+    }
+
+    #[test]
+    fn neighbouring_runs_with_the_same_fill_are_merged() {
+        let runs = sweep_runs(&hi_there(), 60.0);
+        assert_eq!(runs.len(), 1);
+    }
+
+    #[test]
+    fn no_words_no_runs() {
+        assert!(sweep_runs(&[], 5.0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sweep_active_tests {
+    use super::*;
+    use crate::lyrics::{LyricLine, WordSeg};
+    use std::time::Duration;
+
+    fn line(words: bool) -> LyricLine {
+        LyricLine {
+            timestamp: Duration::from_secs(1),
+            text: "hi".to_string(),
+            words: if words { vec![WordSeg { text: "hi".to_string(), start: 1.0, end: 2.0 }] } else { Vec::new() },
+        }
+    }
+
+    #[test]
+    fn active_only_while_playing_a_line_that_has_words() {
+        let lyrics = LyricsState::Synced(vec![line(true)]);
+        assert!(word_sweep_active(&lyrics, Some(0), Some(true)));
+    }
+
+    #[test]
+    fn paused_or_stopped_needs_no_faster_redraw() {
+        let lyrics = LyricsState::Synced(vec![line(true)]);
+        assert!(!word_sweep_active(&lyrics, Some(0), Some(false)));
+        assert!(!word_sweep_active(&lyrics, Some(0), None));
+    }
+
+    #[test]
+    fn a_line_level_sync_never_speeds_up_the_redraw() {
+        let lyrics = LyricsState::Synced(vec![line(false)]);
+        assert!(!word_sweep_active(&lyrics, Some(0), Some(true)));
+    }
+
+    #[test]
+    fn only_the_current_line_counts() {
+        let lyrics = LyricsState::Synced(vec![line(false), line(true)]);
+        assert!(!word_sweep_active(&lyrics, Some(0), Some(true)));
+        assert!(word_sweep_active(&lyrics, Some(1), Some(true)));
+    }
+
+    #[test]
+    fn no_current_line_or_other_lyric_states_are_inactive() {
+        let lyrics = LyricsState::Synced(vec![line(true)]);
+        assert!(!word_sweep_active(&lyrics, None, Some(true)));
+        assert!(!word_sweep_active(&LyricsState::Loading, Some(0), Some(true)));
+        assert!(!word_sweep_active(&LyricsState::Synced(vec![line(true)]), Some(9), Some(true)));
     }
 }

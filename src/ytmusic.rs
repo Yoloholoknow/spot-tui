@@ -422,7 +422,7 @@ pub async fn ytmusic_lyrics(artist: &str, title: &str, duration_secs: f64) -> Op
         }
     };
     log::info!("ytmusic_lyrics[{video_id}]: got {} synced lines", lines.len());
-    Some(CachedLyrics::Synced { lines, credit: None })
+    Some(CachedLyrics::Synced { lines, credit: None, words: Vec::new() })
 }
 
 #[cfg(test)]

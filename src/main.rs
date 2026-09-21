@@ -20,7 +20,10 @@ use librespot_playback::audio_backend;
 use librespot_playback::config::{AudioFormat, PlayerConfig};
 use librespot_playback::mixer::{self, MixerConfig};
 use librespot_playback::player::{Player, PlayerEvent};
-use lyrics::{cached_synced, current_line_index, spotify_lyrics, store_synced, CachedLyrics, LyricLine, LyricsClient};
+use lyrics::{
+    cached_synced, current_line_index, spicy_cache_key, spotify_lyrics, store_synced, CachedLyrics, LyricLine,
+    LyricsClient,
+};
 use position::PositionTracker;
 use std::io::stdout;
 use std::io::Read;
@@ -95,6 +98,10 @@ enum SidebarAction {
 }
 
 const TICK: Duration = Duration::from_millis(100);
+/// The redraw interval while a word-by-word lyric sweep is moving (20 fps).
+/// At the normal 10 fps the sweep would step visibly; only lines that have
+/// word timing, while playing, ever use it (see `ui::word_sweep_active`).
+const WORD_TICK: Duration = Duration::from_millis(50);
 const DEBOUNCE: Duration = Duration::from_millis(250);
 const SEEK_STEP_MS: i64 = 5000;
 
@@ -1344,24 +1351,31 @@ async fn spicy_lookup(client: &spicy::SpicyClient, track_uri: &str, base62_id: &
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or_default();
-    if let Some(hit) = cached_synced(&dir, track_uri, now_unix) {
+    // Its own cache key: entries from before word timing existed sit under
+    // the plain uri and are never read here, so they refresh on next play.
+    let key = spicy_cache_key(track_uri);
+    if let Some(hit) = cached_synced(&dir, &key, now_unix) {
         return Some(hit);
     }
-    let (lines, credit) = client.lyrics(base62_id).await?;
-    if let Err(e) = store_synced(&dir, track_uri, lines.clone(), Some(credit.clone()), now_unix) {
+    let spicy::SpicyLyrics { lines, words, credit } = client.lyrics(base62_id).await?;
+    if let Err(e) = store_synced(&dir, &key, lines.clone(), words.clone(), Some(credit.clone()), now_unix) {
         log::warn!("spicy_lyrics[{base62_id}]: couldn't cache the result: {e}");
     }
-    Some(CachedLyrics::Synced { lines, credit: Some(credit) })
+    Some(CachedLyrics::Synced { lines, words, credit: Some(credit) })
 }
 
 fn to_lyrics_state(cached: CachedLyrics) -> LyricsState {
     match cached {
-        CachedLyrics::Synced { lines, .. } => LyricsState::Synced(
+        CachedLyrics::Synced { lines, words, .. } => LyricsState::Synced(
             lines
                 .into_iter()
-                .map(|(secs, text)| LyricLine {
+                .enumerate()
+                .map(|(i, (secs, text))| LyricLine {
                     timestamp: Duration::from_secs_f64(secs),
                     text,
+                    // Parallel to `lines`; empty (or short, if a file is
+                    // corrupt) just means "no word timing for this line".
+                    words: words.get(i).cloned().unwrap_or_default(),
                 })
                 .collect(),
         ),
@@ -2162,7 +2176,8 @@ async fn main() -> std::io::Result<()> {
 
         terminal.draw(|f| ui::render(f, &app, &mut scroll, &mut images))?;
 
-        if event::poll(TICK)? {
+        let tick = if ui::word_sweep_active(&app.lyrics, app.current_line, app.playing) { WORD_TICK } else { TICK };
+        if event::poll(tick)? {
             let ev = event::read()?;
             // Real bug reported live: switching tmux *windows* away and
             // back drops a previously-placed kitty-graphics image --
@@ -4404,5 +4419,57 @@ mod carry_modes_tests {
         let out = carry_modes(true, RepeatMode::Off, opts);
         assert!(out.start_playing);
         assert_eq!(out.seek_to, 42);
+    }
+}
+
+#[cfg(test)]
+mod lyric_words_tests {
+    use super::*;
+    use lyrics::WordSeg;
+
+    fn seg(text: &str, start: f64, end: f64) -> WordSeg {
+        WordSeg { text: text.to_string(), start, end }
+    }
+
+    fn lines_of(state: LyricsState) -> Vec<LyricLine> {
+        match state {
+            LyricsState::Synced(lines) => lines,
+            _ => panic!("expected Synced lyrics"),
+        }
+    }
+
+    #[test]
+    fn each_line_gets_its_own_words() {
+        let state = to_lyrics_state(CachedLyrics::Synced {
+            lines: vec![(1.0, "hi there".to_string()), (5.0, "bye".to_string())],
+            words: vec![vec![seg("hi ", 1.0, 1.4), seg("there", 1.4, 2.0)], vec![seg("bye", 5.0, 5.5)]],
+            credit: None,
+        });
+        let lines = lines_of(state);
+        assert_eq!(lines[0].words, vec![seg("hi ", 1.0, 1.4), seg("there", 1.4, 2.0)]);
+        assert_eq!(lines[1].words, vec![seg("bye", 5.0, 5.5)]);
+    }
+
+    #[test]
+    fn a_line_level_sync_leaves_every_line_without_words() {
+        let state = to_lyrics_state(CachedLyrics::Synced {
+            lines: vec![(1.0, "a".to_string()), (2.0, "b".to_string())],
+            words: Vec::new(),
+            credit: None,
+        });
+        assert!(lines_of(state).iter().all(|l| l.words.is_empty()));
+    }
+
+    #[test]
+    fn a_short_words_list_never_panics_or_misaligns() {
+        // Defensive: a corrupt cache file with fewer word entries than lines.
+        let state = to_lyrics_state(CachedLyrics::Synced {
+            lines: vec![(1.0, "a".to_string()), (2.0, "b".to_string())],
+            words: vec![vec![seg("a", 1.0, 1.5)]],
+            credit: None,
+        });
+        let lines = lines_of(state);
+        assert_eq!(lines[0].words.len(), 1);
+        assert!(lines[1].words.is_empty());
     }
 }

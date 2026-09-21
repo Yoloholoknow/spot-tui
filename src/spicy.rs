@@ -6,6 +6,7 @@
 //! inline below), because the response is a union whose branches are easy
 //! to get subtly wrong.
 
+use crate::lyrics::WordSeg;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,7 +20,7 @@ use std::time::{Duration, Instant};
 pub enum Parsed {
     /// Timed lines (seconds, text), ascending, plus the credit line the
     /// docs require for a community sync (always present, see `credit_line`).
-    Synced { lines: Vec<(f64, String)>, credit: String },
+    Synced { lines: Vec<(f64, String)>, words: Vec<Vec<WordSeg>>, credit: String },
     Static,
     Miss,
 }
@@ -48,6 +49,14 @@ pub fn credit_line(source: &str, uploader: Option<&str>, maker: Option<&str>) ->
     }
 }
 
+/// One reduced lyric row: when it starts, the text, and (for a syllable
+/// sync) its timed segments, which concatenate to exactly `text`.
+struct Row {
+    start: f64,
+    text: String,
+    words: Vec<WordSeg>,
+}
+
 /// Reduces a `200` body to timed lines. Anything unexpected -- an error
 /// envelope, an unknown `Type`, no usable rows, invalid JSON -- is a `Miss`,
 /// never a panic: the `Type` and `source` unions can grow without notice.
@@ -62,61 +71,87 @@ pub fn parse_response(bytes: &[u8]) -> Parsed {
         return Parsed::Miss;
     }
 
-    let rows: Vec<(f64, String)> = match body.get("Type").and_then(Value::as_str) {
-        Some("Line") => body.get("Content").and_then(Value::as_array).map(|c| c.iter().filter_map(line_row).collect()),
-        Some("Syllable") => {
-            body.get("Content").and_then(Value::as_array).map(|c| c.iter().filter_map(syllable_row).collect())
-        }
+    let content = body.get("Content").and_then(Value::as_array);
+    let rows: Vec<Row> = match body.get("Type").and_then(Value::as_str) {
+        Some("Line") => content.map(|c| c.iter().filter_map(line_row).collect()),
+        Some("Syllable") => content.map(|c| c.iter().filter_map(syllable_row).collect()),
         Some("Static") => return Parsed::Static,
         _ => return Parsed::Miss,
     }
     .unwrap_or_default();
 
-    let mut lines: Vec<(f64, String)> = rows.into_iter().filter(|(_, text)| !text.trim().is_empty()).collect();
-    if lines.is_empty() {
+    let mut rows: Vec<Row> = rows.into_iter().filter(|row| !row.text.trim().is_empty()).collect();
+    if rows.is_empty() {
         return Parsed::Miss;
     }
     // `current_line_index` binary-searches, so order is a correctness matter.
-    lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // Sorting whole rows keeps each line's words attached to it.
+    rows.sort_by(|a, b| a.start.total_cmp(&b.start));
+
+    let has_words = rows.iter().any(|row| !row.words.is_empty());
+    let lines = rows.iter().map(|row| (row.start, row.text.clone())).collect();
+    let words = if has_words { rows.into_iter().map(|row| row.words).collect() } else { Vec::new() };
 
     let source = body.get("source").and_then(Value::as_str).unwrap_or("unknown");
     let attribution = body.get("UploadAttribution");
     let username = |who: &str| attribution.and_then(|a| a.get(who)).and_then(|w| w.get("username")).and_then(Value::as_str);
-    Parsed::Synced { lines, credit: credit_line(source, username("Uploader"), username("Maker")) }
+    Parsed::Synced { lines, words, credit: credit_line(source, username("Uploader"), username("Maker")) }
 }
 
-fn line_row(row: &Value) -> Option<(f64, String)> {
+fn line_row(row: &Value) -> Option<Row> {
     let start = row.get("StartTime")?.as_f64()?;
-    Some((start, row.get("Text")?.as_str()?.trim().to_owned()))
+    Some(Row { start, text: row.get("Text")?.as_str()?.trim().to_owned(), words: Vec::new() })
 }
 
-/// Joins syllables into words: a space goes between two syllables unless
-/// the earlier one says the next continues the same word (`try` + `na`).
-fn join_syllables(group: &Value) -> Option<(f64, String)> {
+/// One vocal group as timed segments. A space follows every syllable unless
+/// it says the next continues the same word (`try` + `na`); the group's own
+/// last segment gets none, so callers decide what separates groups.
+/// `open`/`close` wrap the whole group (parentheses for a background).
+fn group_segments(group: &Value, open: &str, close: &str) -> Option<Vec<WordSeg>> {
     let syllables = group.get("Syllables")?.as_array()?;
-    let mut text = String::new();
+    let last = syllables.len().checked_sub(1)?;
+    let mut segs = Vec::with_capacity(syllables.len());
     for (i, syllable) in syllables.iter().enumerate() {
+        let mut text = String::new();
+        if i == 0 {
+            text.push_str(open);
+        }
         text.push_str(syllable.get("Text")?.as_str()?);
+        if i == last {
+            text.push_str(close);
+        }
         let continues = syllable.get("IsPartOfWord").and_then(Value::as_bool).unwrap_or(false);
-        if !continues && i + 1 < syllables.len() {
+        if !continues && i != last {
             text.push(' ');
         }
+        let start = syllable.get("StartTime")?.as_f64()?;
+        let end = syllable.get("EndTime").and_then(Value::as_f64).unwrap_or(start);
+        segs.push(WordSeg { text, start, end });
     }
-    let start = group
-        .get("StartTime")
-        .and_then(Value::as_f64)
-        .or_else(|| syllables.first()?.get("StartTime")?.as_f64())?;
-    Some((start, text.trim().to_owned()))
+    Some(segs)
 }
 
-fn syllable_row(row: &Value) -> Option<(f64, String)> {
-    let (start, mut text) = join_syllables(row.get("Lead")?)?;
+fn group_start(group: &Value, segs: &[WordSeg]) -> Option<f64> {
+    group.get("StartTime").and_then(Value::as_f64).or_else(|| segs.first().map(|s| s.start))
+}
+
+fn syllable_row(row: &Value) -> Option<Row> {
+    let lead = row.get("Lead")?;
+    let mut words = group_segments(lead, "", "")?;
+    let start = group_start(lead, &words)?;
     for background in row.get("Background").and_then(Value::as_array).into_iter().flatten() {
-        if let Some((_, phrase)) = join_syllables(background).filter(|(_, p)| !p.is_empty()) {
-            text.push_str(&format!(" ({phrase})"));
+        // A background phrase is appended in parentheses, like the API does
+        // for a Line sync; it keeps its own timing, so it lights up when it
+        // is sung, not when the lead is.
+        if let Some(phrase) = group_segments(background, "(", ")").filter(|p| !p.is_empty()) {
+            if let Some(previous) = words.last_mut() {
+                previous.text.push(' ');
+            }
+            words.extend(phrase);
         }
     }
-    Some((start, text))
+    let text = words.iter().map(|w| w.text.as_str()).collect::<String>().trim().to_owned();
+    Some(Row { start, text, words })
 }
 
 /// What to do after a response, decided from the status alone (plus the
@@ -265,8 +300,14 @@ impl TransportErrorText for ureq::Error {
     }
 }
 
-/// The result a caller can use: timed lines and the credit to show.
-pub type SpicyLyrics = (Vec<(f64, String)>, String);
+/// The result a caller can use: timed lines, their word timing (parallel to
+/// `lines`, empty when the sync is line-level only), and the credit to show.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpicyLyrics {
+    pub lines: Vec<(f64, String)>,
+    pub words: Vec<Vec<WordSeg>>,
+    pub credit: String,
+}
 
 /// Cheap to clone: the agent and gate are shared, so every per-track task
 /// sees the same rate-limit and key-refused state.
@@ -315,9 +356,13 @@ impl SpicyClient {
         let now = Instant::now();
         match action {
             Action::Use => match parse_response(&raw.body) {
-                Parsed::Synced { lines, credit } => {
-                    log::info!("spicy_lyrics[{track_id}]: got {} synced lines ({credit})", lines.len());
-                    return Some((lines, credit));
+                Parsed::Synced { lines, words, credit } => {
+                    log::info!(
+                        "spicy_lyrics[{track_id}]: got {} synced lines, {} with word timing ({credit})",
+                        lines.len(),
+                        words.iter().filter(|w| !w.is_empty()).count()
+                    );
+                    return Some(SpicyLyrics { lines, words, credit });
                 }
                 Parsed::Static => {
                     log::info!("spicy_lyrics[{track_id}]: only untimed lyrics available, falling through");
@@ -387,9 +432,84 @@ mod parse_tests {
 
     fn synced(json: &str) -> (Vec<(f64, String)>, String) {
         match parse_response(json.as_bytes()) {
-            Parsed::Synced { lines, credit } => (lines, credit),
+            Parsed::Synced { lines, credit, .. } => (lines, credit),
             other => panic!("expected Synced, got {other:?}"),
         }
+    }
+
+    fn words_of(json: &str) -> Vec<Vec<WordSeg>> {
+        match parse_response(json.as_bytes()) {
+            Parsed::Synced { words, .. } => words,
+            other => panic!("expected Synced, got {other:?}"),
+        }
+    }
+
+    fn seg(text: &str, start: f64, end: f64) -> WordSeg {
+        WordSeg { text: text.to_string(), start, end }
+    }
+
+    #[test]
+    fn a_syllable_row_keeps_every_syllable_with_its_own_timing() {
+        let words = words_of(SYLLABLE_COMMUNITY);
+        assert_eq!(
+            words[0],
+            vec![
+                seg("I ", 27.395, 27.549),
+                seg("been ", 27.549, 27.74),
+                seg("try", 27.74, 27.908),
+                seg("na ", 27.908, 28.077),
+                seg("call", 28.077, 28.96),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_background_vocal_becomes_its_own_timed_segment_inside_parentheses() {
+        let words = words_of(SYLLABLE_COMMUNITY);
+        assert_eq!(words[1], vec![seg("Hey ", 109.0, 109.4), seg("(Oh)", 109.528, 110.068)]);
+    }
+
+    #[test]
+    fn every_line_s_segments_concatenate_to_exactly_that_line_s_text() {
+        // The invariant the renderer relies on: styling per segment must
+        // never change what is drawn or how it wraps.
+        let (lines, _) = synced(SYLLABLE_COMMUNITY);
+        let words = words_of(SYLLABLE_COMMUNITY);
+        assert_eq!(words.len(), lines.len());
+        for (line, segs) in lines.iter().zip(&words) {
+            assert_eq!(segs.iter().map(|w| w.text.as_str()).collect::<String>(), line.1);
+        }
+    }
+
+    #[test]
+    fn a_line_type_sync_has_no_word_timing() {
+        assert!(words_of(LINE_APPLE).is_empty());
+    }
+
+    #[test]
+    fn words_stay_aligned_with_their_lines_after_sorting_and_filtering() {
+        let json = r#"{"Body":{"Type":"Syllable","source":"spicy_lyrics","Content":[
+            {"Type":"Vocal","Lead":{"Syllables":[{"Text":"second","IsPartOfWord":false,"StartTime":9.0,"EndTime":9.5}],"StartTime":9.0}},
+            {"Type":"Vocal","Lead":{"Syllables":[{"Text":" ","IsPartOfWord":false,"StartTime":5.0,"EndTime":5.5}],"StartTime":5.0}},
+            {"Type":"Vocal","Lead":{"Syllables":[{"Text":"first","IsPartOfWord":false,"StartTime":1.0,"EndTime":1.5}],"StartTime":1.0}}]}}"#;
+        let (lines, _) = synced(json);
+        let words = words_of(json);
+        assert_eq!(lines.iter().map(|l| l.1.as_str()).collect::<Vec<_>>(), vec!["first", "second"]);
+        assert_eq!(words[0], vec![seg("first", 1.0, 1.5)]);
+        assert_eq!(words[1], vec![seg("second", 9.0, 9.5)]);
+    }
+
+    #[test]
+    fn several_background_groups_are_separated_by_a_space() {
+        let json = r#"{"Body":{"Type":"Syllable","source":"spicy_lyrics","Content":[
+            {"Type":"Vocal","Lead":{"Syllables":[{"Text":"Hey","IsPartOfWord":false,"StartTime":1.0,"EndTime":1.5}],"StartTime":1.0},
+             "Background":[
+               {"Syllables":[{"Text":"oh","IsPartOfWord":false,"StartTime":1.6,"EndTime":1.8}],"StartTime":1.6},
+               {"Syllables":[{"Text":"yeah","IsPartOfWord":false,"StartTime":2.0,"EndTime":2.4}],"StartTime":2.0}]}]}}"#;
+        let (lines, _) = synced(json);
+        assert_eq!(lines[0].1, "Hey (oh) (yeah)");
+        let words = words_of(json);
+        assert_eq!(words[0].iter().map(|w| w.text.as_str()).collect::<String>(), "Hey (oh) (yeah)");
     }
 
     #[test]
@@ -691,19 +811,26 @@ mod spicy_live {
     #[tokio::test]
     #[ignore = "live network; needs SPICY_LYRICS_API_KEY"]
     async fn a_track_spotify_404s_on_comes_back_synced_from_apple_music() {
-        let (lines, credit) = client().lyrics(NEON_SKIES).await.expect("synced lyrics");
+        let SpicyLyrics { lines, words, credit } = client().lyrics(NEON_SKIES).await.expect("synced lyrics");
         assert!(lines.len() > 30, "got {} lines", lines.len());
         assert!(lines.windows(2).all(|w| w[0].0 <= w[1].0), "not ascending");
         assert_eq!(credit, "Apple Music via Spicy Lyrics");
+        assert!(words.is_empty(), "a Line-level sync has no word timing");
     }
 
     #[tokio::test]
     #[ignore = "live network; needs SPICY_LYRICS_API_KEY"]
     async fn a_community_word_level_sync_is_reduced_to_lines_with_the_uploader_credited() {
-        let (lines, credit) = client().lyrics(BLINDING_LIGHTS).await.expect("synced lyrics");
+        let SpicyLyrics { lines, words, credit } = client().lyrics(BLINDING_LIGHTS).await.expect("synced lyrics");
         assert!(lines.len() > 20, "got {} lines", lines.len());
         assert!(credit.starts_with("Spicy Lyrics \u{b7} uploaded by "), "credit was {credit:?}");
         assert!(lines.iter().any(|(_, t)| t.contains("tryna")), "syllables were not joined into words");
+        // Word timing is kept, one entry per line, and always re-forms the line.
+        assert_eq!(words.len(), lines.len());
+        for ((_, text), segs) in lines.iter().zip(&words) {
+            assert_eq!(&segs.iter().map(|w| w.text.as_str()).collect::<String>(), text);
+            assert!(segs.iter().all(|w| w.end >= w.start), "a segment ends before it starts");
+        }
     }
 
     #[tokio::test]

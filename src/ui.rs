@@ -1553,6 +1553,13 @@ pub struct AppState {
     /// shown dim under the lyrics. `Some` only for a result whose source
     /// asks to be credited; cleared with `lyrics` on every track change.
     pub lyrics_credit: Option<String>,
+    /// Show lyrics romanized (`t`). Global: applies to every track with
+    /// Japanese, Chinese or Korean lyrics until toggled off.
+    pub romanize_lyrics: bool,
+    /// The current sheet's romanization, in step with its lines, once it has
+    /// been computed off the render thread (`None` until then, and for a
+    /// sheet with nothing to romanize). Cleared with `lyrics` on track change.
+    pub romanized_lines: Option<Vec<Option<crate::romanize::RomanLine>>>,
     pub current_line: Option<usize>,
     pub fullscreen: bool,
     /// `None` = no track loaded yet (device is connected regardless --
@@ -2253,6 +2260,10 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             (
                 "Ctrl+P",
                 "quick jump -- search any playlist/liked track/artist/album/device/screen by name and jump straight to it (works even mid-query on Search; press again to close)",
+            ),
+            (
+                "t",
+                "toggle romanized lyrics: Japanese, Chinese and Korean lyrics shown in Latin letters instead of their own script (kanji read in context, pinyin with tone marks, Revised Romanization for Korean). Works from any screen (not while typing in Search or a filter); the word-by-word highlight keeps moving. Needs synced lyrics. Set romanize_lyrics = true in config.toml to start with it on",
             ),
             (
                 "z",
@@ -3498,6 +3509,21 @@ fn progress_gauge_bordered(app: &AppState) -> Gauge<'static> {
     progress_gauge(app).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(DIM)))
 }
 
+/// What a lyric line shows: its romanization (text and re-timed words) when
+/// romanized lyrics are on and this line has one, else the native line. A
+/// romanized line whose words couldn't be re-timed is drawn whole rather than
+/// swept with the native words, which would colour the wrong text.
+fn display_line<'a>(
+    line: &'a crate::lyrics::LyricLine,
+    roman: Option<&'a crate::romanize::RomanLine>,
+    romanize: bool,
+) -> (&'a str, &'a [crate::lyrics::WordSeg]) {
+    match roman {
+        Some(roman) if romanize => (roman.text.as_str(), roman.words.as_slice()),
+        _ => (line.text.as_str(), line.words.as_slice()),
+    }
+}
+
 fn body_lines(app: &AppState) -> Vec<Line<'static>> {
     match &app.lyrics {
         // `header()` (this screen's title line, and the persistent
@@ -3539,16 +3565,19 @@ fn body_lines(app: &AppState) -> Vec<Line<'static>> {
             }
             let current = app.current_line.unwrap_or(0);
             let mut out = Vec::with_capacity(lines.len() * 2);
+            let romanized = app.romanized_lines.as_deref().filter(|r| r.len() == lines.len());
             for (i, line) in lines.iter().enumerate() {
-                let text = if line.text.is_empty() { "\u{266a}".to_string() } else { line.text.clone() };
-                let styled = if i == current && !line.words.is_empty() {
+                let (shown, words) =
+                    display_line(line, romanized.and_then(|r| r[i].as_ref()), app.romanize_lyrics);
+                let text = if shown.is_empty() { "\u{266a}".to_string() } else { shown.to_string() };
+                let styled = if i == current && !words.is_empty() {
                     // Word-by-word: same text, coloured by how far the voice
                     // has got. Sung = accent, still to come = white, both bold
                     // so nothing shifts as the sweep passes.
                     let sung = Style::default().fg(ACCENT).add_modifier(Modifier::BOLD);
                     let unsung = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
                     Line::from(
-                        sweep_runs(&line.words, app.position.as_secs_f64())
+                        sweep_runs(words, app.position.as_secs_f64())
                             .into_iter()
                             .map(|(run, fill)| Span::styled(run, if fill == Fill::Sung { sung } else { unsung }))
                             .collect::<Vec<_>>(),
@@ -5089,5 +5118,53 @@ mod sweep_active_tests {
         assert!(!word_sweep_active(&lyrics, None, Some(true)));
         assert!(!word_sweep_active(&LyricsState::Loading, Some(0), Some(true)));
         assert!(!word_sweep_active(&LyricsState::Synced(vec![line(true)]), Some(9), Some(true)));
+    }
+}
+
+#[cfg(test)]
+mod display_line_tests {
+    use super::*;
+    use crate::lyrics::{LyricLine, WordSeg};
+    use crate::romanize::RomanLine;
+    use std::time::Duration;
+
+    fn seg(text: &str) -> WordSeg {
+        WordSeg { text: text.to_string(), start: 1.0, end: 2.0 }
+    }
+
+    fn native() -> LyricLine {
+        LyricLine { timestamp: Duration::from_secs(1), text: "\u{541b}".to_string(), words: vec![seg("\u{541b}")] }
+    }
+
+    fn roman() -> RomanLine {
+        RomanLine { text: "kimi".to_string(), words: vec![seg("kimi")] }
+    }
+
+    #[test]
+    fn the_native_line_shows_when_romanization_is_off() {
+        let (line, roman) = (native(), roman());
+        assert_eq!(display_line(&line, Some(&roman), false), ("\u{541b}", &line.words[..]));
+    }
+
+    #[test]
+    fn the_romanized_line_and_its_words_replace_it_when_on() {
+        let (line, roman) = (native(), roman());
+        assert_eq!(display_line(&line, Some(&roman), true), ("kimi", &roman.words[..]));
+    }
+
+    #[test]
+    fn a_line_with_no_romanization_stays_native_even_when_on() {
+        let line = native();
+        assert_eq!(display_line(&line, None, true), ("\u{541b}", &line.words[..]));
+    }
+
+    #[test]
+    fn a_romanized_line_without_re_timed_words_is_drawn_whole_not_swept() {
+        // Falling back to the native words would sweep the wrong text.
+        let line = native();
+        let plain = RomanLine { text: "kimi".to_string(), words: Vec::new() };
+        let (text, words) = display_line(&line, Some(&plain), true);
+        assert_eq!(text, "kimi");
+        assert!(words.is_empty());
     }
 }

@@ -64,11 +64,14 @@ pub struct Config {
     /// lyrics chain simply skips that source. `SPICY_LYRICS_API_KEY` in the
     /// environment overrides it. Treat this file as private (`chmod 600`).
     pub spicy_lyrics_key: Option<ApiKey>,
+    /// Start with lyrics romanized (Japanese, Chinese, Korean shown in Latin
+    /// letters). `t` toggles it at any time; this only sets where it starts.
+    pub romanize_lyrics: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { confirm_quit: true, spicy_lyrics_key: None }
+        Self { confirm_quit: true, spicy_lyrics_key: None, romanize_lyrics: false }
     }
 }
 
@@ -104,6 +107,14 @@ mod tests {
     fn confirm_quit_can_be_disabled() {
         let cfg: Config = toml::from_str("confirm_quit = false").unwrap();
         assert!(!cfg.confirm_quit);
+    }
+
+    #[test]
+    fn romanized_lyrics_start_off_and_can_start_on() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.romanize_lyrics);
+        let cfg: Config = toml::from_str("romanize_lyrics = true").unwrap();
+        assert!(cfg.romanize_lyrics);
     }
 
     #[test]

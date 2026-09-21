@@ -14,7 +14,13 @@ librespot-core = "0.8.0"
 librespot-metadata = "0.8.0"
 librespot-oauth = "0.8.0"
 librespot-playback = "0.8.0"
+# Japanese romanization (Phase 23): lindera with the IPADIC dictionary embedded.
+# Costs ~49 MB of release binary (22 -> 72 MB), and the first build downloads the
+# dictionary tarball from Lindera.dev (md5-pinned by lindera-ipadic's build
+# script), so that build needs network access to that host.
+lindera = { version = "6", features = ["embed-ipadic"] }
 log = "0.4.34"
+pinyin = "0.11"
 ratatui = "0.30.2"
 ratatui-image = { version = "11.0.8", default-features = false, features = ["crossterm"] }
 rspotify = "0.16.1"
@@ -23,7 +29,9 @@ serde_json = "1.0.151"
 sha1 = "0.10"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time"] }
 toml = "1.1.5"
+unicode-normalization = "0.1"
 ureq = { version = "2", features = ["json"] }
+wana_kana = "5"
 
 # librespot-core declares `vergen-gitcl = "1.0"` (a loose range), and the
 # newest version satisfying that today, 1.0.8, has a self-inconsistent

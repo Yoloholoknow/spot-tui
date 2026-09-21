@@ -849,4 +849,56 @@ mod spicy_live {
         assert!(c.lyrics(NEON_SKIES).await.is_none());
         assert!(!c.gate.allow(BLINDING_LIGHTS, Instant::now()), "the whole source should be off now");
     }
+
+    /// Real J-pop, K-pop and C-pop sheets through the romanizer: the word
+    /// timing must re-form each romanized line, and the whole thing (including
+    /// the one-time Japanese dictionary load) must be quick enough to run when
+    /// the toggle is pressed. Run with `--nocapture` to read the output.
+    #[tokio::test]
+    #[ignore = "live network; needs SPICY_LYRICS_API_KEY"]
+    async fn real_cjk_sheets_romanize_quickly_and_re_time_cleanly() {
+        use crate::lyrics::LyricLine;
+        use std::time::Duration;
+
+        let c = client();
+        let tracks = [
+            ("7ovUcF5uHTBRzUpB6ZOmvt", "J-pop  \u{30a2}\u{30a4}\u{30c9}\u{30eb}"),
+            ("03UrZgTINDqvnUMbbIMhql", "K-pop  Gangnam Style"),
+            ("0Q5VnK2DYzRyfqQRJuUtvi", "K-pop  LOVE DIVE"),
+            ("2tqF9MPNdYdJU70U0ULO23", "C-pop  \u{544a}\u{767d}\u{6c23}\u{7403}"),
+        ];
+        for (id, name) in tracks {
+            let SpicyLyrics { lines, words, .. } = c.lyrics(id).await.expect("synced lyrics");
+            let sheet: Vec<LyricLine> = lines
+                .iter()
+                .enumerate()
+                .map(|(i, (start, text))| LyricLine {
+                    timestamp: Duration::from_secs_f64(*start),
+                    text: text.clone(),
+                    words: words.get(i).cloned().unwrap_or_default(),
+                })
+                .collect();
+            let started = std::time::Instant::now();
+            let romanized = crate::romanize::romanize_lyric_lines(&sheet);
+            let took = started.elapsed();
+            let with_text = romanized.iter().flatten().count();
+            println!("=== {name}: {} lines, {with_text} romanized, {took:?}", sheet.len());
+            for (line, roman) in sheet.iter().zip(&romanized).filter(|(_, r)| r.is_some()).take(5) {
+                println!("  {}\n    -> {}", line.text, roman.as_ref().unwrap().text);
+            }
+            // Long vowels are the part most worth eyeballing on real lyrics.
+            let has_macron = |text: &str| text.chars().any(|c| "\u{101}\u{12b}\u{16b}\u{113}\u{14d}".contains(c));
+            for (line, roman) in sheet.iter().zip(&romanized).filter(|(_, r)| r.as_ref().is_some_and(|r| has_macron(&r.text))).take(4) {
+                println!("  [long vowel] {}\n    -> {}", line.text, roman.as_ref().unwrap().text);
+            }
+            for (line, roman) in sheet.iter().zip(&romanized) {
+                if let Some(roman) = roman.as_ref().filter(|r| !r.words.is_empty()) {
+                    assert_eq!(roman.words.iter().map(|w| w.text.as_str()).collect::<String>(), roman.text);
+                    assert!(!line.words.is_empty());
+                }
+            }
+            assert!(with_text * 2 > sheet.len(), "under half the lines were romanized for {name}");
+            assert!(took < Duration::from_secs(10), "romanizing {name} took {took:?}");
+        }
+    }
 }

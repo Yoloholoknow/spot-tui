@@ -5,6 +5,7 @@ mod position;
 mod api;
 mod spike;
 mod ui;
+mod romanize;
 mod spicy;
 mod ytmusic;
 
@@ -1231,6 +1232,7 @@ fn drain_player_events(
             app.duration = Duration::from_millis(audio_item.duration_ms as u64);
             app.lyrics = LyricsState::Loading;
             app.lyrics_credit = None;
+            app.romanized_lines = None;
             *generation += 1;
 
             // Real album art, only worth fetching at all if a real
@@ -1362,6 +1364,47 @@ async fn spicy_lookup(client: &spicy::SpicyClient, track_uri: &str, base62_id: &
         log::warn!("spicy_lyrics[{base62_id}]: couldn't cache the result: {e}");
     }
     Some(CachedLyrics::Synced { lines, words, credit: Some(credit) })
+}
+
+/// The status-bar text after `t`. When there is nothing to romanize it says
+/// why, rather than leaving a toggle that appears to do nothing.
+fn romanize_status(on: bool, lyrics: &LyricsState) -> String {
+    if !on {
+        return "romanized lyrics off".to_string();
+    }
+    match lyrics {
+        LyricsState::Synced(lines) if romanize::sheet_has_cjk(lines) => "romanized lyrics on".to_string(),
+        LyricsState::Synced(_) => {
+            "romanized lyrics on (this track has no Japanese, Chinese or Korean lyrics)".to_string()
+        }
+        _ => "romanized lyrics on (needs synced lyrics)".to_string(),
+    }
+}
+
+/// Starts romanizing the current sheet off the render thread (the first
+/// Japanese line loads a ~47 MB dictionary), once per track. The result comes
+/// back on `tx`, generation-guarded like every other lyric result; until it
+/// arrives the native text shows.
+fn request_romanization(
+    app: &AppState,
+    generation: u64,
+    requested: &mut Option<u64>,
+    tx: &mpsc::Sender<(u64, Vec<Option<romanize::RomanLine>>)>,
+) {
+    if !app.romanize_lyrics || app.romanized_lines.is_some() || *requested == Some(generation) {
+        return;
+    }
+    let LyricsState::Synced(lines) = &app.lyrics else {
+        return;
+    };
+    if !romanize::sheet_has_cjk(lines) {
+        return;
+    }
+    *requested = Some(generation);
+    let (lines, tx) = (lines.clone(), tx.clone());
+    std::thread::spawn(move || {
+        let _ = tx.send((generation, romanize::romanize_lyric_lines(&lines)));
+    });
 }
 
 fn to_lyrics_state(cached: CachedLyrics) -> LyricsState {
@@ -1538,6 +1581,9 @@ async fn main() -> std::io::Result<()> {
     // fetches already are so a result for a track already skipped past
     // gets dropped rather than painted over the current one.
     let (cover_tx, cover_rx) = mpsc::channel::<(u64, image::DynamicImage)>();
+    // Romanized lyrics are computed off the render thread and come back here.
+    let (roman_tx, roman_rx) = mpsc::channel::<(u64, Vec<Option<romanize::RomanLine>>)>();
+    let mut roman_requested: Option<u64> = None;
     let cfg = config::load();
     // Spicy Lyrics' developer API: only when a key is configured. Without
     // one the lyrics chain is exactly what it was before this existed.
@@ -1558,6 +1604,8 @@ async fn main() -> std::io::Result<()> {
         repeat: RepeatMode::Off,
         lyrics: LyricsState::Idle,
         lyrics_credit: None,
+        romanize_lyrics: cfg.romanize_lyrics,
+        romanized_lines: None,
         current_line: None,
         fullscreen: false,
         playing: None,
@@ -2137,9 +2185,17 @@ async fn main() -> std::io::Result<()> {
                     _ => None,
                 };
                 app.lyrics = to_lyrics_state(result);
+                app.romanized_lines = None;
                 if let LyricsState::Synced(lines) = &app.lyrics {
                     synced_lines = lines.clone();
                 }
+                request_romanization(&app, generation, &mut roman_requested, &roman_tx);
+            }
+        }
+
+        while let Ok((roman_gen, lines)) = roman_rx.try_recv() {
+            if roman_gen == generation {
+                app.romanized_lines = Some(lines);
             }
         }
 
@@ -2266,6 +2322,16 @@ async fn main() -> std::io::Result<()> {
                     && !text_input_active(&app)
                 {
                     cycle_shuffle(&mut app, &spirc);
+                // `t` toggles romanized lyrics (Japanese/Chinese/Korean in
+                // Latin letters). Global like `z`, and guarded the same way so
+                // a typed `t` still reaches Search and the list filters.
+                } else if key.code == KeyCode::Char('t')
+                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && !text_input_active(&app)
+                {
+                    app.romanize_lyrics = !app.romanize_lyrics;
+                    app.status = Some((romanize_status(app.romanize_lyrics, &app.lyrics), false));
+                    request_romanization(&app, generation, &mut roman_requested, &roman_tx);
                 // `Shift+R` via `is_shift_char`, like every other Shift+letter
                 // here (some terminals report it as lowercase-plus-SHIFT). Plain
                 // `r` is untouched -- it still means rename/refresh per screen.
@@ -4471,5 +4537,42 @@ mod lyric_words_tests {
         let lines = lines_of(state);
         assert_eq!(lines[0].words.len(), 1);
         assert!(lines[1].words.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod romanize_status_tests {
+    use super::*;
+
+    fn synced(text: &str) -> LyricsState {
+        LyricsState::Synced(vec![LyricLine {
+            timestamp: Duration::from_secs(1),
+            text: text.to_string(),
+            words: Vec::new(),
+        }])
+    }
+
+    #[test]
+    fn turning_it_off_just_says_so() {
+        assert_eq!(romanize_status(false, &synced("\u{541b}")), "romanized lyrics off");
+    }
+
+    #[test]
+    fn turning_it_on_for_a_cjk_track_just_says_so() {
+        assert_eq!(romanize_status(true, &synced("\u{541b}")), "romanized lyrics on");
+    }
+
+    #[test]
+    fn a_track_with_nothing_to_romanize_says_why_instead_of_silently_doing_nothing() {
+        let status = romanize_status(true, &synced("Stay in the middle"));
+        assert!(status.starts_with("romanized lyrics on"), "{status}");
+        assert!(status.contains("no Japanese, Chinese or Korean"), "{status}");
+    }
+
+    #[test]
+    fn unsynced_or_missing_lyrics_say_that_synced_lyrics_are_needed() {
+        for lyrics in [LyricsState::Loading, LyricsState::Plain("x".to_string()), LyricsState::NotFound, LyricsState::Idle] {
+            assert!(romanize_status(true, &lyrics).contains("needs synced lyrics"));
+        }
     }
 }

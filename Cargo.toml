@@ -36,3 +36,24 @@ ureq = { version = "2", features = ["json"] }
 # it goes missing after editing dependencies.
 [patch.crates-io]
 vergen-gitcl = { git = "https://github.com/rustyhorde/vergen", tag = "vergen_gitcl_1.0.3" }
+
+# Smart shuffle (Phase 25): `SetOptionsCommand` drops the `modes` map the
+# official app sends with `set_options` (smart shuffle is
+# `modes.context_enhancement = "RECOMMENDATION"`), so librespot reverted it
+# to plain shuffle. These two vendored copies of 0.8.0 differ from stock in
+# exactly these places -- re-apply them on any librespot upgrade:
+#   librespot-core    dealer/protocol/request.rs   `modes` field on SetOptionsCommand
+#                     authentication.rs            `#[expect(deprecated)]` -> `#[allow(...)]` (silences a
+#                                                  lint that only warns because it is a path crate)
+#   librespot-connect state/options.rs             set_modes, set_smart_shuffle_mode,
+#                                                  smart_shuffle_active() flag, shuffle-off
+#                                                  resets the mode (+ tests)
+#                     state.rs                     re-export of smart_shuffle_active
+#                     state/transfer.rs            publish the flag after a transfer
+#                     spirc.rs                     `modes` in the SetOptions arm,
+#                                                  Spirc::smart_shuffle(), and re-announcing
+#                                                  shuffle/repeat after a transfer applies its
+#                                                  options (stock announces the stale pre-transfer
+#                                                  values, so a launch always showed shuffle off)
+librespot-core = { path = "vendor/librespot-core" }
+librespot-connect = { path = "vendor/librespot-connect" }

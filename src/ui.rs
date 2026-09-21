@@ -447,22 +447,75 @@ impl RepeatMode {
     }
 }
 
+/// The three states the `z` key cycles through, mirroring Spotify's own
+/// shuffle button: off, shuffle, smart shuffle. Smart shuffle is shuffle plus
+/// a `context_enhancement` mode, so it always implies shuffle is on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShuffleMode {
+    #[default]
+    Off,
+    On,
+    Smart,
+}
+
+impl ShuffleMode {
+    pub fn from_flags(shuffle: bool, smart: bool) -> Self {
+        match (shuffle, smart) {
+            (false, _) => Self::Off,
+            (true, false) => Self::On,
+            (true, true) => Self::Smart,
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::On,
+            Self::On => Self::Smart,
+            Self::Smart => Self::Off,
+        }
+    }
+
+    pub fn shuffle(self) -> bool {
+        self != Self::Off
+    }
+
+    /// Status-bar text after switching to this mode. Smart shuffle says
+    /// plainly what spot-tui can't do: the recommended tracks Spotify's own
+    /// apps mix in are not added when spot-tui is the playing device.
+    pub fn status_label(self) -> &'static str {
+        match self {
+            Self::Off => "shuffle off",
+            Self::On => "shuffle on",
+            Self::Smart => "smart shuffle on (no recommended songs are added from spot-tui)",
+        }
+    }
+}
+
 /// The playbar's always-visible shuffle and repeat toggles, as Spotify
-/// shows them: both glyphs are drawn in every state, and the `bool` says
+/// shows them: every glyph is drawn in every state, and the `bool` says
 /// whether that one is currently on (accent) or off (dim) -- the caller
 /// does the coloring. Repeat's slot is a fixed two cells wide (`↻ ` for off
 /// and album/playlist, `↻1` for this song) so the readout never changes
 /// width and the track title's truncation point doesn't jump around as
-/// modes change.
-pub fn playback_modes(shuffle: bool, repeat: RepeatMode) -> [(&'static str, bool); 2] {
+/// modes change. Smart shuffle is a third shuffle state, not a separate
+/// toggle, so its sparkle sits in the one-cell gap between the two toggles
+/// (a blank when off) instead of widening the readout; it only lights while
+/// shuffle itself is on.
+pub fn playback_modes(shuffle: bool, smart: bool, repeat: RepeatMode) -> [(&'static str, bool); 3] {
     let repeat_glyph = match repeat {
         RepeatMode::Track => "\u{21bb}1",
         RepeatMode::Off | RepeatMode::Context => "\u{21bb} ",
     };
-    [("\u{21c4}", shuffle), (repeat_glyph, repeat != RepeatMode::Off)]
+    let smart = shuffle && smart;
+    [
+        ("\u{21c4}", shuffle),
+        (if smart { "\u{2726}" } else { " " }, smart),
+        (repeat_glyph, repeat != RepeatMode::Off),
+    ]
 }
 
-/// Cells `playback_modes` always occupies: shuffle (1), a space, repeat (2).
+/// Cells `playback_modes` always occupies: shuffle (1), the smart-shuffle
+/// gap (1), repeat (2).
 const PLAYBACK_MODES_WIDTH: usize = 4;
 
 /// Validates a typed 1-based "move to position" answer against a list of
@@ -1490,6 +1543,10 @@ pub struct AppState {
     /// optimistic update at the keypress so a quick second press cycles
     /// from the state just requested rather than a stale one.
     pub shuffle: bool,
+    /// Smart shuffle: shuffle with Spotify's recommendations mixed in. A
+    /// third state of `shuffle`, read from librespot's connect state, and
+    /// only ever true while `shuffle` is.
+    pub smart_shuffle: bool,
     pub repeat: RepeatMode,
     pub lyrics: LyricsState,
     pub current_line: Option<usize>,
@@ -2193,7 +2250,10 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "Ctrl+P",
                 "quick jump -- search any playlist/liked track/artist/album/device/screen by name and jump straight to it (works even mid-query on Search; press again to close)",
             ),
-            ("z", "shuffle on / off -- works from any screen (not while typing in Search or a filter)"),
+            (
+                "z",
+                "cycle shuffle like Spotify's own button: off, then shuffle, then smart shuffle (\u{2726} on the playbar), then off. Works from any screen (not while typing in Search or a filter). Shuffle stays on when you start a different playlist or album. Smart shuffle sets Spotify's mode but spot-tui can't add the recommended songs itself",
+            ),
             (
                 "Shift+R",
                 "cycle repeat: off, then the whole album/playlist, then this one song, then off. The playbar always shows \u{21c4} (shuffle) and \u{21bb} (repeat, \u{21bb}1 for this song) -- bright when on, dim when off",
@@ -3154,27 +3214,88 @@ mod repeat_mode_tests {
 }
 
 #[cfg(test)]
+mod shuffle_mode_tests {
+    use super::*;
+
+    #[test]
+    fn the_flags_map_to_the_three_states() {
+        assert_eq!(ShuffleMode::from_flags(false, false), ShuffleMode::Off);
+        assert_eq!(ShuffleMode::from_flags(true, false), ShuffleMode::On);
+        assert_eq!(ShuffleMode::from_flags(true, true), ShuffleMode::Smart);
+    }
+
+    #[test]
+    fn smart_without_shuffle_is_just_off() {
+        // A stale smart flag can't outlive shuffle itself.
+        assert_eq!(ShuffleMode::from_flags(false, true), ShuffleMode::Off);
+    }
+
+    #[test]
+    fn the_key_cycles_off_then_shuffle_then_smart_then_off() {
+        assert_eq!(ShuffleMode::Off.next(), ShuffleMode::On);
+        assert_eq!(ShuffleMode::On.next(), ShuffleMode::Smart);
+        assert_eq!(ShuffleMode::Smart.next(), ShuffleMode::Off);
+    }
+
+    #[test]
+    fn a_full_cycle_returns_to_the_start() {
+        let start = ShuffleMode::On;
+        assert_eq!(start.next().next().next(), start);
+    }
+
+    #[test]
+    fn smart_shuffle_implies_shuffle() {
+        assert!(!ShuffleMode::Off.shuffle());
+        assert!(ShuffleMode::On.shuffle());
+        assert!(ShuffleMode::Smart.shuffle());
+    }
+
+    #[test]
+    fn status_labels_name_the_mode() {
+        assert_eq!(ShuffleMode::Off.status_label(), "shuffle off");
+        assert_eq!(ShuffleMode::On.status_label(), "shuffle on");
+        assert!(ShuffleMode::Smart.status_label().starts_with("smart shuffle on"));
+    }
+}
+
+#[cfg(test)]
 mod playback_modes_tests {
     use super::*;
 
     #[test]
     fn both_glyphs_are_always_present_even_with_everything_off() {
-        let [shuffle, repeat] = playback_modes(false, RepeatMode::Off);
+        let [shuffle, smart, repeat] = playback_modes(false, false, RepeatMode::Off);
         assert_eq!(shuffle, ("\u{21c4}", false));
+        assert_eq!(smart, (" ", false));
         assert_eq!(repeat, ("\u{21bb} ", false));
     }
 
     #[test]
     fn shuffle_lights_up_on_its_own() {
-        let [shuffle, repeat] = playback_modes(true, RepeatMode::Off);
+        let [shuffle, smart, repeat] = playback_modes(true, false, RepeatMode::Off);
         assert!(shuffle.1);
+        assert!(!smart.1);
         assert!(!repeat.1);
     }
 
     #[test]
+    fn smart_shuffle_fills_the_gap_between_the_toggles_with_a_lit_sparkle() {
+        let [shuffle, smart, _] = playback_modes(true, true, RepeatMode::Off);
+        assert!(shuffle.1, "smart shuffle is still shuffle");
+        assert_eq!(smart, ("\u{2726}", true));
+    }
+
+    #[test]
+    fn the_sparkle_needs_shuffle_itself_to_be_on() {
+        // A stale smart flag with shuffle off must not draw a sparkle.
+        let [_, smart, _] = playback_modes(false, true, RepeatMode::Off);
+        assert_eq!(smart, (" ", false));
+    }
+
+    #[test]
     fn repeat_album_and_repeat_song_are_both_active_but_only_song_gets_the_one() {
-        let [_, context] = playback_modes(false, RepeatMode::Context);
-        let [_, track] = playback_modes(false, RepeatMode::Track);
+        let [_, _, context] = playback_modes(false, false, RepeatMode::Context);
+        let [_, _, track] = playback_modes(false, false, RepeatMode::Track);
         assert_eq!(context, ("\u{21bb} ", true));
         assert_eq!(track, ("\u{21bb}1", true));
     }
@@ -3184,13 +3305,19 @@ mod playback_modes_tests {
         // A fixed-width readout is what lets the playbar reserve its room
         // once -- otherwise the track title's truncation point would jump
         // every time shuffle or repeat changed.
-        let width = |shuffle, repeat| {
-            playback_modes(shuffle, repeat).iter().map(|(text, _)| text.chars().count()).sum::<usize>()
+        let width = |shuffle, smart, repeat| {
+            playback_modes(shuffle, smart, repeat).iter().map(|(text, _)| text.chars().count()).sum::<usize>()
         };
-        let expected = width(false, RepeatMode::Off);
+        let expected = width(false, false, RepeatMode::Off);
         for shuffle in [false, true] {
-            for repeat in [RepeatMode::Off, RepeatMode::Context, RepeatMode::Track] {
-                assert_eq!(width(shuffle, repeat), expected, "shuffle={shuffle} repeat={repeat:?}");
+            for smart in [false, true] {
+                for repeat in [RepeatMode::Off, RepeatMode::Context, RepeatMode::Track] {
+                    assert_eq!(
+                        width(shuffle, smart, repeat),
+                        expected,
+                        "shuffle={shuffle} smart={smart} repeat={repeat:?}"
+                    );
+                }
             }
         }
     }
@@ -3201,7 +3328,7 @@ fn render_playbar(frame: &mut Frame, app: &AppState, area: Rect) {
     // always-present shuffle/repeat toggles (plus their 3-space gap) come
     // out of the title's share.
     let title_room = (area.width as usize).saturating_sub(28 + 3 + PLAYBACK_MODES_WIDTH);
-    let [shuffle, repeat] = playback_modes(app.shuffle, app.repeat);
+    let [shuffle, smart, repeat] = playback_modes(app.shuffle, app.smart_shuffle, app.repeat);
     let toggle_style = |on: bool| Style::default().fg(if on { ACCENT } else { DIM });
     let spans = vec![
         Span::raw(format!(
@@ -3212,7 +3339,7 @@ fn render_playbar(frame: &mut Frame, app: &AppState, area: Rect) {
             volume_readout(app),
         )),
         Span::styled(shuffle.0, toggle_style(shuffle.1)),
-        Span::raw(" "),
+        Span::styled(smart.0, toggle_style(smart.1)),
         Span::styled(repeat.0, toggle_style(repeat.1)),
     ];
     frame.render_widget(

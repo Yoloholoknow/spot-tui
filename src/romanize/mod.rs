@@ -138,6 +138,19 @@ pub fn romanize_lyric_lines(lines: &[crate::lyrics::LyricLine]) -> Vec<Option<Ro
         .collect()
 }
 
+/// Unsynced lyrics romanized line by line, in step with `text.lines()` (which
+/// is how the renderer walks them): `None` for a line with no CJK. There is no
+/// word timing to re-map here. Loads the Japanese dictionary on first use, so
+/// callers run this off the render thread.
+pub fn romanize_plain_lines(text: &str) -> Vec<Option<RomanLine>> {
+    let lines: Vec<&str> = text.lines().collect();
+    let han = han_language(&lines);
+    lines
+        .iter()
+        .map(|line| romanize_line(line, han).map(|text| RomanLine { text, words: Vec::new() }))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,5 +342,51 @@ mod lyric_line_tests {
         assert!(sheet_has_cjk(&[line("Stay", vec![]), line("\u{4f60}\u{597d}", vec![])]));
         assert!(!sheet_has_cjk(&[line("Stay", vec![]), line("in", vec![])]));
         assert!(!sheet_has_cjk(&[]));
+    }
+}
+
+#[cfg(test)]
+mod plain_tests {
+    use super::*;
+
+    #[test]
+    fn each_text_line_gets_its_own_entry_and_only_cjk_lines_are_romanized() {
+        let out = romanize_plain_lines("\u{3055}\u{3088}\u{306a}\u{3089}\nStay in the middle\n\u{541b}\u{3068}");
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].as_ref().map(|r| r.text.as_str()), Some("sayonara"));
+        assert!(out[1].is_none());
+        assert_eq!(out[2].as_ref().map(|r| r.text.as_str()), Some("kimi to"));
+    }
+
+    #[test]
+    fn entries_line_up_with_str_lines_including_blank_lines() {
+        // The renderer walks `text.lines()`, so the entries must too.
+        let text = "\u{4f60}\u{597d}\n\n\u{4e16}\u{754c}\n";
+        let out = romanize_plain_lines(text);
+        assert_eq!(out.len(), text.lines().count());
+        assert!(out[0].is_some());
+        assert!(out[1].is_none(), "a blank line has nothing to romanize");
+        assert!(out[2].is_some());
+    }
+
+    #[test]
+    fn the_language_is_decided_across_the_whole_text() {
+        // Kana on one line makes the kanji-only line Japanese.
+        let out = romanize_plain_lines("\u{3055}\u{3088}\u{306a}\u{3089}\n\u{904b}\u{547d}");
+        assert_eq!(out[1].as_ref().map(|r| r.text.as_str()), Some("unmei"));
+        let out = romanize_plain_lines("\u{904b}\u{547d}");
+        assert_eq!(out[0].as_ref().map(|r| r.text.as_str()), Some("y\u{00f9}n m\u{00ec}ng"));
+    }
+
+    #[test]
+    fn plain_lines_carry_no_word_timing() {
+        let out = romanize_plain_lines("\u{c548}\u{b155}");
+        assert!(out[0].as_ref().unwrap().words.is_empty());
+    }
+
+    #[test]
+    fn text_with_no_cjk_has_nothing_to_romanize() {
+        assert!(romanize_plain_lines("one\ntwo").iter().all(Option::is_none));
+        assert!(romanize_plain_lines("").is_empty());
     }
 }

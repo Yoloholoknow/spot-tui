@@ -2263,7 +2263,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "t",
-                "toggle romanized lyrics: Japanese, Chinese and Korean lyrics shown in Latin letters instead of their own script (kanji read in context, pinyin with tone marks, Revised Romanization for Korean). Works from any screen (not while typing in Search or a filter); the word-by-word highlight keeps moving. Needs synced lyrics. Set romanize_lyrics = true in config.toml to start with it on",
+                "toggle romanized lyrics: Japanese, Chinese and Korean lyrics shown in Latin letters instead of their own script (kanji read in context, pinyin with tone marks, Revised Romanization for Korean). Works from any screen (not while typing in Search or a filter); the word-by-word highlight keeps moving. Works for unsynced lyrics too (without the word-by-word highlight, which needs synced lyrics). Set romanize_lyrics = true in config.toml to start with it on",
             ),
             (
                 "z",
@@ -3524,6 +3524,24 @@ fn display_line<'a>(
     }
 }
 
+/// The text lines of unsynced lyrics as they should be shown: romanized where
+/// romanization is on and a line has one, native otherwise. Blank lines stay
+/// so the layout doesn't shift, and a result that doesn't line up with the
+/// text (a different number of lines) is ignored rather than misplaced.
+fn plain_display_lines(
+    text: &str,
+    roman: Option<&[Option<crate::romanize::RomanLine>]>,
+    romanize: bool,
+) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let roman = roman.filter(|r| romanize && r.len() == lines.len());
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, native)| roman.and_then(|r| r[i].as_ref()).map_or_else(|| (*native).to_string(), |r| r.text.clone()))
+        .collect()
+}
+
 fn body_lines(app: &AppState) -> Vec<Line<'static>> {
     match &app.lyrics {
         // `header()` (this screen's title line, and the persistent
@@ -3542,12 +3560,14 @@ fn body_lines(app: &AppState) -> Vec<Line<'static>> {
         LyricsState::Loading => vec![Line::from("fetching lyrics\u{2026}")],
         LyricsState::Instrumental => vec![Line::from("\u{266a} instrumental")],
         LyricsState::NotFound => vec![Line::from("no lyrics found")],
-        LyricsState::Plain(text) => {
-            vec![Line::from("(unsynced)")]
-                .into_iter()
-                .chain(text.lines().map(|l| Line::from(l.to_string())))
-                .collect()
-        }
+        LyricsState::Plain(text) => vec![Line::from("(unsynced)")]
+            .into_iter()
+            .chain(
+                plain_display_lines(text, app.romanized_lines.as_deref(), app.romanize_lyrics)
+                    .into_iter()
+                    .map(Line::from),
+            )
+            .collect(),
         // Shows the whole sheet, not a windowed few lines around the
         // current one -- matches official Spotify's own default lyrics
         // view. `render_now_playing_hero`/`render_fullscreen_hero` are
@@ -5166,5 +5186,48 @@ mod display_line_tests {
         let (text, words) = display_line(&line, Some(&plain), true);
         assert_eq!(text, "kimi");
         assert!(words.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod plain_display_tests {
+    use super::*;
+    use crate::romanize::RomanLine;
+
+    fn roman(text: &str) -> Option<RomanLine> {
+        Some(RomanLine { text: text.to_string(), words: Vec::new() })
+    }
+
+    #[test]
+    fn native_text_shows_when_romanization_is_off() {
+        let r = vec![roman("kimi")];
+        assert_eq!(plain_display_lines("\u{541b}", Some(&r), false), vec!["\u{541b}"]);
+    }
+
+    #[test]
+    fn romanized_lines_replace_native_ones_when_on() {
+        let r = vec![roman("kimi"), None, roman("sayonara")];
+        assert_eq!(
+            plain_display_lines("\u{541b}\nStay\n\u{3055}\u{3088}\u{306a}\u{3089}", Some(&r), true),
+            vec!["kimi", "Stay", "sayonara"]
+        );
+    }
+
+    #[test]
+    fn blank_lines_are_kept_so_the_layout_does_not_shift() {
+        let r = vec![roman("kimi"), None, roman("nani")];
+        assert_eq!(plain_display_lines("\u{541b}\n\n\u{4f55}", Some(&r), true), vec!["kimi", "", "nani"]);
+    }
+
+    #[test]
+    fn nothing_computed_yet_shows_native_text() {
+        assert_eq!(plain_display_lines("a\nb", None, true), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn a_result_that_does_not_line_up_is_ignored_rather_than_misplaced() {
+        // Defensive: entries for a different number of lines than the text has.
+        let r = vec![roman("kimi")];
+        assert_eq!(plain_display_lines("a\nb\nc", Some(&r), true), vec!["a", "b", "c"]);
     }
 }

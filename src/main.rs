@@ -5,6 +5,7 @@ mod position;
 mod api;
 mod spike;
 mod ui;
+mod spicy;
 mod ytmusic;
 
 use crossterm::event::{self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyModifiers};
@@ -19,7 +20,7 @@ use librespot_playback::audio_backend;
 use librespot_playback::config::{AudioFormat, PlayerConfig};
 use librespot_playback::mixer::{self, MixerConfig};
 use librespot_playback::player::{Player, PlayerEvent};
-use lyrics::{current_line_index, spotify_lyrics, CachedLyrics, LyricLine, LyricsClient};
+use lyrics::{cached_synced, current_line_index, spotify_lyrics, store_synced, CachedLyrics, LyricLine, LyricsClient};
 use position::PositionTracker;
 use std::io::stdout;
 use std::io::Read;
@@ -1222,6 +1223,7 @@ fn drain_player_events(
             app.current_track_uri = Some(audio_item.track_id.to_string());
             app.duration = Duration::from_millis(audio_item.duration_ms as u64);
             app.lyrics = LyricsState::Loading;
+            app.lyrics_credit = None;
             *generation += 1;
 
             // Real album art, only worth fetching at all if a real
@@ -1332,9 +1334,29 @@ async fn connect_spirc() -> Result<
     Ok((spirc, spirc_handle, player_events, lyrics_session))
 }
 
+/// Spicy Lyrics for one track: a cached *synced* result first (so a replay
+/// never spends rate-limit quota), then the API, storing whatever it returns.
+/// A stale lrclib `Plain`/`NotFound` entry is deliberately not a hit (see
+/// `cached_synced`), and a synced result overwrites it.
+async fn spicy_lookup(client: &spicy::SpicyClient, track_uri: &str, base62_id: &str) -> Option<CachedLyrics> {
+    let dir = cache_dir();
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    if let Some(hit) = cached_synced(&dir, track_uri, now_unix) {
+        return Some(hit);
+    }
+    let (lines, credit) = client.lyrics(base62_id).await?;
+    if let Err(e) = store_synced(&dir, track_uri, lines.clone(), Some(credit.clone()), now_unix) {
+        log::warn!("spicy_lyrics[{base62_id}]: couldn't cache the result: {e}");
+    }
+    Some(CachedLyrics::Synced { lines, credit: Some(credit) })
+}
+
 fn to_lyrics_state(cached: CachedLyrics) -> LyricsState {
     match cached {
-        CachedLyrics::Synced { lines } => LyricsState::Synced(
+        CachedLyrics::Synced { lines, .. } => LyricsState::Synced(
             lines
                 .into_iter()
                 .map(|(secs, text)| LyricLine {
@@ -1503,6 +1525,13 @@ async fn main() -> std::io::Result<()> {
     // gets dropped rather than painted over the current one.
     let (cover_tx, cover_rx) = mpsc::channel::<(u64, image::DynamicImage)>();
     let cfg = config::load();
+    // Spicy Lyrics' developer API: only when a key is configured. Without
+    // one the lyrics chain is exactly what it was before this existed.
+    let spicy = cfg.spicy_lyrics_key().map(spicy::SpicyClient::new);
+    log::info!(
+        "spicy_lyrics: {}",
+        if spicy.is_some() { "key configured, used first" } else { "no key configured, skipped" }
+    );
     let mut tracker: PositionTracker;
     let mut app = AppState {
         track_title: None,
@@ -1514,6 +1543,7 @@ async fn main() -> std::io::Result<()> {
         smart_shuffle: false,
         repeat: RepeatMode::Off,
         lyrics: LyricsState::Idle,
+        lyrics_credit: None,
         current_line: None,
         fullscreen: false,
         playing: None,
@@ -1737,30 +1767,21 @@ async fn main() -> std::io::Result<()> {
         if let Some((fetch_gen, meta, deadline)) = pending_fetch.clone()
             && Instant::now() >= deadline {
                 pending_fetch = None;
-                // Spicy Lyrics was tried and conclusively closed out (not
-                // just deprioritized): their backend rejects any token not
-                // minted by an official Spotify client, and Spotify's own
-                // keymaster service refuses to mint a token under a
-                // different client id than the one a session actually
-                // authenticated under (confirmed live: a 403 "Invalid
-                // request" from `hm://keymaster/token/authenticated` itself,
-                // before Spicy Lyrics is ever even reached). There is no
-                // token this app can legitimately obtain that both those
-                // gates would accept. Real, closed dead end -- not a bug
-                // left half-fixed. Tried in order: Spotify's own first-party
-                // catalog (Phase 17, session.spclient().get_lyrics), then
-                // YouTube Music (Phase 22, a different licensing catalog --
-                // LyricFind, not Spotify's historical Musixmatch backing --
-                // so it has real incremental-coverage odds rather than just
-                // duplicating Spotify's own result), then lrclib via the
-                // background thread below, as the last, community-database
-                // tier. `None` at each step means "no usable synced result
-                // from this source," not "no lyrics at all" -- falls
-                // through to the next. A track_id that fails to parse
-                // (shouldn't happen for a real spotify:track: uri, but this
-                // is exactly the kind of external-shape assumption this
-                // codebase never trusts blindly) skips straight to the
-                // lrclib fallback, bypassing both of the others.
+                // Tried in order, each `None` meaning "no usable synced result
+                // from this source" (not "no lyrics at all") and falling
+                // through to the next: Spicy Lyrics' official developer API
+                // (Phase 26; only when a key is configured; word-level and
+                // Apple Music/community syncs, credited under the lyrics),
+                // then Spotify's own first-party catalog (Phase 17,
+                // session.spclient().get_lyrics), then YouTube Music
+                // (Phase 22, a different licensing catalog), then lrclib via
+                // the background thread below as the community-database
+                // tier. The earlier reverse-engineered Spicy Lyrics attempt
+                // (Phase 20) is gone for good; this is the sanctioned API.
+                // A track_id that fails to parse (shouldn't happen for a
+                // real spotify:track: uri, but this is exactly the kind of
+                // external-shape assumption this codebase never trusts
+                // blindly) skips straight to the lrclib fallback.
                 let track_id = librespot_core::SpotifyUri::from_uri(&meta.track_id)
                     .ok()
                     .and_then(|uri| librespot_core::SpotifyId::try_from(&uri).ok());
@@ -1769,7 +1790,14 @@ async fn main() -> std::io::Result<()> {
                         let session = lyrics_session.clone();
                         let fallback_tx = fetch_tx.clone();
                         let result_tx = fetch_res_tx.clone();
+                        let spicy = spicy.clone();
                         tokio::spawn(async move {
+                            if let (Some(client), Ok(base62)) = (spicy, track_id.to_base62())
+                                && let Some(cached) = spicy_lookup(&client, &meta.track_id, &base62).await
+                            {
+                                let _ = result_tx.send((fetch_gen, cached));
+                                return;
+                            }
                             if let Some(cached) = spotify_lyrics(&session, track_id).await {
                                 let _ = result_tx.send((fetch_gen, cached));
                                 return;
@@ -2090,6 +2118,10 @@ async fn main() -> std::io::Result<()> {
 
         while let Ok((fetch_gen, result)) = fetch_rx.try_recv() {
             if fetch_gen == generation {
+                app.lyrics_credit = match &result {
+                    CachedLyrics::Synced { credit, .. } => credit.clone(),
+                    _ => None,
+                };
                 app.lyrics = to_lyrics_state(result);
                 if let LyricsState::Synced(lines) = &app.lyrics {
                     synced_lines = lines.clone();

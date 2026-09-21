@@ -32,8 +32,8 @@ use api::search::TrackResult;
 use ui::{
     filtered_sorted, pinned_first, quick_jump_entries, AlbumDetailState, AppState, ArtistDetailState, ConfirmAction,
     Fetch, Focus, LibraryState, ListFilter, LyricsState, Nav, PendingConfirm, PlaylistDetailState, PlaylistPicker,
-    QuickJump, QuickJumpEntry, QuickJumpKind, RepeatMode, Screen, SearchState, TextPrompt, TextPromptAction,
-    LIBRARY_ENTRIES,
+    QuickJump, QuickJumpEntry, QuickJumpKind, RepeatMode, Screen, SearchState, ShuffleMode, TextPrompt,
+    TextPromptAction, LIBRARY_ENTRIES,
 };
 
 enum LibraryFetchResult {
@@ -691,12 +691,34 @@ fn text_input_active(app: &AppState) -> bool {
 /// restrictions can forbid shuffling) would still read as on here while
 /// the player quietly refuses -- a real librespot quirk, not something
 /// this app can detect from its side.
-fn toggle_shuffle(app: &mut AppState, spirc: &Spirc) {
-    let target = !app.shuffle;
-    match spirc.shuffle(target) {
+/// librespot resets shuffle and both repeat flags on every `load` unless the
+/// request carries explicit options, and emits no event when it does -- so a
+/// new playlist/album/track silently turned shuffle off in Spotify while the
+/// playbar stayed lit. Spotify's own clients keep shuffle and repeat across
+/// context switches, so every load hands the current values back in.
+fn carry_modes(shuffle: bool, repeat: RepeatMode, mut opts: LoadRequestOptions) -> LoadRequestOptions {
+    let (repeat_context, repeat_track) = repeat.flags();
+    opts.context_options = Some(librespot_connect::LoadContextOptions::Options(librespot_connect::Options {
+        shuffle,
+        repeat: repeat_context,
+        repeat_track,
+    }));
+    opts
+}
+
+fn cycle_shuffle(app: &mut AppState, spirc: &Spirc) {
+    let next = ShuffleMode::from_flags(app.shuffle, app.smart_shuffle).next();
+    let sent = match next {
+        ShuffleMode::Off => spirc.shuffle(false),
+        ShuffleMode::On => spirc.shuffle(true),
+        ShuffleMode::Smart => spirc.smart_shuffle(),
+    };
+    match sent {
+        // Only `shuffle` is set optimistically: the smart flag is read back
+        // from librespot's own state on the next pass, so it can't drift.
         Ok(()) => {
-            app.shuffle = target;
-            app.status = Some((format!("shuffle {}", if target { "on" } else { "off" }), false));
+            app.shuffle = next.shuffle();
+            app.status = Some((next.status_label().to_string(), false));
         }
         Err(e) => app.status = Some((format!("couldn't change shuffle: {e}"), true)),
     }
@@ -1046,7 +1068,8 @@ fn activate_quick_jump(
         // Enter there instead.
         QuickJumpKind::Track(track) => {
             let _ = spirc.activate();
-            let _ = spirc.load(LoadRequest::from_context_uri(track.uri, Default::default()));
+            let opts = carry_modes(app.shuffle, app.repeat, Default::default());
+            let _ = spirc.load(LoadRequest::from_context_uri(track.uri, opts));
             let _ = spirc.play();
             app.context_label = Some("Liked Songs".to_string());
             app.nav.goto(Screen::NowPlaying);
@@ -1236,6 +1259,9 @@ fn drain_player_events(
 
         tracker.on_event(&event, now);
     }
+    // No player event carries smart shuffle, so read it from librespot's
+    // connect state on every pass instead. Shuffle off always wins.
+    app.smart_shuffle = app.shuffle && librespot_connect::smart_shuffle_active();
     track_changed
 }
 
@@ -1485,6 +1511,7 @@ async fn main() -> std::io::Result<()> {
         current_track_uri: None,
         context_label: None,
         shuffle: false,
+        smart_shuffle: false,
         repeat: RepeatMode::Off,
         lyrics: LyricsState::Idle,
         current_line: None,
@@ -2191,7 +2218,7 @@ async fn main() -> std::io::Result<()> {
                     && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                     && !text_input_active(&app)
                 {
-                    toggle_shuffle(&mut app, &spirc);
+                    cycle_shuffle(&mut app, &spirc);
                 // `Shift+R` via `is_shift_char`, like every other Shift+letter
                 // here (some terminals report it as lowercase-plus-SHIFT). Plain
                 // `r` is untouched -- it still means rename/refresh per screen.
@@ -2441,10 +2468,8 @@ async fn main() -> std::io::Result<()> {
                                     // ignores Load while not the active
                                     // device (confirmed live, logged plainly).
                                     let _ = spirc.activate();
-                                    let _ = spirc.load(LoadRequest::from_context_uri(
-                                        track.uri,
-                                        Default::default(),
-                                    ));
+                                    let opts = carry_modes(app.shuffle, app.repeat, Default::default());
+                                    let _ = spirc.load(LoadRequest::from_context_uri(track.uri, opts));
                                     let _ = spirc.play();
                                     app.context_label = Some("Search".to_string());
                                     app.nav.goto(Screen::NowPlaying);
@@ -2884,10 +2909,8 @@ async fn main() -> std::io::Result<()> {
                                             display.get(app.library.liked_songs_selected).map(|&(_, t)| t.clone())
                                         {
                                             let _ = spirc.activate();
-                                            let _ = spirc.load(LoadRequest::from_context_uri(
-                                                track.uri,
-                                                Default::default(),
-                                            ));
+                                            let opts = carry_modes(app.shuffle, app.repeat, Default::default());
+                                            let _ = spirc.load(LoadRequest::from_context_uri(track.uri, opts));
                                             let _ = spirc.play();
                                             app.context_label = Some("Liked Songs".to_string());
                                             app.nav.goto(Screen::NowPlaying);
@@ -3778,10 +3801,10 @@ async fn main() -> std::io::Result<()> {
                                                 // original position precisely
                                                 // so this stays correct even
                                                 // with a filter/sort active.
-                                                let opts = LoadRequestOptions {
+                                                let opts = carry_modes(app.shuffle, app.repeat, LoadRequestOptions {
                                                     playing_track: Some(PlayingTrack::Index(original_index as u32)),
                                                     ..Default::default()
-                                                };
+                                                });
                                                 let _ = spirc.activate();
                                                 let _ = spirc.load(LoadRequest::from_context_uri(
                                                     pd.playlist.uri.clone(),
@@ -4221,10 +4244,10 @@ async fn main() -> std::io::Result<()> {
                                 if let Some(state) = &app.album_detail
                                     && let Fetch::Ready(album) = &state.detail
                                         && state.selected < album.tracks.len() {
-                                            let opts = LoadRequestOptions {
+                                            let opts = carry_modes(app.shuffle, app.repeat, LoadRequestOptions {
                                                 playing_track: Some(PlayingTrack::Index(state.selected as u32)),
                                                 ..Default::default()
-                                            };
+                                            });
                                             let _ = spirc.activate();
                                             let _ = spirc.load(LoadRequest::from_context_uri(album.uri.clone(), opts));
                                             let _ = spirc.play();
@@ -4258,4 +4281,96 @@ async fn main() -> std::io::Result<()> {
     }
 
     Ok(())
+}
+
+/// Guards the vendored librespot patch (see `[patch.crates-io]` in
+/// Cargo.toml): upstream's `SetOptionsCommand` drops the `modes` map, which
+/// is how the official app sets smart shuffle. If a librespot upgrade swaps
+/// the vendored crates back for stock ones, this stops compiling or fails.
+#[cfg(test)]
+mod smart_shuffle_patch_tests {
+    use librespot_core::dealer::protocol::{Command, Request};
+
+    /// Shape captured live from the phone's `set_options` command (ids
+    /// shortened): smart shuffle on = shuffle on + `context_enhancement`
+    /// set to `RECOMMENDATION`.
+    fn set_options_json(modes: &str) -> String {
+        format!(
+            r#"{{"message_id":1104469769,"sent_by_device_id":"7151e96b","target_alias_id":null,
+            "command":{{"endpoint":"set_options","modes":{modes},"shuffling_context":true,
+            "options":{{"only_for_local_device":false,"override_restrictions":false,"system_initiated":false}},
+            "logging_params":{{"command_id":"abc","device_identifier":"7151e96b",
+            "command_initiated_time":1789958347649,"command_received_time":1789958347649,
+            "interaction_ids":["x"],"page_instance_ids":["y"]}}}}}}"#
+        )
+    }
+
+    fn parse(json: &str) -> librespot_core::dealer::protocol::SetOptionsCommand {
+        match serde_json::from_str::<Request>(json).expect("valid request").command {
+            Command::SetOptions(o) => o,
+            other => panic!("expected set_options, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn smart_shuffle_mode_survives_deserialization() {
+        let cmd = parse(&set_options_json(r#"{"context_enhancement":"RECOMMENDATION"}"#));
+        assert_eq!(cmd.shuffling_context, Some(true));
+        let modes = cmd.modes.expect("modes must not be dropped");
+        assert_eq!(modes.get("context_enhancement").map(String::as_str), Some("RECOMMENDATION"));
+    }
+
+    #[test]
+    fn plain_shuffle_mode_is_none_not_recommendation() {
+        let cmd = parse(&set_options_json(r#"{"context_enhancement":"NONE"}"#));
+        let modes = cmd.modes.expect("modes must not be dropped");
+        assert_eq!(modes.get("context_enhancement").map(String::as_str), Some("NONE"));
+    }
+
+    #[test]
+    fn a_command_without_modes_still_parses() {
+        let json = set_options_json("null");
+        let cmd = parse(&json);
+        assert!(cmd.modes.is_none());
+        assert_eq!(cmd.shuffling_context, Some(true));
+    }
+}
+
+#[cfg(test)]
+mod carry_modes_tests {
+    use super::*;
+    use librespot_connect::LoadContextOptions;
+
+    fn carried(shuffle: bool, repeat: RepeatMode) -> (bool, bool, bool) {
+        match carry_modes(shuffle, repeat, LoadRequestOptions::default()).context_options {
+            Some(LoadContextOptions::Options(o)) => (o.shuffle, o.repeat, o.repeat_track),
+            other => panic!("expected explicit options, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_load_keeps_shuffle_on_instead_of_silently_resetting_it() {
+        // librespot resets shuffle/repeat on every load unless told otherwise,
+        // which left the playbar lit while Spotify showed shuffle off.
+        assert_eq!(carried(true, RepeatMode::Off), (true, false, false));
+    }
+
+    #[test]
+    fn repeat_album_and_repeat_song_map_to_the_two_player_flags() {
+        assert_eq!(carried(false, RepeatMode::Context), (false, true, false));
+        assert_eq!(carried(false, RepeatMode::Track), (false, true, true));
+    }
+
+    #[test]
+    fn everything_off_is_still_sent_explicitly() {
+        assert_eq!(carried(false, RepeatMode::Off), (false, false, false));
+    }
+
+    #[test]
+    fn the_rest_of_the_load_request_is_untouched() {
+        let opts = LoadRequestOptions { start_playing: true, seek_to: 42, ..Default::default() };
+        let out = carry_modes(true, RepeatMode::Off, opts);
+        assert!(out.start_playing);
+        assert_eq!(out.seek_to, 42);
+    }
 }

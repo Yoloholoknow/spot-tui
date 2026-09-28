@@ -1,8 +1,8 @@
 use crate::{
-    LoadContextOptions, LoadRequestOptions, PlayContext,
+    LoadContextOptions, LoadRequestOptions, PlayContext, smart_shuffle, smart_shuffle_active,
     context_resolver::{ContextAction, ContextResolver, ResolveContext},
     core::{
-        Error, Session, SpotifyUri,
+        Error, Session, SpotifyId, SpotifyUri,
         authentication::Credentials,
         dealer::{
             manager::{BoxedStream, BoxedStreamResult, Reply, RequestReply},
@@ -90,6 +90,11 @@ struct SpircTask {
     user_attributes_mutation: BoxedStreamResult<UserAttributesMutation>,
 
     commands: Option<mpsc::UnboundedReceiver<SpircCommand>>,
+    /// A sender to this same actor's own command channel, so a background
+    /// task it spawns (the smart-shuffle probe) can hand its result back in
+    /// as an ordinary command instead of touching `connect_state` directly
+    /// from outside the actor.
+    self_commands: mpsc::UnboundedSender<SpircCommand>,
     player_events: Option<PlayerEventChannel>,
 
     context_resolver: ContextResolver,
@@ -125,6 +130,15 @@ enum SpircCommand {
     Shutdown,
     Shuffle(bool),
     SmartShuffle,
+    /// Phase 25 step 4: a smart-shuffle probe's result, looped back through
+    /// this same command channel from the background task that fetched it
+    /// (see `probe_smart_shuffle`). `context_uri` is checked against the
+    /// live context before applying, in case it changed while the request
+    /// was in flight.
+    ApplySmartShuffleOrder {
+        context_uri: String,
+        order: Vec<smart_shuffle::PlaybackItem>,
+    },
     Repeat(bool),
     RepeatTrack(bool),
     Disconnect { pause: bool },
@@ -244,6 +258,7 @@ impl Spirc {
             user_attributes_update,
             user_attributes_mutation,
             commands: Some(cmd_rx),
+            self_commands: cmd_tx.clone(),
             player_events: Some(player_events),
 
             context_resolver: ContextResolver::new(session.clone()),
@@ -684,12 +699,25 @@ impl SpircTask {
             SpircCommand::Next => self.handle_next(None)?,
             SpircCommand::VolumeUp => self.handle_volume_up(),
             SpircCommand::VolumeDown => self.handle_volume_down(),
-            SpircCommand::Shuffle(shuffle) => self.handle_shuffle(shuffle)?,
+            SpircCommand::Shuffle(shuffle) => {
+                let was_smart = smart_shuffle_active();
+                self.handle_shuffle(shuffle)?;
+                if was_smart && !smart_shuffle_active() {
+                    self.strip_smart_shuffle_recommendations();
+                }
+            }
             SpircCommand::SmartShuffle => {
+                let was_smart = smart_shuffle_active();
                 // Same order as the `SetOptions` arm: mode first, then shuffle,
                 // so the one state push carries both.
                 self.connect_state.set_smart_shuffle_mode();
-                self.handle_shuffle(true)?
+                self.handle_shuffle(true)?;
+                if !was_smart && smart_shuffle_active() {
+                    self.probe_smart_shuffle();
+                }
+            }
+            SpircCommand::ApplySmartShuffleOrder { context_uri, order } => {
+                self.apply_smart_shuffle_order(context_uri, order)
             }
             SpircCommand::Repeat(repeat) => self.handle_repeat_context(repeat)?,
             SpircCommand::RepeatTrack(repeat) => self.handle_repeat_track(repeat),
@@ -1074,7 +1102,13 @@ impl SpircTask {
                 trace!("seek to {seek_to:?}");
                 self.handle_seek(seek_to.value)
             }
-            SetShufflingContext(shuffle) => self.handle_shuffle(shuffle.value)?,
+            SetShufflingContext(shuffle) => {
+                let was_smart = smart_shuffle_active();
+                self.handle_shuffle(shuffle.value)?;
+                if was_smart && !smart_shuffle_active() {
+                    self.strip_smart_shuffle_recommendations();
+                }
+            }
             SetRepeatingContext(repeat_context) => {
                 self.handle_repeat_context(repeat_context.value)?
             }
@@ -1082,6 +1116,7 @@ impl SpircTask {
             AddToQueue(add_to_queue) => self.connect_state.add_to_queue(add_to_queue.track, true),
             SetQueue(set_queue) => self.connect_state.handle_set_queue(set_queue),
             SetOptions(set_options) => {
+                let was_smart = smart_shuffle_active();
                 // Modes go in before the shuffle handling so the state pushed
                 // at the end of this command carries both together.
                 if let Some(modes) = set_options.modes {
@@ -1099,6 +1134,12 @@ impl SpircTask {
                 let shuffle = set_options.shuffling_context;
                 if let Some(shuffle) = shuffle {
                     self.handle_shuffle(shuffle)?;
+                }
+                let now_smart = smart_shuffle_active();
+                if !was_smart && now_smart {
+                    self.probe_smart_shuffle();
+                } else if was_smart && !now_smart {
+                    self.strip_smart_shuffle_recommendations();
                 }
             }
             SkipNext(skip_next) => self.handle_next(skip_next.track.map(|t| t.uri))?,
@@ -1558,6 +1599,168 @@ impl SpircTask {
                 ..
             } => *nominal_start_time = now - position_ms as i64,
         };
+    }
+
+    /// Phase 25 step 5, spike: when smart shuffle turns on for a playlist,
+    /// asks Spotify what the official clients ask (a `reset` signal with the
+    /// `enhance` lens) and only *logs* the reply. Runs in its own task and
+    /// touches no playback state, so a failure or a slow reply changes nothing.
+    fn probe_smart_shuffle(&self) {
+        let context_uri = self.connect_state.context_uri().to_string();
+        let playlist = context_uri
+            .starts_with("spotify:playlist:")
+            .then(|| SpotifyUri::from_uri(&context_uri).ok())
+            .flatten()
+            .and_then(|uri| SpotifyId::try_from(&uri).ok());
+        let Some(playlist) = playlist else {
+            info!("smart shuffle probe: <{context_uri}> is not a playlist, skipped");
+            return;
+        };
+        let session = self.session.clone();
+        let self_commands = self.self_commands.clone();
+        tokio::spawn(async move {
+            let request = smart_shuffle::enhance_reset_request();
+            let call = session.spclient().playlist_signals(&playlist, &request, smart_shuffle::ENHANCE_LENS);
+            match tokio::time::timeout(Duration::from_secs(10), call).await {
+                Ok(Ok(content)) => {
+                    let summary = smart_shuffle::summarize(&content);
+                    info!(
+                        "smart shuffle probe <{context_uri}>: {} items, {} recommendations, attribute keys {:?}",
+                        summary.items, summary.recommendations, summary.keys
+                    );
+                    for line in &summary.lines {
+                        info!("smart shuffle probe item {line}");
+                    }
+                    let order = smart_shuffle::build_playback_order(&content);
+                    // Hands the result back to the actor as an ordinary command
+                    // -- this task has no access to `connect_state` itself, by
+                    // design (see `self_commands`'s own doc comment). A closed
+                    // channel just means the session ended before this arrived.
+                    let _ = self_commands.send(SpircCommand::ApplySmartShuffleOrder { context_uri, order });
+                }
+                Ok(Err(e)) => info!("smart shuffle probe <{context_uri}>: request failed: {e}"),
+                Err(_) => info!("smart shuffle probe <{context_uri}>: timed out after 10s"),
+            }
+        });
+    }
+
+    /// Applies a smart-shuffle reply's play order to the live context: a
+    /// track already in the context keeps its real entry (metadata, uid);
+    /// a recommended track not already there gets a freshly built one (see
+    /// `smart_shuffle::recommended_track`). The whole context is replaced in
+    /// the order Spotify's own reply asked for -- confirmed live (Phase 25
+    /// step 1) to be a real `shuffle.distribution`-ordered permutation across
+    /// originals and recommendations together, not two lists to interleave.
+    ///
+    /// Left alone (logged, not applied) if the context changed since the
+    /// probe went out or smart shuffle was turned off in the meantime -- a
+    /// stale or late reply must never disturb whatever is actually playing
+    /// now. Never fails playback: a track this app can't find a home for is
+    /// simply not possible here (every uri in `order` came from either the
+    /// existing context or `recommended_track`), so there is no error path
+    /// worth propagating -- same posture as `handle_player_event`'s own
+    /// discard-on-mismatch checks elsewhere in this file.
+    fn apply_smart_shuffle_order(&mut self, context_uri: String, order: Vec<smart_shuffle::PlaybackItem>) {
+        if order.is_empty() {
+            return;
+        }
+        if self.connect_state.context_uri() != &context_uri {
+            info!("smart shuffle: order for <{context_uri}> arrived after the context changed, discarded");
+            return;
+        }
+        if !smart_shuffle_active() {
+            info!("smart shuffle: order for <{context_uri}> arrived after smart shuffle was turned off, discarded");
+            return;
+        }
+
+        let current_uri = self.connect_state.current_track(|t| t.uri.clone());
+        let new_index = {
+            let Ok(ctx) = self.connect_state.get_context_mut(ContextType::Default) else {
+                info!("smart shuffle: no default context to apply the order to, discarded");
+                return;
+            };
+            let mut existing: std::collections::HashMap<String, librespot_protocol::player::ProvidedTrack> =
+                ctx.tracks.drain(..).map(|t| (t.uri.clone(), t)).collect();
+            let new_tracks: Vec<_> = order
+                .iter()
+                .map(|item| existing.remove(&item.uri).unwrap_or_else(|| smart_shuffle::recommended_track(&item.uri)))
+                .collect();
+            let new_index = new_tracks.iter().position(|t| t.uri == current_uri).unwrap_or(0);
+            // Assigns a brand-new `ShuffleVec` (not through its `Deref` into
+            // the inner `Vec`), so any shuffle bookkeeping (`indices`,
+            // `original_first_position`) from before smart shuffle -- sized
+            // and ordered for a different track list -- is reset rather than
+            // silently misapplied by a later `unshuffle()`.
+            ctx.tracks = new_tracks.into();
+            // Confirmed live (2026-09-22): recommendations aren't spread
+            // across the whole reply -- a real 370-item order had every one
+            // of them in the first ~53%, none after. Continuing forward from
+            // wherever the current track happens to land can walk straight
+            // through the rest of a session without ever reaching one.
+            // `resume_index` only wraps to the front of the order in that
+            // dead-zone case; otherwise it's the same "continue from here" as
+            // before. Manually queued tracks are untouched either way -- they
+            // live in `next_tracks`, not `ctx.tracks`, protected by
+            // `clear_next_tracks`'s own existing queue-priority logic below.
+            let walk_from = smart_shuffle::resume_index(&order, new_index);
+            ctx.index.track = walk_from as u32;
+            new_index
+        };
+        // A reused original keeps its *old* stamped context_index (its
+        // position in the un-shuffled playlist); a freshly built recommendation
+        // has none at all. Both are wrong for a track's *new* position, and
+        // `next_track()` trusts a track's own stamped value -- not its live
+        // array position -- to resume `fill_up_next_tracks` from once that
+        // track becomes current. Without this, the very first skip onto a
+        // reused original silently rewinds the walk to its old position (a
+        // real bug caught by comparing a live run's actual load sequence
+        // against the intended sorted order); a recommendation instead logs
+        // librespot's own "had no set context_index" error and leaves the
+        // walk cursor stuck.
+        if let Err(e) = self.connect_state.restamp_context_indices(ContextType::Default) {
+            warn!("smart shuffle: failed to restamp context indices: {e}");
+        }
+
+        self.connect_state.clear_prev_track();
+        self.connect_state.clear_next_tracks();
+        if let Err(e) = self.connect_state.fill_up_next_tracks() {
+            warn!("smart shuffle: failed to refill next_tracks after applying the order: {e}");
+        }
+        self.update_state = true;
+        info!("smart shuffle: applied order for <{context_uri}> ({} tracks, current index {new_index})", order.len());
+    }
+
+    /// Reverses `apply_smart_shuffle_order`'s injection once smart shuffle
+    /// turns off (either end of a shuffle toggle, or the mode alone changing
+    /// back to plain while shuffle stays on): drops the recommended tracks
+    /// from the context and rebuilds the upcoming queue without them, so a
+    /// track this app made up doesn't keep getting queued after the feature
+    /// that added it is off. Only edits this app's own in-memory context --
+    /// never touches the real playlist on Spotify's side.
+    fn strip_smart_shuffle_recommendations(&mut self) {
+        let removed = {
+            let Ok(ctx) = self.connect_state.get_context_mut(ContextType::Default) else {
+                return;
+            };
+            let before = ctx.tracks.len();
+            ctx.tracks.retain(|t| t.provider != smart_shuffle::PROVIDER_RECOMMENDATION);
+            before - ctx.tracks.len()
+        };
+        if removed == 0 {
+            return;
+        }
+        info!("smart shuffle off: removed {removed} recommended tracks from the context");
+        // Same reason as `apply_smart_shuffle_order`: removing tracks shifts
+        // everyone after them to a new real position, but their stamped
+        // context_index doesn't move on its own.
+        if let Err(e) = self.connect_state.restamp_context_indices(ContextType::Default) {
+            warn!("smart shuffle off: failed to restamp context indices: {e}");
+        }
+        self.connect_state.clear_next_tracks();
+        if let Err(e) = self.connect_state.fill_up_next_tracks() {
+            warn!("smart shuffle off: failed to refill next_tracks: {e}");
+        }
+        self.update_state = true;
     }
 
     fn handle_shuffle(&mut self, shuffle: bool) -> Result<(), Error> {

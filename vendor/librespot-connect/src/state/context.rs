@@ -91,6 +91,22 @@ impl ConnectState {
         .ok_or(StateError::NoContext(ty))
     }
 
+    /// Re-stamps `context_index` on every track in a context to match its
+    /// real array position. `next_track()` reads a track's own *stamped*
+    /// `context_index` (not its live position in `ctx.tracks`) to know where
+    /// to resume filling `next_tracks` from once that track becomes current
+    /// -- so replacing a context's whole track list with a new order (as
+    /// smart shuffle does, Phase 25 step 4) must re-stamp every entry, or a
+    /// track that kept its *old* index (or, for a freshly built one, has
+    /// none at all) desyncs that walk the moment playback reaches it.
+    pub fn restamp_context_indices(&mut self, ty: ContextType) -> Result<(), Error> {
+        let ctx = self.get_context_mut(ty)?;
+        for (i, track) in ctx.tracks.iter_mut().enumerate() {
+            track.set_context_index(i);
+        }
+        Ok(())
+    }
+
     pub fn context_uri(&self) -> &String {
         &self.player().context_uri
     }

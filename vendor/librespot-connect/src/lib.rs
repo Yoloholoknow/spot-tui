@@ -11,6 +11,7 @@ use librespot_protocol as protocol;
 mod context_resolver;
 mod model;
 mod shuffle_vec;
+mod smart_shuffle;
 mod spirc;
 mod state;
 

@@ -19,6 +19,7 @@ use crate::{
         connect::PutStateRequest,
         context::Context,
         extended_metadata::BatchedEntityRequest,
+        playlist4_external::{ListSignals, SelectedListContent},
         extended_metadata::{BatchedExtensionResponse, EntityRequest, ExtensionQuery},
         extension_kind::ExtensionKind,
     },
@@ -894,6 +895,38 @@ impl SpClient {
         }
 
         Ok(ctx?)
+    }
+
+    /// Emits `signals` to a playlist with a "lens" applied, and returns the
+    /// resulting list. This is how Spotify's own clients apply smart shuffle
+    /// (a `reset` signal with the `enhance` lens): the reply is the playlist's
+    /// items with recommendations included. The lens is sent both as the query
+    /// parameter the web player uses and as the header `go-librespot` used.
+    pub async fn playlist_signals(
+        &self,
+        playlist_id: &SpotifyId,
+        signals: &ListSignals,
+        lens: &str,
+    ) -> Result<SelectedListContent, Error> {
+        let endpoint = format!(
+            "/playlist/v2/playlist/{}/signals?spotify-apply-lenses={lens}",
+            playlist_id.to_base62()?
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("spotify-apply-lenses"),
+            HeaderValue::from_str(lens)?,
+        );
+        let res = self
+            .request_with_protobuf_and_options(
+                &Method::POST,
+                &endpoint,
+                Some(headers),
+                signals,
+                &NO_METRICS_AND_SALT,
+            )
+            .await?;
+        Ok(SelectedListContent::parse_from_bytes(&res)?)
     }
 
     pub async fn get_autoplay_context(

@@ -54,6 +54,19 @@ enum LibraryFetchResult {
     Devices(Result<Vec<api::devices::DeviceSummary>, String>),
     ArtistDetail { artist_uri: String, result: Result<api::artist::ArtistDetail, String> },
     AlbumDetail { album_uri: String, result: Result<api::album::AlbumDetail, String> },
+    /// `v`/`Shift+V` on Now Playing (Phase 28): the currently-playing
+    /// track has no artist/album uri in hand the way a list row already
+    /// does (`TrackResult`), so this fetches them first, then opens
+    /// whichever `view` asked for once they arrive.
+    NowPlayingTrackIds { result: Result<api::track::TrackIds, String>, view: TrackView },
+}
+
+/// Which of a track's own pages `v`/`Shift+V` on Now Playing should open
+/// once its ids arrive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrackView {
+    Artist,
+    Album,
 }
 
 /// Results of Phase 5's mutating calls, following the exact same
@@ -691,7 +704,7 @@ fn text_input_active(app: &AppState) -> bool {
     }
 }
 
-/// `z`: shuffle off <-> on. The player is the source of truth (its
+/// `s`: shuffle off <-> on. The player is the source of truth (its
 /// `ShuffleChanged` event lands in `app.shuffle` and drives the playbar),
 /// but the flag is also set here so a quick second press toggles back from
 /// what was just requested instead of a not-yet-updated value. Note
@@ -713,6 +726,77 @@ fn carry_modes(shuffle: bool, repeat: RepeatMode, mut opts: LoadRequestOptions) 
         repeat_track,
     }));
     opts
+}
+
+/// `m` (global except `PlaylistDetail`, where `m` already means enter
+/// move-mode -- the same screen-scoped-meaning pattern this app already
+/// uses for `r` and `v`). Mute is a device-level toggle, not a per-track
+/// one, so `remembered` is meant to survive a track change; nothing here
+/// clears it on its own. `Spirc::set_volume` is already public, so this
+/// needs no vendored patch.
+fn mute_toggle(current: u16, remembered: &mut Option<u16>) -> u16 {
+    match remembered.take() {
+        Some(restored) => restored,
+        None if current > 0 => {
+            *remembered = Some(current);
+            0
+        }
+        // Already silent with nothing remembered -- no prior mute to
+        // undo, so pressing `m` here is a deliberate no-op, not a change.
+        None => 0,
+    }
+}
+
+#[cfg(test)]
+mod mute_toggle_tests {
+    use super::*;
+
+    #[test]
+    fn muting_remembers_the_volume_and_goes_silent() {
+        let mut remembered = None;
+        assert_eq!(mute_toggle(40_000, &mut remembered), 0);
+        assert_eq!(remembered, Some(40_000));
+    }
+
+    #[test]
+    fn unmuting_restores_exactly_the_remembered_value_and_forgets_it() {
+        let mut remembered = Some(40_000);
+        assert_eq!(mute_toggle(0, &mut remembered), 40_000);
+        assert_eq!(remembered, None);
+    }
+
+    #[test]
+    fn muting_at_zero_with_nothing_remembered_is_a_no_op() {
+        let mut remembered = None;
+        assert_eq!(mute_toggle(0, &mut remembered), 0);
+        assert_eq!(remembered, None);
+    }
+
+    #[test]
+    fn muting_twice_in_a_row_keeps_the_first_remembered_value() {
+        // A second `m` press before unmuting must not overwrite the
+        // remembered level with the current (already-zero) volume.
+        let mut remembered = None;
+        assert_eq!(mute_toggle(50_000, &mut remembered), 0);
+        assert_eq!(mute_toggle(0, &mut remembered), 50_000);
+    }
+
+    #[test]
+    fn a_full_round_trip_returns_to_the_exact_starting_volume() {
+        let mut remembered = None;
+        let original = 12_345;
+        let muted = mute_toggle(original, &mut remembered);
+        assert_eq!(muted, 0);
+        let restored = mute_toggle(muted, &mut remembered);
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn max_volume_round_trips_cleanly() {
+        let mut remembered = None;
+        assert_eq!(mute_toggle(u16::MAX, &mut remembered), 0);
+        assert_eq!(mute_toggle(0, &mut remembered), u16::MAX);
+    }
 }
 
 fn cycle_shuffle(app: &mut AppState, spirc: &Spirc) {
@@ -1722,6 +1806,7 @@ async fn main() -> std::io::Result<()> {
         position: Duration::ZERO,
         duration: Duration::ZERO,
         volume: u16::MAX, // matches the initial_volume set on connect_config above
+        muted_volume: None,
         nav: Nav::new(),
         sidebar_sel: 0,
         library: LibraryState::new(),
@@ -2127,6 +2212,13 @@ async fn main() -> std::io::Result<()> {
                             state.detail = result.map_or_else(Fetch::Failed, Fetch::Ready);
                         }
                 }
+                LibraryFetchResult::NowPlayingTrackIds { result, view } => match result {
+                    Ok(ids) => match view {
+                        TrackView::Artist => open_artist_detail(&mut app, &library_tx, &spotify_client, ids.artist_uri),
+                        TrackView::Album => open_album_detail(&mut app, &library_tx, &spotify_client, ids.album_uri),
+                    },
+                    Err(e) => app.status = Some((format!("couldn't look up this track: {e}"), true)),
+                },
             }
         }
 
@@ -2445,15 +2537,16 @@ async fn main() -> std::io::Result<()> {
                 // top-level chain instead of being copied into every screen's
                 // own arm the way space/n/p/+/- were (about twenty copies).
                 // The guard is what makes that safe: while a text field owns
-                // the keyboard, `z` is just a letter. Ctrl/Alt are excluded
-                // so Ctrl+Z (or an Alt+Z chord) isn't mistaken for it.
-                } else if key.code == KeyCode::Char('z')
-                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                // the keyboard, `s` is just a letter. Ctrl/Alt/Shift are excluded
+                // so Ctrl+S isn't mistaken for it, and Shift+S (save/unsave
+                // album, per screen) falls through to those arms.
+                } else if key.code == KeyCode::Char('s')
+                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT)
                     && !text_input_active(&app)
                 {
                     cycle_shuffle(&mut app, &spirc);
                 // `t` toggles romanized lyrics (Japanese/Chinese/Korean in
-                // Latin letters). Global like `z`, and guarded the same way so
+                // Latin letters). Global like `s`, and guarded the same way so
                 // a typed `t` still reaches Search and the list filters.
                 } else if key.code == KeyCode::Char('t')
                     && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
@@ -2462,18 +2555,25 @@ async fn main() -> std::io::Result<()> {
                     app.romanize_lyrics = !app.romanize_lyrics;
                     app.status = Some((romanize_status(app.romanize_lyrics, &app.lyrics), false));
                     request_romanization(&app, generation, &mut roman_requested, &roman_tx);
-                // `Shift+R` via `is_shift_char`, like every other Shift+letter
-                // here (some terminals report it as lowercase-plus-SHIFT). Plain
-                // `r` is untouched -- it still means rename/refresh per screen.
-                } else if is_shift_char(key.code, key.modifiers, 'R', 'r') && !text_input_active(&app) {
+                // Plain `r` cycles repeat, global like `s`. Shift+R is rename
+                // (Playlist Detail / Your Playlists) and refresh (Devices), so
+                // lowercase+SHIFT (how some terminals report Shift+R) is
+                // excluded here and falls through to those per-screen arms.
+                } else if key.code == KeyCode::Char('r')
+                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT)
+                    && !text_input_active(&app)
+                {
                     cycle_repeat(&mut app, &spirc);
-                // `q` asks first, same as every other destructive action,
+                // `Shift+Q` asks first, same as every other destructive action,
                 // when enabled (default on; `confirm_quit = false` in
                 // config.toml restores the old immediate-quit behavior).
-                // Excludes Search specifically -- `q` isn't a quit key
+                // Plain `q` was reassigned to add-to-queue (Phase 28) --
+                // moved off the single most safety-relevant key in the app
+                // deliberately, not a side effect of adding a new one.
+                // Excludes Search specifically -- `Q` isn't a quit key
                 // there at all, it's a literal character the query box
                 // needs, same standing exception as every other letter.
-                } else if key.code == KeyCode::Char('q')
+                } else if is_shift_char(key.code, key.modifiers, 'Q', 'q')
                     && cfg.confirm_quit
                     && !(app.nav.focus == Focus::Main && *app.nav.top() == Screen::Search)
                 {
@@ -2483,7 +2583,9 @@ async fn main() -> std::io::Result<()> {
                     });
                 } else if app.nav.focus == Focus::Sidebar {
                     match key.code {
-                        KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                        KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'Q', 'q') => {
+                            break 'inner LoopExit::Quit
+                        }
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             break 'inner LoopExit::Quit
                         }
@@ -2729,7 +2831,9 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Esc => {
                                 app.nav.escape();
                             }
-                            KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                            KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'Q', 'q') => {
+                                break 'inner LoopExit::Quit
+                            }
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 break 'inner LoopExit::Quit
                             }
@@ -2763,6 +2867,44 @@ async fn main() -> std::io::Result<()> {
                                             let _ = tx.send(CrudResult::LikeToggled { track_uri, liked: true, result });
                                         });
                                     }
+                                }
+                            }
+                            // Same shape as Shift+L above: the guarded arm has to come
+                            // before plain `v` (Playlist CRUD's `v` collision-avoidance
+                            // rule -- a terminal reporting Shift+V as lowercase+modifier
+                            // would otherwise never reach it).
+                            KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'V', 'v') => {
+                                if let Some(track_id) = tracker.current_track_id() {
+                                    let track_uri = track_id.to_string();
+                                    if let Some(client) = spotify_client.clone() {
+                                        let tx = library_tx.clone();
+                                        tokio::spawn(async move {
+                                            let result = api::track::get_track_ids(&client, &track_uri).await;
+                                            let _ = tx.send(LibraryFetchResult::NowPlayingTrackIds { result, view: TrackView::Artist });
+                                        });
+                                    } else {
+                                        app.status = Some(("Spotify client not ready yet".to_string(), true));
+                                    }
+                                } else {
+                                    app.status = Some(("nothing playing".to_string(), true));
+                                }
+                            }
+                            // `v` = open this track's album (Playlist CRUD's own
+                            // "more common action from a track" convention).
+                            KeyCode::Char('v') => {
+                                if let Some(track_id) = tracker.current_track_id() {
+                                    let track_uri = track_id.to_string();
+                                    if let Some(client) = spotify_client.clone() {
+                                        let tx = library_tx.clone();
+                                        tokio::spawn(async move {
+                                            let result = api::track::get_track_ids(&client, &track_uri).await;
+                                            let _ = tx.send(LibraryFetchResult::NowPlayingTrackIds { result, view: TrackView::Album });
+                                        });
+                                    } else {
+                                        app.status = Some(("Spotify client not ready yet".to_string(), true));
+                                    }
+                                } else {
+                                    app.status = Some(("nothing playing".to_string(), true));
                                 }
                             }
                             // `goto`, not `push` -- a universal "jump to Library" shortcut
@@ -2799,6 +2941,10 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Char('-') | KeyCode::Down => {
                                 let _ = spirc.volume_down();
                             }
+                            KeyCode::Char('m') => {
+                                let target = mute_toggle(app.volume, &mut app.muted_volume);
+                                let _ = spirc.set_volume(target);
+                            }
                             KeyCode::Left => {
                                 let target = seek_target_ms(
                                     tracker.progress_ms(Instant::now()) as i64,
@@ -2818,7 +2964,9 @@ async fn main() -> std::io::Result<()> {
                             _ => {}
                         },
                         Screen::Library => match key.code {
-                            KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                            KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'Q', 'q') => {
+                                break 'inner LoopExit::Quit
+                            }
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 break 'inner LoopExit::Quit
                             }
@@ -2839,6 +2987,10 @@ async fn main() -> std::io::Result<()> {
                             }
                             KeyCode::Char('-') => {
                                 let _ = spirc.volume_down();
+                            }
+                            KeyCode::Char('m') => {
+                                let target = mute_toggle(app.volume, &mut app.muted_volume);
+                                let _ = spirc.set_volume(target);
                             }
                             KeyCode::Char('f') => {
                                 toggle_or_enter_fullscreen(&mut app);
@@ -2982,7 +3134,9 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Right if app.library.liked_songs_filter.editing => {
                                     app.library.liked_songs_filter.cursor_right();
                                 }
-                                KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                                KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'Q', 'q') => {
+                                    break 'inner LoopExit::Quit
+                                }
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
                                 }
@@ -3003,6 +3157,10 @@ async fn main() -> std::io::Result<()> {
                                 }
                                 KeyCode::Char('-') => {
                                     let _ = spirc.volume_down();
+                                }
+                                KeyCode::Char('m') => {
+                                    let target = mute_toggle(app.volume, &mut app.muted_volume);
+                                    let _ = spirc.set_volume(target);
                                 }
                                 KeyCode::Char('f') => {
                                     toggle_or_enter_fullscreen(&mut app);
@@ -3035,11 +3193,9 @@ async fn main() -> std::io::Result<()> {
                                         }
                                     }
                                 }
-                                // Add the selected track to the playback queue. Matches
-                                // the literal 'Q' only, not `is_shift_char` like the
-                                // other Shift+letter keys: that helper also accepts
-                                // lowercase-plus-SHIFT, and lowercase `q` means quit.
-                                KeyCode::Char('Q') => {
+                                // Add the selected track to the playback queue. Plain
+                                // `q` (Phase 28: quit moved to `Shift+Q`, freeing this).
+                                KeyCode::Char('q') => {
                                     let track_uri = match &app.library.liked_songs {
                                         Fetch::Ready(items) => {
                                             filtered_sorted(items, &app.library.liked_songs_filter, &label)
@@ -3187,7 +3343,9 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Right if app.library.saved_albums_filter.editing => {
                                     app.library.saved_albums_filter.cursor_right();
                                 }
-                                KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                                KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'Q', 'q') => {
+                                    break 'inner LoopExit::Quit
+                                }
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
                                 }
@@ -3209,6 +3367,10 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Char('-') => {
                                     let _ = spirc.volume_down();
                                 }
+                                KeyCode::Char('m') => {
+                                    let target = mute_toggle(app.volume, &mut app.muted_volume);
+                                    let _ = spirc.set_volume(target);
+                                }
                                 KeyCode::Char('f') => {
                                     toggle_or_enter_fullscreen(&mut app);
                                 }
@@ -3221,7 +3383,7 @@ async fn main() -> std::io::Result<()> {
                                 // other place this key is bound) is always *save*.
                                 // Confirms first -- same standing rule as
                                 // Liked Songs' own Shift+L above.
-                                KeyCode::Char('s') => {
+                                KeyCode::Char('S' | 's') if is_shift_char(key.code, key.modifiers, 'S', 's') => {
                                     if let Fetch::Ready(items) = &app.library.saved_albums {
                                         let display = filtered_sorted(items, &app.library.saved_albums_filter, &label);
                                         if let Some(album) =
@@ -3316,7 +3478,9 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Right if app.library.followed_artists_filter.editing => {
                                     app.library.followed_artists_filter.cursor_right();
                                 }
-                                KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                                KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'Q', 'q') => {
+                                    break 'inner LoopExit::Quit
+                                }
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
                                 }
@@ -3337,6 +3501,10 @@ async fn main() -> std::io::Result<()> {
                                 }
                                 KeyCode::Char('-') => {
                                     let _ = spirc.volume_down();
+                                }
+                                KeyCode::Char('m') => {
+                                    let target = mute_toggle(app.volume, &mut app.muted_volume);
+                                    let _ = spirc.set_volume(target);
                                 }
                                 // Shift+F before plain `f` (fullscreen) --
                                 // same encoding-robustness reason as every
@@ -3449,7 +3617,9 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Right if app.library.playlists_filter.editing => {
                                     app.library.playlists_filter.cursor_right();
                                 }
-                                KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                                KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'Q', 'q') => {
+                                    break 'inner LoopExit::Quit
+                                }
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
                                 }
@@ -3470,6 +3640,10 @@ async fn main() -> std::io::Result<()> {
                                 }
                                 KeyCode::Char('-') => {
                                     let _ = spirc.volume_down();
+                                }
+                                KeyCode::Char('m') => {
+                                    let target = mute_toggle(app.volume, &mut app.muted_volume);
+                                    let _ = spirc.set_volume(target);
                                 }
                                 KeyCode::Char('f') => {
                                     toggle_or_enter_fullscreen(&mut app);
@@ -3496,7 +3670,7 @@ async fn main() -> std::io::Result<()> {
                                     app.text_prompt =
                                         Some(TextPrompt::new("New playlist name", "", TextPromptAction::CreatePlaylist));
                                 }
-                                KeyCode::Char('r') => {
+                                KeyCode::Char('R' | 'r') if is_shift_char(key.code, key.modifiers, 'R', 'r') => {
                                     if let Fetch::Ready(items) = &app.library.playlists {
                                         let display = pinned_first(
                                             filtered_sorted(items, &app.library.playlists_filter, &label),
@@ -3754,7 +3928,9 @@ async fn main() -> std::io::Result<()> {
                                         }
                                     }
                                 }
-                                KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                                KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'Q', 'q') => {
+                                    break 'inner LoopExit::Quit
+                                }
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     break 'inner LoopExit::Quit
                                 }
@@ -3806,10 +3982,10 @@ async fn main() -> std::io::Result<()> {
                                         });
                                     }
                                 }
-                                // Add to queue -- literal 'Q' only, see Liked Songs' arm.
-                                // Sits after the move-mode catch-all above, so it can't
-                                // fire mid-reorder.
-                                KeyCode::Char('Q') => {
+                                // Add to queue -- plain `q` (Phase 28: quit moved to
+                                // `Shift+Q`, freeing this). Sits after the move-mode
+                                // catch-all above, so it can't fire mid-reorder.
+                                KeyCode::Char('q') => {
                                     let track_uri = app.playlist_detail.as_ref().and_then(|pd| {
                                         if let Fetch::Ready(items) = &pd.tracks {
                                             let display = pinned_first(
@@ -3864,7 +4040,7 @@ async fn main() -> std::io::Result<()> {
                                     }
                                 }
                                 // Renames the open playlist itself, not the selected track.
-                                KeyCode::Char('r') => {
+                                KeyCode::Char('R' | 'r') if is_shift_char(key.code, key.modifiers, 'R', 'r') => {
                                     if let Some(pd) = &app.playlist_detail {
                                         app.text_prompt = Some(TextPrompt::new(
                                             "Rename playlist",
@@ -4070,7 +4246,9 @@ async fn main() -> std::io::Result<()> {
                         // against the real rendered height, so these
                         // handlers can move it blindly.
                         Screen::Help => match key.code {
-                            KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                            KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'Q', 'q') => {
+                                break 'inner LoopExit::Quit
+                            }
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 break 'inner LoopExit::Quit
                             }
@@ -4092,6 +4270,10 @@ async fn main() -> std::io::Result<()> {
                             }
                             KeyCode::Char('-') => {
                                 let _ = spirc.volume_down();
+                            }
+                            KeyCode::Char('m') => {
+                                let target = mute_toggle(app.volume, &mut app.muted_volume);
+                                let _ = spirc.set_volume(target);
                             }
                             KeyCode::Char('f') => {
                                 toggle_or_enter_fullscreen(&mut app);
@@ -4119,7 +4301,9 @@ async fn main() -> std::io::Result<()> {
                             _ => {}
                         },
                         Screen::Queue => match key.code {
-                            KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                            KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'Q', 'q') => {
+                                break 'inner LoopExit::Quit
+                            }
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 break 'inner LoopExit::Quit
                             }
@@ -4140,6 +4324,10 @@ async fn main() -> std::io::Result<()> {
                             }
                             KeyCode::Char('-') => {
                                 let _ = spirc.volume_down();
+                            }
+                            KeyCode::Char('m') => {
+                                let target = mute_toggle(app.volume, &mut app.muted_volume);
+                                let _ = spirc.set_volume(target);
                             }
                             KeyCode::Char('f') => {
                                 toggle_or_enter_fullscreen(&mut app);
@@ -4219,7 +4407,9 @@ async fn main() -> std::io::Result<()> {
                             _ => {}
                         },
                         Screen::Devices => match key.code {
-                            KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                            KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'Q', 'q') => {
+                                break 'inner LoopExit::Quit
+                            }
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 break 'inner LoopExit::Quit
                             }
@@ -4241,6 +4431,10 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Char('-') => {
                                 let _ = spirc.volume_down();
                             }
+                            KeyCode::Char('m') => {
+                                let target = mute_toggle(app.volume, &mut app.muted_volume);
+                                let _ = spirc.set_volume(target);
+                            }
                             KeyCode::Char('f') => {
                                 toggle_or_enter_fullscreen(&mut app);
                             }
@@ -4254,7 +4448,7 @@ async fn main() -> std::io::Result<()> {
                             KeyCode::Esc | KeyCode::Left => {
                                 app.nav.escape();
                             }
-                            KeyCode::Char('r') => {
+                            KeyCode::Char('R' | 'r') if is_shift_char(key.code, key.modifiers, 'R', 'r') => {
                                 refetch_devices(&mut app, &library_tx, &spotify_client);
                             }
                             KeyCode::Up => {
@@ -4287,7 +4481,9 @@ async fn main() -> std::io::Result<()> {
                             _ => {}
                         },
                         Screen::ArtistDetail => match key.code {
-                            KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                            KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'Q', 'q') => {
+                                break 'inner LoopExit::Quit
+                            }
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 break 'inner LoopExit::Quit
                             }
@@ -4308,6 +4504,10 @@ async fn main() -> std::io::Result<()> {
                             }
                             KeyCode::Char('-') => {
                                 let _ = spirc.volume_down();
+                            }
+                            KeyCode::Char('m') => {
+                                let target = mute_toggle(app.volume, &mut app.muted_volume);
+                                let _ = spirc.set_volume(target);
                             }
                             // Shift+F before plain `f` (fullscreen) -- same
                             // encoding-robustness reason as every other
@@ -4367,7 +4567,9 @@ async fn main() -> std::io::Result<()> {
                             _ => {}
                         },
                         Screen::AlbumDetail => match key.code {
-                            KeyCode::Char('q') => break 'inner LoopExit::Quit,
+                            KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'Q', 'q') => {
+                                break 'inner LoopExit::Quit
+                            }
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 break 'inner LoopExit::Quit
                             }
@@ -4388,6 +4590,10 @@ async fn main() -> std::io::Result<()> {
                             }
                             KeyCode::Char('-') => {
                                 let _ = spirc.volume_down();
+                            }
+                            KeyCode::Char('m') => {
+                                let target = mute_toggle(app.volume, &mut app.muted_volume);
+                                let _ = spirc.set_volume(target);
                             }
                             KeyCode::Char('f') => {
                                 toggle_or_enter_fullscreen(&mut app);
@@ -4410,9 +4616,9 @@ async fn main() -> std::io::Result<()> {
                                     });
                                 }
                             }
-                            // Add the selected track to the queue -- literal 'Q'
-                            // only, see Liked Songs' arm.
-                            KeyCode::Char('Q') => {
+                            // Add the selected track to the queue -- plain `q`
+                            // (Phase 28: quit moved to `Shift+Q`, freeing this).
+                            KeyCode::Char('q') => {
                                 let track_uri = app.album_detail.as_ref().and_then(|state| match &state.detail {
                                     Fetch::Ready(album) => album.tracks.get(state.selected).map(|t| t.uri.clone()),
                                     _ => None,
@@ -4426,7 +4632,7 @@ async fn main() -> std::io::Result<()> {
                             }
                             // Saves the album itself, viewed here -- the reverse
                             // (unsave) lives on the Saved Albums list screen instead.
-                            KeyCode::Char('s') => {
+                            KeyCode::Char('S' | 's') if is_shift_char(key.code, key.modifiers, 'S', 's') => {
                                 if let Some(state) = &app.album_detail {
                                     let album_uri = state.album_uri.clone();
                                     if let Some(client) = spotify_client.clone() {

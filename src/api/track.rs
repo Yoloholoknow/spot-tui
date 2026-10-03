@@ -3,9 +3,13 @@
 //! only carries this for the track that's *actually* loaded, so a track
 //! merely sitting next in the queue needs one Web API call to learn its
 //! artist/title/album/cover ahead of time.
+//!
+//! Also `get_track_ids` (`v`/`Shift+V` on Now Playing): the playing track's
+//! artist/album ids, which librespot's `AudioItem` doesn't carry (names only).
 
 use rspotify::clients::BaseClient;
 use rspotify::model::TrackId;
+use rspotify::prelude::Id;
 use rspotify::AuthCodeSpotify;
 
 use super::ensure_fresh;
@@ -49,4 +53,30 @@ pub async fn get_next_track_meta(client: &AuthCodeSpotify, track_uri: &str) -> R
         duration_ms: track.duration.num_milliseconds().max(0) as u32,
         cover_url,
     })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackIds {
+    pub artist_uri: String,
+    pub album_uri: String,
+}
+
+/// Like `describe_client_error` results elsewhere in this app, verified
+/// live, not by unit test -- no pure logic here to isolate.
+pub async fn get_track_ids(client: &AuthCodeSpotify, track_uri: &str) -> Result<TrackIds, String> {
+    if let Err(e) = ensure_fresh(client).await {
+        log::warn!("token refresh before get_track_ids failed, trying with existing token anyway: {e}");
+    }
+    let id = TrackId::from_id_or_uri(track_uri).map_err(|e| e.to_string())?;
+    let track = match client.track(id, None).await {
+        Ok(t) => t,
+        Err(e) => {
+            let detail = super::describe_client_error(e).await;
+            log::warn!("get_track_ids: track() failed for {track_uri}: {detail}");
+            return Err(detail);
+        }
+    };
+    let artist_uri = track.artists.first().and_then(|a| a.id.clone()).map(|id| id.uri()).unwrap_or_default();
+    let album_uri = track.album.id.map(|id| id.uri()).unwrap_or_default();
+    Ok(TrackIds { artist_uri, album_uri })
 }

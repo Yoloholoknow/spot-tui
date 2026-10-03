@@ -1,0 +1,283 @@
+use crate::lyrics::LyricLine;
+
+/// Repeat as the three states a person actually cycles through (off /
+/// the whole album or playlist / this one song), collapsed from the
+/// player's two independent booleans (`repeating_context`,
+/// `repeating_track`) -- four flag combinations, but only three of them
+/// mean anything different to a listener.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RepeatMode {
+    #[default]
+    Off,
+    Context,
+    Track,
+}
+
+impl RepeatMode {
+    /// The track flag wins: repeat-one is on whenever it's set, whether or
+    /// not the context flag came along with it.
+    pub fn from_flags(context: bool, track: bool) -> Self {
+        if track {
+            RepeatMode::Track
+        } else if context {
+            RepeatMode::Context
+        } else {
+            RepeatMode::Off
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            RepeatMode::Off => RepeatMode::Context,
+            RepeatMode::Context => RepeatMode::Track,
+            RepeatMode::Track => RepeatMode::Off,
+        }
+    }
+
+    /// `(repeat context, repeat track)`. Repeat-one sets both, matching how
+    /// Spotify's own clients report it.
+    pub fn flags(self) -> (bool, bool) {
+        match self {
+            RepeatMode::Off => (false, false),
+            RepeatMode::Context => (true, false),
+            RepeatMode::Track => (true, true),
+        }
+    }
+
+    pub fn status_label(self) -> &'static str {
+        match self {
+            RepeatMode::Off => "off",
+            RepeatMode::Context => "album/playlist",
+            RepeatMode::Track => "this song",
+        }
+    }
+}
+
+/// The three states the `s` key cycles through, mirroring Spotify's own
+/// shuffle button: off, shuffle, smart shuffle. Smart shuffle is shuffle plus
+/// a `context_enhancement` mode, so it always implies shuffle is on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShuffleMode {
+    #[default]
+    Off,
+    On,
+    Smart,
+}
+
+impl ShuffleMode {
+    pub fn from_flags(shuffle: bool, smart: bool) -> Self {
+        match (shuffle, smart) {
+            (false, _) => Self::Off,
+            (true, false) => Self::On,
+            (true, true) => Self::Smart,
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::On,
+            Self::On => Self::Smart,
+            Self::Smart => Self::Off,
+        }
+    }
+
+    pub fn shuffle(self) -> bool {
+        self != Self::Off
+    }
+
+    /// Status-bar text after switching to this mode.
+    pub fn status_label(self) -> &'static str {
+        match self {
+            Self::Off => "shuffle off",
+            Self::On => "shuffle on",
+            Self::Smart => "smart shuffle on",
+        }
+    }
+}
+
+/// The playbar's always-visible shuffle and repeat toggles, as Spotify
+/// shows them: every glyph is drawn in every state, and the `bool` says
+/// whether that one is currently on (accent) or off (dim) -- the caller
+/// does the coloring. Repeat's slot is a fixed two cells wide (`↻ ` for off
+/// and album/playlist, `↻1` for this song) so the readout never changes
+/// width and the track title's truncation point doesn't jump around as
+/// modes change. Smart shuffle is a third shuffle state, not a separate
+/// toggle, so its sparkle sits in the one-cell gap between the two toggles
+/// (a blank when off) instead of widening the readout; it only lights while
+/// shuffle itself is on.
+pub fn playback_modes(shuffle: bool, smart: bool, repeat: RepeatMode) -> [(&'static str, bool); 3] {
+    let repeat_glyph = match repeat {
+        RepeatMode::Track => "\u{21bb}1",
+        RepeatMode::Off | RepeatMode::Context => "\u{21bb} ",
+    };
+    let smart = shuffle && smart;
+    [
+        ("\u{21c4}", shuffle),
+        (if smart { "\u{2726}" } else { " " }, smart),
+        (repeat_glyph, repeat != RepeatMode::Off),
+    ]
+}
+
+/// Cells `playback_modes` always occupies: shuffle (1), the smart-shuffle
+/// gap (1), repeat (2).
+pub const PLAYBACK_MODES_WIDTH: usize = 4;
+
+pub enum LyricsState {
+    Idle,
+    /// Distinct from `Idle`: the Spotify Connect session ended
+    /// unexpectedly (network drop, laptop sleep, etc.) after having been
+    /// alive. There's no auto-reconnect yet, so this is a dead end --
+    /// restart the process. Shown separately so a real drop is never
+    /// mistaken for "just hasn't connected yet".
+    SessionEnded,
+    Loading,
+    Synced(Vec<LyricLine>),
+    Plain(String),
+    Instrumental,
+    NotFound,
+}
+
+#[cfg(test)]
+mod repeat_mode_tests {
+    use super::*;
+
+    #[test]
+    fn flags_map_to_the_mode_the_player_is_really_in() {
+        assert_eq!(RepeatMode::from_flags(false, false), RepeatMode::Off);
+        assert_eq!(RepeatMode::from_flags(true, false), RepeatMode::Context);
+        assert_eq!(RepeatMode::from_flags(true, true), RepeatMode::Track);
+    }
+
+    #[test]
+    fn a_track_flag_alone_still_means_repeat_song() {
+        // Another device (or a mid-toggle event) can report the track flag
+        // without the context flag; the track flag wins either way.
+        assert_eq!(RepeatMode::from_flags(false, true), RepeatMode::Track);
+    }
+
+    #[test]
+    fn next_cycles_off_album_song_off() {
+        assert_eq!(RepeatMode::Off.next(), RepeatMode::Context);
+        assert_eq!(RepeatMode::Context.next(), RepeatMode::Track);
+        assert_eq!(RepeatMode::Track.next(), RepeatMode::Off);
+    }
+
+    #[test]
+    fn each_mode_survives_a_round_trip_through_its_own_flags() {
+        for mode in [RepeatMode::Off, RepeatMode::Context, RepeatMode::Track] {
+            let (context, track) = mode.flags();
+            assert_eq!(RepeatMode::from_flags(context, track), mode);
+        }
+    }
+}
+
+#[cfg(test)]
+mod shuffle_mode_tests {
+    use super::*;
+
+    #[test]
+    fn the_flags_map_to_the_three_states() {
+        assert_eq!(ShuffleMode::from_flags(false, false), ShuffleMode::Off);
+        assert_eq!(ShuffleMode::from_flags(true, false), ShuffleMode::On);
+        assert_eq!(ShuffleMode::from_flags(true, true), ShuffleMode::Smart);
+    }
+
+    #[test]
+    fn smart_without_shuffle_is_just_off() {
+        // A stale smart flag can't outlive shuffle itself.
+        assert_eq!(ShuffleMode::from_flags(false, true), ShuffleMode::Off);
+    }
+
+    #[test]
+    fn the_key_cycles_off_then_shuffle_then_smart_then_off() {
+        assert_eq!(ShuffleMode::Off.next(), ShuffleMode::On);
+        assert_eq!(ShuffleMode::On.next(), ShuffleMode::Smart);
+        assert_eq!(ShuffleMode::Smart.next(), ShuffleMode::Off);
+    }
+
+    #[test]
+    fn a_full_cycle_returns_to_the_start() {
+        let start = ShuffleMode::On;
+        assert_eq!(start.next().next().next(), start);
+    }
+
+    #[test]
+    fn smart_shuffle_implies_shuffle() {
+        assert!(!ShuffleMode::Off.shuffle());
+        assert!(ShuffleMode::On.shuffle());
+        assert!(ShuffleMode::Smart.shuffle());
+    }
+
+    #[test]
+    fn status_labels_name_the_mode() {
+        assert_eq!(ShuffleMode::Off.status_label(), "shuffle off");
+        assert_eq!(ShuffleMode::On.status_label(), "shuffle on");
+        assert!(ShuffleMode::Smart.status_label().starts_with("smart shuffle on"));
+    }
+}
+
+#[cfg(test)]
+mod playback_modes_tests {
+    use super::*;
+
+    #[test]
+    fn both_glyphs_are_always_present_even_with_everything_off() {
+        let [shuffle, smart, repeat] = playback_modes(false, false, RepeatMode::Off);
+        assert_eq!(shuffle, ("\u{21c4}", false));
+        assert_eq!(smart, (" ", false));
+        assert_eq!(repeat, ("\u{21bb} ", false));
+    }
+
+    #[test]
+    fn shuffle_lights_up_on_its_own() {
+        let [shuffle, smart, repeat] = playback_modes(true, false, RepeatMode::Off);
+        assert!(shuffle.1);
+        assert!(!smart.1);
+        assert!(!repeat.1);
+    }
+
+    #[test]
+    fn smart_shuffle_fills_the_gap_between_the_toggles_with_a_lit_sparkle() {
+        let [shuffle, smart, _] = playback_modes(true, true, RepeatMode::Off);
+        assert!(shuffle.1, "smart shuffle is still shuffle");
+        assert_eq!(smart, ("\u{2726}", true));
+    }
+
+    #[test]
+    fn the_sparkle_needs_shuffle_itself_to_be_on() {
+        // A stale smart flag with shuffle off must not draw a sparkle.
+        let [_, smart, _] = playback_modes(false, true, RepeatMode::Off);
+        assert_eq!(smart, (" ", false));
+    }
+
+    #[test]
+    fn repeat_album_and_repeat_song_are_both_active_but_only_song_gets_the_one() {
+        let [_, _, context] = playback_modes(false, false, RepeatMode::Context);
+        let [_, _, track] = playback_modes(false, false, RepeatMode::Track);
+        assert_eq!(context, ("\u{21bb} ", true));
+        assert_eq!(track, ("\u{21bb}1", true));
+    }
+
+    #[test]
+    fn the_readout_is_the_same_width_in_every_state() {
+        // A fixed-width readout is what lets the playbar reserve its room
+        // once -- otherwise the track title's truncation point would jump
+        // every time shuffle or repeat changed.
+        let width = |shuffle, smart, repeat| {
+            playback_modes(shuffle, smart, repeat).iter().map(|(text, _)| text.chars().count()).sum::<usize>()
+        };
+        let expected = width(false, false, RepeatMode::Off);
+        for shuffle in [false, true] {
+            for smart in [false, true] {
+                for repeat in [RepeatMode::Off, RepeatMode::Context, RepeatMode::Track] {
+                    assert_eq!(
+                        width(shuffle, smart, repeat),
+                        expected,
+                        "shuffle={shuffle} smart={smart} repeat={repeat:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+

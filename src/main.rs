@@ -4,6 +4,7 @@ mod pins;
 mod position;
 mod api;
 mod spike;
+mod state;
 mod ui;
 mod romanize;
 mod spicy;
@@ -34,7 +35,7 @@ use std::time::{Duration, Instant};
 use rspotify::AuthCodeSpotify;
 use api::library::{FollowedArtist, PlaylistSummary, SavedAlbumSummary};
 use api::search::TrackResult;
-use ui::{
+use state::{
     filtered_sorted, pinned_first, quick_jump_entries, AlbumDetailState, AppState, ArtistDetailState, ConfirmAction,
     Fetch, Focus, LibraryState, ListFilter, LyricsState, Nav, PendingConfirm, PlaylistDetailState, PlaylistPicker,
     QuickJump, QuickJumpEntry, QuickJumpKind, RepeatMode, Screen, SearchState, ShuffleMode, TextPrompt,
@@ -101,7 +102,7 @@ enum CrudResult {
 }
 
 /// Owned result of resolving a Sidebar row into an action -- computed in
-/// its own statement so the borrow of `app` inside `ui::sidebar_rows(&app)`
+/// its own statement so the borrow of `app` inside `state::sidebar_rows(&app)`
 /// ends there, before the action actually mutates `app`. A `match`'s
 /// scrutinee temporary lives for the whole arm body it's matched into,
 /// not just until a binding's last use, so doing the borrow and the
@@ -871,8 +872,8 @@ fn apply_move_to_position(app: &mut AppState, input: &str) {
         return;
     }
     let Fetch::Ready(items) = &mut pd.tracks else { return };
-    match ui::parse_move_position(input, items.len()) {
-        Ok(target) => pd.selected = ui::move_item_to(items, pd.selected, target),
+    match state::parse_move_position(input, items.len()) {
+        Ok(target) => pd.selected = state::move_item_to(items, pd.selected, target),
         Err(message) => app.status = Some((message, true)),
     }
 }
@@ -1810,8 +1811,8 @@ async fn main() -> std::io::Result<()> {
         nav: Nav::new(),
         sidebar_sel: 0,
         library: LibraryState::new(),
-        queue: ui::QueueState::new(),
-        devices: ui::DevicesState::new(),
+        queue: state::QueueState::new(),
+        devices: state::DevicesState::new(),
         playlist_detail: None,
         artist_detail: None,
         album_detail: None,
@@ -2092,7 +2093,7 @@ async fn main() -> std::io::Result<()> {
 
                 // Fetch playlists as soon as the client's ready, not
                 // lazily on first Library visit -- the Sidebar shows
-                // them directly (see ui::sidebar_rows) and shouldn't sit
+                // them directly (see state::sidebar_rows) and shouldn't sit
                 // empty until the user happens to drill into Library
                 // first. Guarded the same way the lazy trigger elsewhere
                 // is, so whichever fires first wins and the other is a
@@ -2615,8 +2616,8 @@ async fn main() -> std::io::Result<()> {
                             app.nav.focus = Focus::Main;
                         }
                         KeyCode::Char(c) if is_pin_key(KeyCode::Char(c), key.modifiers) => {
-                            let playlist_uri = match ui::sidebar_rows(&app).get(app.sidebar_sel) {
-                                Some(ui::SidebarRow::Playlist(p)) => Some(p.uri.clone()),
+                            let playlist_uri = match state::sidebar_rows(&app).get(app.sidebar_sel) {
+                                Some(state::SidebarRow::Playlist(p)) => Some(p.uri.clone()),
                                 _ => None,
                             };
                             if let Some(uri) = playlist_uri {
@@ -2650,13 +2651,13 @@ async fn main() -> std::io::Result<()> {
                             app.sidebar_sel = app.sidebar_sel.saturating_sub(1);
                         }
                         KeyCode::Down => {
-                            let row_count = ui::sidebar_rows(&app).len();
+                            let row_count = state::sidebar_rows(&app).len();
                             app.sidebar_sel = (app.sidebar_sel + 1).min(row_count.saturating_sub(1));
                         }
                         KeyCode::Enter | KeyCode::Right => {
-                            let action = match ui::sidebar_rows(&app).get(app.sidebar_sel) {
-                                Some(ui::SidebarRow::Menu(_, screen)) => Some(SidebarAction::Goto(*screen)),
-                                Some(ui::SidebarRow::Playlist(p)) => {
+                            let action = match state::sidebar_rows(&app).get(app.sidebar_sel) {
+                                Some(state::SidebarRow::Menu(_, screen)) => Some(SidebarAction::Goto(*screen)),
+                                Some(state::SidebarRow::Playlist(p)) => {
                                     Some(SidebarAction::OpenPlaylist((*p).clone()))
                                 }
                                 None => None,
@@ -3811,13 +3812,13 @@ async fn main() -> std::io::Result<()> {
                                 KeyCode::Up if move_mode_active => {
                                     if let Some(pd) = &mut app.playlist_detail
                                         && let Fetch::Ready(items) = &mut pd.tracks {
-                                            pd.selected = ui::move_item_up(items, pd.selected);
+                                            pd.selected = state::move_item_up(items, pd.selected);
                                         }
                                 }
                                 KeyCode::Down if move_mode_active => {
                                     if let Some(pd) = &mut app.playlist_detail
                                         && let Fetch::Ready(items) = &mut pd.tracks {
-                                            pd.selected = ui::move_item_down(items, pd.selected);
+                                            pd.selected = state::move_item_down(items, pd.selected);
                                         }
                                 }
                                 KeyCode::Enter if move_mode_active => {
@@ -3855,7 +3856,7 @@ async fn main() -> std::io::Result<()> {
                                     if let Some(pd) = &mut app.playlist_detail
                                         && let Some(start) = pd.move_mode.take()
                                             && let Fetch::Ready(items) = &mut pd.tracks {
-                                                pd.selected = ui::move_item_to(items, pd.selected, start);
+                                                pd.selected = state::move_item_to(items, pd.selected, start);
                                             }
                                     resume_normal_display_index(&mut app);
                                 }

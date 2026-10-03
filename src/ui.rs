@@ -1723,6 +1723,13 @@ pub struct ImageState {
     /// still too short and this needs reverting again.
     pub startup_retransmit_at: Option<std::time::Instant>,
     pub startup_retransmit_done: bool,
+    /// The "soft load next track" prefetch's decoded cover, keyed by the
+    /// uri it belongs to -- separate from `cover_image` (the *currently
+    /// showing* slot) so a background prefetch can never clobber or race
+    /// with what's on screen right now. `main.rs` moves this into
+    /// `cover_image` once the real track-changed event actually arrives
+    /// for the matching uri, instead of starting a fresh fetch.
+    pub prewarmed_cover: Option<(String, image::DynamicImage)>,
 }
 
 /// How long to wait, after this process's very first cover-art

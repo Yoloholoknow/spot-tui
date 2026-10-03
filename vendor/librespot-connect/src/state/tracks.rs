@@ -67,6 +67,15 @@ impl<'ct> ConnectState {
         &self.player().next_tracks
     }
 
+    /// The uri of whatever `next_tracks` already has queued up front, if
+    /// anything -- already correctly maintained (refilled on every skip,
+    /// manual or natural) and free to read, unlike learning this from
+    /// outside the crate, which would otherwise mean a Web API queue poll.
+    /// Lets a caller warm a cache for that one track ahead of time.
+    pub fn peek_next_track_uri(&self) -> Option<String> {
+        self.next_tracks().first().map(|t| t.uri.clone())
+    }
+
     pub fn set_current_track_random(&mut self) -> Result<(), Error> {
         let max_tracks = self.get_context(self.active_context)?.tracks.len();
         let rng_track = rand::rng().random_range(0..max_tracks);

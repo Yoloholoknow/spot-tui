@@ -63,5 +63,9 @@ vergen-gitcl = { git = "https://github.com/rustyhorde/vergen", tag = "vergen_git
 #                                                  shuffle/repeat after a transfer applies its
 #                                                  options (stock announces the stale pre-transfer
 #                                                  values, so a launch always showed shuffle off)
+#                                                  Next-track prefetch: SpircCommand::PeekNextTrack
+#                                                  (oneshot query) + Spirc::peek_next_track(), and
+#                                                  #[derive(Clone)] on Spirc
+#                     state/tracks.rs              peek_next_track_uri()
 librespot-core = { path = "vendor/librespot-core" }
 librespot-connect = { path = "vendor/librespot-connect" }

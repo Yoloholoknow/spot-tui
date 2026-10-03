@@ -1280,12 +1280,16 @@ enum LoopExit {
 #[allow(clippy::too_many_arguments)]
 fn drain_player_events(
     app: &mut AppState,
-    images: &ui::ImageState,
+    images: &mut ui::ImageState,
     tracker: &mut PositionTracker,
     generation: &mut u64,
     cover_tx: &mpsc::Sender<(u64, image::DynamicImage)>,
     pending_fetch: &mut Option<(u64, TrackMeta, Instant)>,
     player_events: &mut librespot_playback::player::PlayerEventChannel,
+    spirc: &Spirc,
+    spotify_client: &Option<AuthCodeSpotify>,
+    spicy: &Option<spicy::SpicyClient>,
+    prewarm_cover_tx: &mpsc::Sender<(String, image::DynamicImage)>,
 ) -> bool {
     let mut track_changed = false;
     while let Ok(event) = player_events.try_recv() {
@@ -1319,10 +1323,26 @@ fn drain_player_events(
             app.romanized_lines = None;
             *generation += 1;
 
+            let current_uri = audio_item.track_id.to_string();
+
+            // Arrival-side reuse: if the prefetch already warmed this
+            // exact track's cover, use it instead of starting a fresh
+            // fetch -- `take()` clears the prewarm slot either way, so a
+            // stale entry for some other track never lingers.
+            let already_warm = match images.prewarmed_cover.take() {
+                Some((uri, img)) if uri == current_uri => {
+                    images.cover_image = Some((uri, img));
+                    images.sized_covers.clear();
+                    true
+                }
+                _ => false,
+            };
+
             // Real album art, only worth fetching at all if a real
             // graphics protocol is actually in use -- `covers` is
             // already sorted largest-first by librespot itself.
-            if images.picker.is_some()
+            if !already_warm
+                && images.picker.is_some()
                 && let Some(cover_url) = audio_item.covers.first().map(|c| c.url.clone()) {
                     let tx = cover_tx.clone();
                     let cover_gen = *generation;
@@ -1337,6 +1357,15 @@ fn drain_player_events(
                         }
                     });
                 }
+
+            // Soft-load whatever's queued up next, one track ahead --
+            // best-effort, see `prefetch_next_track`'s own doc comment.
+            tokio::spawn(prefetch_next_track(
+                spirc.clone(),
+                spotify_client.clone(),
+                spicy.clone(),
+                prewarm_cover_tx.clone(),
+            ));
 
             *pending_fetch = Some((
                 *generation,
@@ -1448,6 +1477,73 @@ async fn spicy_lookup(client: &spicy::SpicyClient, track_uri: &str, base62_id: &
         log::warn!("spicy_lyrics[{base62_id}]: couldn't cache the result: {e}");
     }
     Some(CachedLyrics::Synced { lines, words, credit: Some(credit) })
+}
+
+/// "Soft load next track": warms the art + lyrics caches for whatever
+/// `librespot` already has queued up next (`peek_next_track`, free --
+/// already-maintained state, no extra Web API queue poll), so a real
+/// skip that lands there finds both already warm instead of starting
+/// cold. Best-effort throughout: a missing Web API client, no cover, or
+/// no lyrics just means less gets warmed, never an error surfaced to
+/// the user. Deliberately limited to the two lyrics sources that already
+/// cache to disk (Spicy, lrclib) -- Spotify-direct and YouTube Music
+/// re-fetch fresh on every real play with no cache of their own, so
+/// prefetching them would spend a network call with nothing left to
+/// show for it by the time the track actually arrives.
+async fn prefetch_next_track(
+    spirc: Spirc,
+    spotify_client: Option<AuthCodeSpotify>,
+    spicy: Option<spicy::SpicyClient>,
+    prewarm_cover_tx: mpsc::Sender<(String, image::DynamicImage)>,
+) {
+    let Ok(Some(next_uri)) = spirc.peek_next_track().await else {
+        return;
+    };
+    let Some(client) = spotify_client else {
+        return;
+    };
+    let meta = match api::track::get_next_track_meta(&client, &next_uri).await {
+        Ok(m) => m,
+        Err(e) => {
+            log::info!("prefetch[{next_uri}]: get_next_track_meta failed: {e}");
+            return;
+        }
+    };
+
+    if let Some(cover_url) = meta.cover_url {
+        let tx = prewarm_cover_tx.clone();
+        let uri = next_uri.clone();
+        tokio::task::spawn_blocking(move || {
+            let fetched = ureq::get(&cover_url).call().ok().and_then(|resp| {
+                let mut bytes = Vec::new();
+                resp.into_reader().read_to_end(&mut bytes).ok()?;
+                image::load_from_memory(&bytes).ok()
+            });
+            if let Some(img) = fetched {
+                let _ = tx.send((uri, img));
+            }
+        });
+    }
+
+    let base62 = librespot_core::SpotifyUri::from_uri(&next_uri)
+        .ok()
+        .and_then(|uri| librespot_core::SpotifyId::try_from(&uri).ok())
+        .and_then(|id| id.to_base62().ok());
+    if let (Some(spicy_client), Some(base62)) = (&spicy, &base62)
+        && spicy_lookup(spicy_client, &next_uri, base62).await.is_some()
+    {
+        return;
+    }
+
+    let uri = next_uri.clone();
+    let artist = meta.artist;
+    let title = meta.title;
+    let album = meta.album;
+    let duration_ms = meta.duration_ms;
+    tokio::task::spawn_blocking(move || {
+        let lyrics_client = LyricsClient::new(cache_dir());
+        lyrics_client.fetch(&uri, &artist, &title, Some(album.as_str()).filter(|a| !a.is_empty()), duration_ms);
+    });
 }
 
 /// The status-bar text after `t`. When there is nothing to romanize it says
@@ -1674,6 +1770,11 @@ async fn main() -> std::io::Result<()> {
     // fetches already are so a result for a track already skipped past
     // gets dropped rather than painted over the current one.
     let (cover_tx, cover_rx) = mpsc::channel::<(u64, image::DynamicImage)>();
+    // "Soft load next track" prefetch (art half): keyed by the uri it
+    // belongs to, not a generation -- the track it's for isn't playing
+    // yet, so there's no "current generation" to tag it with. Landed
+    // into `images.prewarmed_cover`, never directly into `cover_image`.
+    let (prewarm_cover_tx, prewarm_cover_rx) = mpsc::channel::<(String, image::DynamicImage)>();
     // Romanized lyrics are computed off the render thread and come back here.
     let (roman_tx, roman_rx) = mpsc::channel::<(u64, Vec<Option<romanize::RomanLine>>)>();
     let mut roman_requested: Option<u64> = None;
@@ -1735,6 +1836,7 @@ async fn main() -> std::io::Result<()> {
         sized_covers: Vec::new(),
         startup_retransmit_at: None,
         startup_retransmit_done: false,
+        prewarmed_cover: None,
     };
 
     let mut generation: u64 = 0;
@@ -1885,12 +1987,16 @@ async fn main() -> std::io::Result<()> {
                 }
                 if drain_player_events(
                     &mut app,
-                    &images,
+                    &mut images,
                     &mut tracker,
                     &mut generation,
                     &cover_tx,
                     &mut pending_fetch,
                     &mut player_events,
+                    &spirc,
+                    &spotify_client,
+                    &spicy,
+                    &prewarm_cover_tx,
                 ) {
                     last_track_change = Some(Instant::now());
                 }
@@ -1912,12 +2018,16 @@ async fn main() -> std::io::Result<()> {
 
         let _ = drain_player_events(
             &mut app,
-            &images,
+            &mut images,
             &mut tracker,
             &mut generation,
             &cover_tx,
             &mut pending_fetch,
             &mut player_events,
+            &spirc,
+            &spotify_client,
+            &spicy,
+            &prewarm_cover_tx,
         );
 
         if let Some((fetch_gen, meta, deadline)) = pending_fetch.clone()
@@ -2316,6 +2426,17 @@ async fn main() -> std::io::Result<()> {
                     images.cover_image = Some((uri.clone(), dyn_image));
                     images.sized_covers.clear();
                 }
+        }
+
+        // The prefetch's own result, keyed by track uri (not a
+        // generation, since the track it's for isn't playing yet) --
+        // just parked here until the real track-changed event arrives
+        // and claims it (see `drain_player_events`' arrival-side reuse).
+        // A track skipped past before its prefetch lands is simply
+        // overwritten by the next one; nothing reads a stale entry since
+        // the reuse check itself is keyed by the arriving track's uri.
+        while let Ok((uri, dyn_image)) = prewarm_cover_rx.try_recv() {
+            images.prewarmed_cover = Some((uri, dyn_image));
         }
 
         let now = Instant::now();

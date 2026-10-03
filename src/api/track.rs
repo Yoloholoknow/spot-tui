@@ -1,11 +1,11 @@
-//! A single track's own artist/album ids (Phase 28: `v`/`Shift+V` on Now
-//! Playing). Nothing else in this app needed a bare track lookup by uri --
-//! every other screen that opens an artist/album from a track already has
-//! the ids in hand from a list (`TrackResult::artist_uri`/`album_uri`,
-//! Phase 9). The currently-playing track has no such list entry: librespot's
-//! own `AudioItem` carries artist/album *names* only (confirmed by reading
-//! `librespot-metadata`'s `UniqueFields::Track`), so this is a real, if
-//! small, network call rather than a free lookup.
+//! Next-track prefetch (soft-load): fetching enough metadata for a track
+//! that hasn't started playing yet -- `librespot`'s own `PlayerEvent`
+//! only carries this for the track that's *actually* loaded, so a track
+//! merely sitting next in the queue needs one Web API call to learn its
+//! artist/title/album/cover ahead of time.
+//!
+//! Also `get_track_ids` (`v`/`Shift+V` on Now Playing): the playing track's
+//! artist/album ids, which librespot's `AudioItem` doesn't carry (names only).
 
 use rspotify::clients::BaseClient;
 use rspotify::model::TrackId;
@@ -13,6 +13,47 @@ use rspotify::prelude::Id;
 use rspotify::AuthCodeSpotify;
 
 use super::ensure_fresh;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NextTrackMeta {
+    pub artist: String,
+    pub title: String,
+    pub album: String,
+    pub duration_ms: u32,
+    /// Largest available cover image, if any -- same "largest-first"
+    /// convention `librespot`'s own `covers` field already follows, so
+    /// callers don't need two different sorting rules.
+    pub cover_url: Option<String>,
+}
+
+pub async fn get_next_track_meta(client: &AuthCodeSpotify, track_uri: &str) -> Result<NextTrackMeta, String> {
+    if let Err(e) = ensure_fresh(client).await {
+        log::warn!("token refresh before get_next_track_meta failed, trying with existing token anyway: {e}");
+    }
+    let id = TrackId::from_id_or_uri(track_uri).map_err(|e| e.to_string())?;
+    let track = match client.track(id.as_ref(), None).await {
+        Ok(t) => t,
+        Err(e) => {
+            let detail = super::describe_client_error(e).await;
+            log::warn!("get_next_track_meta: track() failed for {track_uri}: {detail}");
+            return Err(detail);
+        }
+    };
+    let artist = track.artists.first().map(|a| a.name.clone()).unwrap_or_default();
+    let cover_url = track
+        .album
+        .images
+        .iter()
+        .max_by_key(|img| img.width.unwrap_or(0) * img.height.unwrap_or(0))
+        .map(|img| img.url.clone());
+    Ok(NextTrackMeta {
+        artist,
+        title: track.name,
+        album: track.album.name,
+        duration_ms: track.duration.num_milliseconds().max(0) as u32,
+        cover_url,
+    })
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackIds {

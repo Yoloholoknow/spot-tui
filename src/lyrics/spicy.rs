@@ -879,7 +879,7 @@ mod spicy_live {
                 })
                 .collect();
             let started = std::time::Instant::now();
-            let romanized = crate::romanize::romanize_lyric_lines(&sheet);
+            let romanized = crate::lyrics::romanize::romanize_lyric_lines(&sheet);
             let took = started.elapsed();
             let with_text = romanized.iter().flatten().count();
             println!("=== {name}: {} lines, {with_text} romanized, {took:?}", sheet.len());

@@ -83,14 +83,13 @@ impl Config {
 }
 
 pub fn load() -> Config {
-    let Some(dirs) = directories::ProjectDirs::from("", "", "ncspot-lyrics") else {
+    let Some(raw) = crate::paths::config_files().iter().find_map(|path| std::fs::read_to_string(path).ok()) else {
         return Config::default();
     };
-    let path = dirs.config_dir().join("config.toml");
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return Config::default();
-    };
-    toml::from_str(&raw).unwrap_or_default()
+    toml::from_str(&raw).unwrap_or_else(|e| {
+        log::warn!("ignoring config.toml, it did not parse: {e}");
+        Config::default()
+    })
 }
 
 #[cfg(test)]

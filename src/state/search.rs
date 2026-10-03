@@ -33,6 +33,14 @@ impl SearchState {
         }
     }
 
+    /// Empties the query and its results, as when Search is (re)entered.
+    pub fn clear(&mut self) {
+        self.query.clear();
+        self.cursor = 0;
+        self.results.clear();
+        self.error = None;
+    }
+
     /// Inserts `c` at the cursor and advances it by one character.
     pub fn insert_at_cursor(&mut self, c: char) {
         text_insert_at_cursor(&mut self.query, &mut self.cursor, c);

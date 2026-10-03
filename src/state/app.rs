@@ -1,4 +1,7 @@
 use super::*;
+use crate::api::library::{FollowedArtist, PlaylistSummary, SavedAlbumSummary};
+use crate::api::search::TrackResult;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 pub struct AppState {
@@ -41,7 +44,7 @@ pub struct AppState {
     /// The current sheet's romanization, in step with its lines, once it has
     /// been computed off the render thread (`None` until then, and for a
     /// sheet with nothing to romanize). Cleared with `lyrics` on track change.
-    pub romanized_lines: Option<Vec<Option<crate::romanize::RomanLine>>>,
+    pub romanized_lines: Option<Vec<Option<crate::lyrics::romanize::RomanLine>>>,
     pub current_line: Option<usize>,
     pub fullscreen: bool,
     /// `None` = no track loaded yet (device is connected regardless --
@@ -108,3 +111,164 @@ pub struct AppState {
     pub status: Option<(String, bool)>,
 }
 
+
+pub fn track_label(t: &TrackResult) -> String {
+    format!("{} \u{2014} {}", t.artist, t.title)
+}
+
+pub fn album_label(a: &SavedAlbumSummary) -> String {
+    format!("{} \u{2014} {}", a.name, a.artist)
+}
+
+pub fn artist_label(a: &FollowedArtist) -> String {
+    a.name.clone()
+}
+
+pub fn playlist_label(p: &PlaylistSummary) -> String {
+    format!("{} ({} tracks)", p.name, p.track_count)
+}
+
+impl AppState {
+    pub fn new(
+        romanize_lyrics: bool,
+        pinned_playlists: HashSet<String>,
+        pinned_tracks: HashSet<String>,
+        initial_volume: u16,
+    ) -> Self {
+        Self {
+            track_title: None,
+            track_artist: None,
+            track_album: None,
+            current_track_uri: None,
+            context_label: None,
+            shuffle: false,
+            smart_shuffle: false,
+            repeat: RepeatMode::Off,
+            lyrics: LyricsState::Idle,
+            lyrics_credit: None,
+            romanize_lyrics,
+            romanized_lines: None,
+            current_line: None,
+            fullscreen: false,
+            playing: None,
+            position: Duration::ZERO,
+            duration: Duration::ZERO,
+            volume: initial_volume,
+            muted_volume: None,
+            nav: Nav::new(),
+            sidebar_sel: 0,
+            library: LibraryState::new(),
+            queue: QueueState::new(),
+            devices: DevicesState::new(),
+            playlist_detail: None,
+            artist_detail: None,
+            album_detail: None,
+            pinned_playlists,
+            pinned_tracks,
+            playlist_membership: HashMap::new(),
+            search: SearchState::new(),
+            pending_confirm: None,
+            text_prompt: None,
+            playlist_picker: None,
+            quick_jump: None,
+            status: None,
+        }
+    }
+
+    // The rows each list screen shows, in display order, as
+    // `(index into the fetched list, item)`. Empty until the list is loaded.
+    // Key handlers and renderers both read these, so "row N" can never mean
+    // two different things.
+
+    pub fn liked_display(&self) -> Vec<(usize, &TrackResult)> {
+        match &self.library.liked_songs {
+            Fetch::Ready(items) => filtered_sorted(items, &self.library.liked_songs_filter, &track_label),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn saved_albums_display(&self) -> Vec<(usize, &SavedAlbumSummary)> {
+        match &self.library.saved_albums {
+            Fetch::Ready(items) => filtered_sorted(items, &self.library.saved_albums_filter, &album_label),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn followed_artists_display(&self) -> Vec<(usize, &FollowedArtist)> {
+        match &self.library.followed_artists {
+            Fetch::Ready(items) => filtered_sorted(items, &self.library.followed_artists_filter, &artist_label),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Pinned playlists first.
+    pub fn playlists_display(&self) -> Vec<(usize, &PlaylistSummary)> {
+        match &self.library.playlists {
+            Fetch::Ready(items) => pinned_first(
+                filtered_sorted(items, &self.library.playlists_filter, &playlist_label),
+                &self.pinned_playlists,
+                |p| p.uri.as_str(),
+            ),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Pinned tracks first, except during move mode, which needs display
+    /// position to equal array position (see `PlaylistDetailState::move_mode`).
+    pub fn playlist_detail_display(&self) -> Vec<(usize, &TrackResult)> {
+        let Some(pd) = &self.playlist_detail else { return Vec::new() };
+        match &pd.tracks {
+            Fetch::Ready(items) => {
+                let natural = filtered_sorted(items, &pd.filter, &track_label);
+                if pd.move_mode.is_some() {
+                    natural
+                } else {
+                    pinned_first(natural, &self.pinned_tracks, |t| t.uri.as_str())
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The track under the cursor on the current screen, if it is a screen
+    /// that lists tracks.
+    pub fn selected_track(&self) -> Option<TrackResult> {
+        match self.nav.top() {
+            Screen::LikedSongs => self.liked_display().get(self.library.liked_songs_selected).map(|&(_, t)| t.clone()),
+            Screen::PlaylistDetail => {
+                let selected = self.playlist_detail.as_ref()?.selected;
+                self.playlist_detail_display().get(selected).map(|&(_, t)| t.clone())
+            }
+            Screen::Search => self.search.results.get(self.search.selected).cloned(),
+            Screen::Queue => match &self.queue.fetch {
+                Fetch::Ready(summary) => summary.queue.get(self.queue.selected).cloned(),
+                _ => None,
+            },
+            Screen::AlbumDetail => {
+                let state = self.album_detail.as_ref()?;
+                match &state.detail {
+                    Fetch::Ready(album) => album.tracks.get(state.selected).cloned(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The playlists the add-to-playlist picker shows, pinned first.
+    pub fn picker_display(&self) -> Vec<(usize, &PlaylistSummary)> {
+        let (Some(picker), Fetch::Ready(items)) = (&self.playlist_picker, &self.library.playlists) else {
+            return Vec::new();
+        };
+        let label = |p: &PlaylistSummary| p.name.clone();
+        pinned_first(filtered_sorted(items, &picker.filter, &label), &self.pinned_playlists, |p| p.uri.as_str())
+    }
+
+    /// The entries the quick-jump palette currently shows.
+    pub fn quick_jump_matches(&self) -> Vec<QuickJumpEntry> {
+        let Some(qj) = &self.quick_jump else { return Vec::new() };
+        let entries = quick_jump_entries(self, &qj.filter);
+        let label = |e: &QuickJumpEntry| e.label.clone();
+        filtered_sorted(&entries, &qj.filter, &label).into_iter().map(|(_, e)| e.clone()).collect()
+    }
+}

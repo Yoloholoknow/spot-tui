@@ -13,9 +13,7 @@
 use std::collections::HashSet;
 
 fn pins_path(kind: &str) -> std::path::PathBuf {
-    directories::ProjectDirs::from("", "", "spot-tui")
-        .map(|d| d.cache_dir().join(format!("pinned_{kind}.json")))
-        .unwrap_or_else(|| std::env::temp_dir().join(format!("spot-tui-pinned-{kind}.json")))
+    crate::paths::cache_dir().join(format!("pinned_{kind}.json"))
 }
 
 pub fn load(kind: &str) -> HashSet<String> {

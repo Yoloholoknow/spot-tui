@@ -1,4 +1,5 @@
-use crate::lyrics::LyricLine;
+use crate::lyrics::{CachedLyrics, LyricLine};
+use std::time::Duration;
 
 /// Repeat as the three states a person actually cycles through (off /
 /// the whole album or playlist / this one song), collapsed from the
@@ -278,6 +279,82 @@ mod playback_modes_tests {
                 }
             }
         }
+    }
+}
+
+
+impl From<CachedLyrics> for LyricsState {
+    fn from(cached: CachedLyrics) -> Self {
+        match cached {
+            CachedLyrics::Synced { lines, words, .. } => LyricsState::Synced(
+                lines
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (secs, text))| LyricLine {
+                        timestamp: Duration::from_secs_f64(secs),
+                        text,
+                        // `words` runs parallel to `lines`; empty (or short,
+                        // if a cache file is corrupt) means no word timing.
+                        words: words.get(i).cloned().unwrap_or_default(),
+                    })
+                    .collect(),
+            ),
+            CachedLyrics::Plain { text } => LyricsState::Plain(text),
+            CachedLyrics::Instrumental => LyricsState::Instrumental,
+            CachedLyrics::NotFound => LyricsState::NotFound,
+        }
+    }
+}
+
+#[cfg(test)]
+mod lyric_words_tests {
+    use super::*;
+    use crate::lyrics::WordSeg;
+
+    fn seg(text: &str, start: f64, end: f64) -> WordSeg {
+        WordSeg { text: text.to_string(), start, end }
+    }
+
+    fn lines_of(state: LyricsState) -> Vec<LyricLine> {
+        match state {
+            LyricsState::Synced(lines) => lines,
+            _ => panic!("expected Synced lyrics"),
+        }
+    }
+
+    #[test]
+    fn each_line_gets_its_own_words() {
+        let state = LyricsState::from(CachedLyrics::Synced {
+            lines: vec![(1.0, "hi there".to_string()), (5.0, "bye".to_string())],
+            words: vec![vec![seg("hi ", 1.0, 1.4), seg("there", 1.4, 2.0)], vec![seg("bye", 5.0, 5.5)]],
+            credit: None,
+        });
+        let lines = lines_of(state);
+        assert_eq!(lines[0].words, vec![seg("hi ", 1.0, 1.4), seg("there", 1.4, 2.0)]);
+        assert_eq!(lines[1].words, vec![seg("bye", 5.0, 5.5)]);
+    }
+
+    #[test]
+    fn a_line_level_sync_leaves_every_line_without_words() {
+        let state = LyricsState::from(CachedLyrics::Synced {
+            lines: vec![(1.0, "a".to_string()), (2.0, "b".to_string())],
+            words: Vec::new(),
+            credit: None,
+        });
+        assert!(lines_of(state).iter().all(|l| l.words.is_empty()));
+    }
+
+    #[test]
+    fn a_short_words_list_never_panics_or_misaligns() {
+        // Defensive: a corrupt cache file with fewer word entries than lines.
+        let state = LyricsState::from(CachedLyrics::Synced {
+            lines: vec![(1.0, "a".to_string()), (2.0, "b".to_string())],
+            words: vec![vec![seg("a", 1.0, 1.5)]],
+            credit: None,
+        });
+        let lines = lines_of(state);
+        assert_eq!(lines[0].words.len(), 1);
+        assert!(lines[1].words.is_empty());
     }
 }
 

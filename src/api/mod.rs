@@ -64,12 +64,9 @@ const SCOPES: &[&str] = &[
 ];
 
 fn token_cache_path() -> std::path::PathBuf {
-    // Our own cache, separate from ncspot's -- different client_id means
-    // a different, non-interchangeable token.
-    let dir = directories::ProjectDirs::from("", "", "spot-tui")
-        .map(|d| d.cache_dir().to_path_buf())
-        .unwrap_or_else(|| std::env::temp_dir().join("spot-tui-cache"));
-    dir.join("spotify_token.json")
+    // Separate from ncspot's: a different client_id means a different,
+    // non-interchangeable token.
+    crate::paths::cache_dir().join("spotify_token.json")
 }
 
 fn is_expired(token: &Token) -> bool {

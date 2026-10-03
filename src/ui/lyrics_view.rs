@@ -6,7 +6,7 @@ use super::*;
 /// swept with the native words, which would colour the wrong text.
 pub(super) fn display_line<'a>(
     line: &'a crate::lyrics::LyricLine,
-    roman: Option<&'a crate::romanize::RomanLine>,
+    roman: Option<&'a crate::lyrics::romanize::RomanLine>,
     romanize: bool,
 ) -> (&'a str, &'a [crate::lyrics::WordSeg]) {
     match roman {
@@ -21,7 +21,7 @@ pub(super) fn display_line<'a>(
 /// text (a different number of lines) is ignored rather than misplaced.
 pub(super) fn plain_display_lines(
     text: &str,
-    roman: Option<&[Option<crate::romanize::RomanLine>]>,
+    roman: Option<&[Option<crate::lyrics::romanize::RomanLine>]>,
     romanize: bool,
 ) -> Vec<String> {
     let lines: Vec<&str> = text.lines().collect();
@@ -580,7 +580,7 @@ mod sweep_active_tests {
 mod display_line_tests {
     use super::*;
     use crate::lyrics::{LyricLine, WordSeg};
-    use crate::romanize::RomanLine;
+    use crate::lyrics::romanize::RomanLine;
     use std::time::Duration;
 
     fn seg(text: &str) -> WordSeg {
@@ -627,7 +627,7 @@ mod display_line_tests {
 #[cfg(test)]
 mod plain_display_tests {
     use super::*;
-    use crate::romanize::RomanLine;
+    use crate::lyrics::romanize::RomanLine;
 
     fn roman(text: &str) -> Option<RomanLine> {
         Some(RomanLine { text: text.to_string(), words: Vec::new() })

@@ -39,9 +39,7 @@ struct SearchCacheEntry {
 }
 
 fn search_cache_dir() -> std::path::PathBuf {
-    directories::ProjectDirs::from("", "", "spot-tui")
-        .map(|d| d.cache_dir().join("search"))
-        .unwrap_or_else(|| std::env::temp_dir().join("spot-tui-search-cache"))
+    crate::paths::cache_dir().join("search")
 }
 
 /// Normalizes case/whitespace so trivially-different typings of the same

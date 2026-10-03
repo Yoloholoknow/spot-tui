@@ -41,7 +41,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
-use tokio::{sync::mpsc, time::sleep};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::sleep,
+};
 
 #[derive(Debug, Error)]
 enum SpircError {
@@ -147,6 +150,14 @@ enum SpircCommand {
     Activate,
     Transfer(Option<TransferRequest>),
     Load(LoadRequest),
+    /// The only *query* command this actor has -- every other variant is
+    /// fire-and-forget. `next_tracks` lives inside the actor's own
+    /// `ConnectState`, already correctly maintained on every skip (manual
+    /// or natural), so a oneshot reply is cheaper and always-current
+    /// compared to the app learning "what's next" any other way (a Web
+    /// API queue poll). A dropped receiver (the caller stopped waiting) is
+    /// not an error worth logging -- `let _ =` on the send is deliberate.
+    PeekNextTrack(oneshot::Sender<Option<String>>),
 }
 
 const CONTEXT_FETCH_THRESHOLD: usize = 2;
@@ -157,6 +168,7 @@ const VOLUME_UPDATE_DELAY: Duration = Duration::from_millis(500);
 const UPDATE_STATE_DELAY: Duration = Duration::from_millis(200);
 
 /// The spotify connect handle
+#[derive(Clone)]
 pub struct Spirc {
     commands: mpsc::UnboundedSender<SpircCommand>,
 }
@@ -412,6 +424,15 @@ impl Spirc {
     /// Does not overwrite the queue.
     pub fn load(&self, command: LoadRequest) -> Result<(), Error> {
         Ok(self.commands.send(SpircCommand::Load(command))?)
+    }
+
+    /// Uri of whatever track is already queued up next, if any -- free to
+    /// read (already-maintained state, no extra network round trip), so a
+    /// caller can prefetch its art/lyrics ahead of a skip actually landing.
+    pub async fn peek_next_track(&self) -> Result<Option<String>, Error> {
+        let (tx, rx) = oneshot::channel();
+        self.commands.send(SpircCommand::PeekNextTrack(tx))?;
+        Ok(rx.await.unwrap_or(None))
     }
 
     /// Disconnects the current device and pauses the playback according the value.
@@ -724,6 +745,10 @@ impl SpircTask {
             SpircCommand::SetPosition(position) => self.handle_seek(position),
             SpircCommand::SetVolume(volume) => self.set_volume(volume),
             SpircCommand::Load(command) => self.handle_load(command, None, None).await?,
+            SpircCommand::PeekNextTrack(tx) => {
+                let _ = tx.send(self.connect_state.peek_next_track_uri());
+                return Ok(());
+            }
         };
 
         self.notify().await

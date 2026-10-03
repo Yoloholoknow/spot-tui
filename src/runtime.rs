@@ -441,8 +441,10 @@ impl Runtime {
         self.client_checked = true;
         self.app.search.client_ready = client.is_some();
         self.svc.client = client;
-        self.svc.ensure_loaded(&mut self.app, Screen::YourPlaylists);
-        self.svc.ensure_loaded(&mut self.app, Screen::LikedSongs);
+        if self.svc.client.is_some() {
+            self.svc.ensure_loaded(&mut self.app, Screen::YourPlaylists);
+            self.svc.ensure_loaded(&mut self.app, Screen::LikedSongs);
+        }
     }
 
     fn poll_queue(&mut self) {

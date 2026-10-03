@@ -244,3 +244,165 @@ impl Services {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::PlaylistDetailState;
+    use crate::state::ListFilter;
+
+    fn playlist(uri: &str, count: u32) -> PlaylistSummary {
+        PlaylistSummary { uri: uri.to_string(), name: format!("name of {uri}"), track_count: count }
+    }
+
+    fn track(uri: &str) -> TrackResult {
+        TrackResult {
+            uri: uri.to_string(),
+            title: "t".into(),
+            artist: "a".into(),
+            album: "al".into(),
+            artist_uri: String::new(),
+            album_uri: String::new(),
+        }
+    }
+
+    fn app_with_open_playlist(uri: &str, count: u32) -> AppState {
+        let mut app = AppState::new(false, HashSet::new(), HashSet::new(), 0);
+        app.library.playlists = Fetch::Ready(vec![playlist(uri, count)]);
+        app.playlist_detail = Some(PlaylistDetailState {
+            playlist: playlist(uri, count),
+            tracks: Fetch::Ready(vec![track("spotify:track:1")]),
+            selected: 0,
+            filter: ListFilter::default(),
+            move_mode: None,
+        });
+        app
+    }
+
+    fn count_in_list(app: &AppState) -> u32 {
+        match &app.library.playlists {
+            Fetch::Ready(items) => items[0].track_count,
+            _ => panic!("playlists not ready"),
+        }
+    }
+
+    #[test]
+    fn adding_a_track_bumps_both_copies_of_the_count_and_the_membership_cache() {
+        let (svc, _rx) = Services::new();
+        let mut app = app_with_open_playlist("spotify:playlist:p", 10);
+        svc.apply_crud_result(
+            &mut app,
+            CrudResult::TrackAdded {
+                playlist_uri: "spotify:playlist:p".into(),
+                track_uri: "spotify:track:9".into(),
+                result: Ok(()),
+            },
+        );
+        assert_eq!(count_in_list(&app), 11);
+        assert_eq!(app.playlist_detail.as_ref().unwrap().playlist.track_count, 11);
+        assert!(app.playlist_membership["spotify:playlist:p"].contains("spotify:track:9"));
+        assert_eq!(app.status, Some(("added to playlist".to_string(), false)));
+    }
+
+    #[test]
+    fn removing_every_copy_drops_the_count_by_the_number_of_copies() {
+        let (svc, _rx) = Services::new();
+        let mut app = app_with_open_playlist("spotify:playlist:p", 10);
+        svc.apply_crud_result(
+            &mut app,
+            CrudResult::TrackRemoved {
+                playlist_uri: "spotify:playlist:p".into(),
+                track_uri: "spotify:track:1".into(),
+                occurrences: 3,
+                result: Ok(()),
+            },
+        );
+        assert_eq!(count_in_list(&app), 7);
+    }
+
+    #[test]
+    fn the_count_never_goes_below_zero() {
+        let mut app = app_with_open_playlist("spotify:playlist:p", 1);
+        bump_track_count(&mut app, "spotify:playlist:p", -5);
+        assert_eq!(count_in_list(&app), 0);
+    }
+
+    #[test]
+    fn a_failed_write_reports_the_error_and_changes_nothing_else() {
+        let (svc, _rx) = Services::new();
+        let mut app = app_with_open_playlist("spotify:playlist:p", 10);
+        svc.apply_crud_result(
+            &mut app,
+            CrudResult::TrackAdded {
+                playlist_uri: "spotify:playlist:p".into(),
+                track_uri: "spotify:track:9".into(),
+                result: Err("boom".into()),
+            },
+        );
+        assert_eq!(count_in_list(&app), 10);
+        assert_eq!(app.status, Some(("add to playlist failed: boom".to_string(), true)));
+    }
+
+    #[test]
+    fn deleting_the_open_playlist_backs_out_of_its_detail_screen() {
+        let (svc, _rx) = Services::new();
+        let mut app = app_with_open_playlist("spotify:playlist:p", 10);
+        app.nav.push(Screen::PlaylistDetail);
+        svc.apply_crud_result(
+            &mut app,
+            CrudResult::PlaylistDeleted { playlist_uri: "spotify:playlist:p".into(), result: Ok(()) },
+        );
+        assert!(app.playlist_detail.is_none());
+        assert_eq!(*app.nav.top(), Screen::YourPlaylists);
+    }
+
+    #[test]
+    fn a_duplicate_add_asks_for_confirmation_instead_of_adding() {
+        let (svc, _rx) = Services::new();
+        let mut app = app_with_open_playlist("spotify:playlist:p", 10);
+        svc.apply_crud_result(
+            &mut app,
+            CrudResult::PlaylistAlreadyHasTrack {
+                playlist_uri: "spotify:playlist:p".into(),
+                track_uri: "spotify:track:1".into(),
+                message: "again?".into(),
+            },
+        );
+        let confirm = app.pending_confirm.expect("a confirmation");
+        assert_eq!(confirm.message, "again?");
+        assert!(matches!(confirm.action, ConfirmAction::AddTrackAnyway { .. }));
+    }
+
+    #[test]
+    fn a_stale_track_list_does_not_overwrite_the_playlist_now_showing() {
+        let (svc, _rx) = Services::new();
+        let mut app = app_with_open_playlist("spotify:playlist:p", 10);
+        svc.apply_library_result(
+            &mut app,
+            LibraryFetchResult::PlaylistTracks {
+                playlist_uri: "spotify:playlist:other".into(),
+                result: Ok(vec![track("spotify:track:a"), track("spotify:track:b")]),
+            },
+        );
+        let Fetch::Ready(shown) = &app.playlist_detail.as_ref().unwrap().tracks else { panic!("not ready") };
+        assert_eq!(shown.len(), 1);
+        // The data is still correct for the playlist it was fetched under.
+        assert_eq!(app.playlist_membership["spotify:playlist:other"].len(), 2);
+    }
+
+    #[test]
+    fn a_fetch_error_becomes_a_failed_state() {
+        let (svc, _rx) = Services::new();
+        let mut app = AppState::new(false, HashSet::new(), HashSet::new(), 0);
+        svc.apply_library_result(&mut app, LibraryFetchResult::LikedSongs(Err("nope".into())));
+        assert!(matches!(&app.library.liked_songs, Fetch::Failed(e) if e == "nope"));
+    }
+
+    #[test]
+    fn reads_without_a_client_fail_visibly_instead_of_loading_forever() {
+        let (svc, _rx) = Services::new();
+        let mut app = AppState::new(false, HashSet::new(), HashSet::new(), 0);
+        svc.refetch_playlists(&mut app);
+        assert!(matches!(&app.library.playlists, Fetch::Failed(_)));
+    }
+}

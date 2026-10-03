@@ -144,26 +144,6 @@ fn insert_before_for_move(from_index: usize, to_index: usize) -> usize {
     }
 }
 
-#[cfg(test)]
-mod reorder_tests {
-    use super::*;
-
-    #[test]
-    fn moving_down_needs_target_plus_one() {
-        assert_eq!(insert_before_for_move(0, 2), 3);
-    }
-
-    #[test]
-    fn moving_up_needs_target_with_no_plus_one() {
-        assert_eq!(insert_before_for_move(2, 0), 0);
-    }
-
-    #[test]
-    fn no_net_movement_is_a_harmless_identity_call() {
-        assert_eq!(insert_before_for_move(1, 1), 1);
-    }
-}
-
 /// Moves a single track (`range_length: Some(1)`) from `from_index` to
 /// end up at `to_index`.
 pub async fn reorder_track(
@@ -182,4 +162,24 @@ pub async fn reorder_track(
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod reorder_tests {
+    use super::*;
+
+    #[test]
+    fn moving_down_needs_target_plus_one() {
+        assert_eq!(insert_before_for_move(0, 2), 3);
+    }
+
+    #[test]
+    fn moving_up_needs_target_with_no_plus_one() {
+        assert_eq!(insert_before_for_move(2, 0), 0);
+    }
+
+    #[test]
+    fn no_net_movement_is_a_harmless_identity_call() {
+        assert_eq!(insert_before_for_move(1, 1), 1);
+    }
 }

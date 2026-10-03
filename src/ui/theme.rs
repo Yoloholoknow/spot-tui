@@ -53,6 +53,20 @@ pub(super) fn truncate_ellipsis(s: &str, max: usize) -> String {
     out
 }
 
+/// Accent when this pane currently has focus, dim otherwise -- always
+/// present (never fully absent) so nothing changes size or jumps when
+/// `Tab` toggles which pane it is. Only one pane is ever accented at a
+/// time: the sidebar's vertical divider previously changing color was
+/// easy to miss as the sole focus cue; this gives Main pane an equally
+/// visible signal of its own, reported live as missing entirely.
+pub(super) fn focus_border_style(active: bool) -> Style {
+    if active {
+        Style::default().fg(ACCENT)
+    } else {
+        Style::default().fg(DIM)
+    }
+}
+
 #[cfg(test)]
 mod helper_tests {
     use super::*;
@@ -109,18 +123,3 @@ mod helper_tests {
         assert_eq!(truncate_ellipsis("anything", 0), "");
     }
 }
-
-/// Accent when this pane currently has focus, dim otherwise -- always
-/// present (never fully absent) so nothing changes size or jumps when
-/// `Tab` toggles which pane it is. Only one pane is ever accented at a
-/// time: the sidebar's vertical divider previously changing color was
-/// easy to miss as the sole focus cue; this gives Main pane an equally
-/// visible signal of its own, reported live as missing entirely.
-pub(super) fn focus_border_style(active: bool) -> Style {
-    if active {
-        Style::default().fg(ACCENT)
-    } else {
-        Style::default().fg(DIM)
-    }
-}
-

@@ -272,3 +272,78 @@ impl AppState {
         filtered_sorted(&entries, &qj.filter, &label).into_iter().map(|(_, e)| e.clone()).collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(uri: &str, title: &str) -> TrackResult {
+        TrackResult {
+            uri: uri.to_string(),
+            title: title.to_string(),
+            artist: "artist".into(),
+            album: "album".into(),
+            artist_uri: format!("{uri}:artist"),
+            album_uri: format!("{uri}:album"),
+        }
+    }
+
+    fn app_on_playlist(tracks: Vec<TrackResult>, pinned: &[&str]) -> AppState {
+        let mut app =
+            AppState::new(false, HashSet::new(), pinned.iter().map(|s| s.to_string()).collect(), 0);
+        app.playlist_detail = Some(PlaylistDetailState {
+            playlist: PlaylistSummary { uri: "p".into(), name: "p".into(), track_count: tracks.len() as u32 },
+            tracks: Fetch::Ready(tracks),
+            selected: 0,
+            filter: ListFilter::default(),
+            move_mode: None,
+        });
+        app.nav.push(Screen::PlaylistDetail);
+        app
+    }
+
+    #[test]
+    fn pinned_tracks_come_first_in_the_playlist_display() {
+        let app = app_on_playlist(vec![track("a", "A"), track("b", "B"), track("c", "C")], &["c"]);
+        let order: Vec<_> = app.playlist_detail_display().iter().map(|&(i, _)| i).collect();
+        assert_eq!(order, vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn move_mode_keeps_array_order_even_with_a_pin() {
+        let mut app = app_on_playlist(vec![track("a", "A"), track("b", "B"), track("c", "C")], &["c"]);
+        app.playlist_detail.as_mut().unwrap().move_mode = Some(0);
+        let order: Vec<_> = app.playlist_detail_display().iter().map(|&(i, _)| i).collect();
+        assert_eq!(order, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn the_selected_track_is_the_display_row_not_the_array_index() {
+        let mut app = app_on_playlist(vec![track("a", "A"), track("b", "B"), track("c", "C")], &["c"]);
+        app.playlist_detail.as_mut().unwrap().selected = 0;
+        assert_eq!(app.selected_track().unwrap().uri, "c");
+    }
+
+    #[test]
+    fn a_filter_keeps_the_original_index_for_playback() {
+        let mut app = app_on_playlist(vec![track("a", "alpha"), track("b", "beta")], &[]);
+        app.playlist_detail.as_mut().unwrap().filter.query = "beta".into();
+        let display = app.playlist_detail_display();
+        assert_eq!(display.len(), 1);
+        assert_eq!(display[0].0, 1);
+    }
+
+    #[test]
+    fn no_track_is_selected_before_the_list_has_loaded() {
+        let mut app = AppState::new(false, HashSet::new(), HashSet::new(), 0);
+        app.nav.push(Screen::LikedSongs);
+        assert!(app.selected_track().is_none());
+        assert!(app.liked_display().is_empty());
+    }
+
+    #[test]
+    fn screens_that_list_no_tracks_have_no_selected_track() {
+        let app = AppState::new(false, HashSet::new(), HashSet::new(), 0);
+        assert!(app.selected_track().is_none());
+    }
+}

@@ -364,6 +364,14 @@ pub(super) fn render_album_detail(frame: &mut Frame, app: &AppState, list_state:
     );
 }
 
+/// What one filterable list screen shows.
+pub(super) struct ListView<'a, T> {
+    pub title: &'a str,
+    pub fetch: &'a Fetch<Vec<T>>,
+    pub filter: &'a ListFilter,
+    pub selected: usize,
+}
+
 /// Renders one of the 4 uniform fetched-list screens (Liked Songs, Saved
 /// Albums, Followed Artists, Playlist Detail tracks). Your Playlists gets
 /// its own renderer instead -- it's the one list with an extra per-item
@@ -371,13 +379,11 @@ pub(super) fn render_album_detail(frame: &mut Frame, app: &AppState, list_state:
 pub(super) fn render_list_screen<T>(
     frame: &mut Frame,
     area: Rect,
-    title: &str,
-    fetch: &Fetch<Vec<T>>,
-    filter: &ListFilter,
-    selected: usize,
+    view: ListView<'_, T>,
     list_state: &mut ListState,
     label: impl Fn(&T) -> String,
 ) {
+    let ListView { title, fetch, filter, selected } = view;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
@@ -419,34 +425,6 @@ pub(super) fn cursor_text(query: &str, cursor: usize) -> String {
     let byte_pos = query.char_indices().nth(cursor).map(|(b, _)| b).unwrap_or(query.len());
     let (before, after) = query.split_at(byte_pos);
     format!("{before}\u{2588}{after}")
-}
-
-#[cfg(test)]
-mod cursor_text_tests {
-    use super::*;
-
-    #[test]
-    fn cursor_at_zero_leads() {
-        assert_eq!(cursor_text("hello", 0), "\u{2588}hello");
-    }
-
-    #[test]
-    fn cursor_mid_string_splits_there() {
-        assert_eq!(cursor_text("hello", 2), "he\u{2588}llo");
-    }
-
-    #[test]
-    fn cursor_past_the_end_trails() {
-        assert_eq!(cursor_text("hello", 99), "hello\u{2588}");
-    }
-
-    #[test]
-    fn char_boundary_safe_on_multibyte_text() {
-        // Same real fixture the SearchState cursor tests already use --
-        // chars are 0:友 1:人 2:A 3:君, so cursor=2 sits immediately
-        // before 'A', not mid-codepoint.
-        assert_eq!(cursor_text("\u{53cb}\u{4eba}A\u{541b}", 2), "\u{53cb}\u{4eba}\u{2588}A\u{541b}");
-    }
 }
 
 /// The app's screen-header row: title bold, an optional secondary fact
@@ -653,3 +631,30 @@ pub(super) fn render_search(frame: &mut Frame, app: &AppState, list_state: &mut 
     frame.render_stateful_widget(List::new(items), chunks[1], list_state);
 }
 
+#[cfg(test)]
+mod cursor_text_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_at_zero_leads() {
+        assert_eq!(cursor_text("hello", 0), "\u{2588}hello");
+    }
+
+    #[test]
+    fn cursor_mid_string_splits_there() {
+        assert_eq!(cursor_text("hello", 2), "he\u{2588}llo");
+    }
+
+    #[test]
+    fn cursor_past_the_end_trails() {
+        assert_eq!(cursor_text("hello", 99), "hello\u{2588}");
+    }
+
+    #[test]
+    fn char_boundary_safe_on_multibyte_text() {
+        // Same real fixture the SearchState cursor tests already use --
+        // chars are 0:友 1:人 2:A 3:君, so cursor=2 sits immediately
+        // before 'A', not mid-codepoint.
+        assert_eq!(cursor_text("\u{53cb}\u{4eba}A\u{541b}", 2), "\u{53cb}\u{4eba}\u{2588}A\u{541b}");
+    }
+}

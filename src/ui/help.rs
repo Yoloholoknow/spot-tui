@@ -297,34 +297,6 @@ pub(super) fn help_column_split(section_heights: &[usize]) -> usize {
     section_heights.len()
 }
 
-#[cfg(test)]
-mod help_column_split_tests {
-    use super::*;
-
-    #[test]
-    fn balances_by_real_height_not_section_count() {
-        // total=21, half=10.5 -- splitting after the 3rd section (15 vs
-        // 6) is closer to even than after the 2nd (5 vs 16) despite
-        // being an uneven *section* count either way.
-        assert_eq!(help_column_split(&[2, 3, 10, 4, 2]), 3);
-    }
-
-    #[test]
-    fn even_heights_split_down_the_middle() {
-        assert_eq!(help_column_split(&[5, 5, 5, 5]), 2);
-    }
-
-    #[test]
-    fn no_sections_is_a_no_op_split() {
-        assert_eq!(help_column_split(&[]), 0);
-    }
-
-    #[test]
-    fn a_single_section_all_goes_in_column_one() {
-        assert_eq!(help_column_split(&[5]), 1);
-    }
-}
-
 pub(super) fn render_help(frame: &mut Frame, area: Rect, offset: &mut u16) {
     let shell =
         Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(1)]).split(area);
@@ -377,3 +349,30 @@ pub(super) fn render_help(frame: &mut Frame, area: Rect, offset: &mut u16) {
     frame.render_widget(Paragraph::new(col2).scroll((*offset, 0)), cols[2]);
 }
 
+#[cfg(test)]
+mod help_column_split_tests {
+    use super::*;
+
+    #[test]
+    fn balances_by_real_height_not_section_count() {
+        // total=21, half=10.5 -- splitting after the 3rd section (15 vs
+        // 6) is closer to even than after the 2nd (5 vs 16) despite
+        // being an uneven *section* count either way.
+        assert_eq!(help_column_split(&[2, 3, 10, 4, 2]), 3);
+    }
+
+    #[test]
+    fn even_heights_split_down_the_middle() {
+        assert_eq!(help_column_split(&[5, 5, 5, 5]), 2);
+    }
+
+    #[test]
+    fn no_sections_is_a_no_op_split() {
+        assert_eq!(help_column_split(&[]), 0);
+    }
+
+    #[test]
+    fn a_single_section_all_goes_in_column_one() {
+        assert_eq!(help_column_split(&[5]), 1);
+    }
+}

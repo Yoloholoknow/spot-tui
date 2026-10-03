@@ -63,3 +63,103 @@ pub fn move_selection(selected: &mut usize, len: usize, code: KeyCode) -> bool {
     }
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn editing(query: &str) -> ListFilter {
+        let mut filter = ListFilter { query: query.to_string(), ..Default::default() };
+        filter.start_editing();
+        filter
+    }
+
+    #[test]
+    fn typing_narrows_the_filter_and_resets_the_selection() {
+        let mut filter = editing("ab");
+        let mut selected = 7;
+        assert!(edit_filter(&mut filter, &mut selected, KeyCode::Char('c')));
+        assert_eq!(filter.query, "abc");
+        assert_eq!(selected, 0);
+    }
+
+    #[test]
+    fn enter_keeps_the_filter_but_stops_editing() {
+        let mut filter = editing("ab");
+        let mut selected = 3;
+        assert!(edit_filter(&mut filter, &mut selected, KeyCode::Enter));
+        assert!(!filter.editing);
+        assert_eq!(filter.query, "ab");
+        assert_eq!(selected, 3);
+    }
+
+    #[test]
+    fn esc_while_editing_drops_the_filter() {
+        let mut filter = editing("ab");
+        let mut selected = 3;
+        assert!(edit_filter(&mut filter, &mut selected, KeyCode::Esc));
+        assert!(!filter.editing);
+        assert!(filter.query.is_empty());
+        assert_eq!(selected, 0);
+    }
+
+    #[test]
+    fn up_and_down_are_left_to_the_screen_while_editing() {
+        let mut filter = editing("ab");
+        let mut selected = 3;
+        assert!(!edit_filter(&mut filter, &mut selected, KeyCode::Down));
+        assert!(!edit_filter(&mut filter, &mut selected, KeyCode::Up));
+    }
+
+    #[test]
+    fn nothing_is_consumed_when_not_editing() {
+        let mut filter = ListFilter::default();
+        let mut selected = 0;
+        assert!(!edit_filter(&mut filter, &mut selected, KeyCode::Char('x')));
+        assert!(filter.query.is_empty());
+    }
+
+    #[test]
+    fn esc_clears_an_applied_filter_before_the_screen_can_leave() {
+        let mut filter = ListFilter { query: "abc".into(), cursor: 3, ..Default::default() };
+        let mut selected = 4;
+        assert!(filter_hotkeys(&mut filter, &mut selected, KeyCode::Esc));
+        assert!(filter.query.is_empty());
+        assert_eq!(selected, 0);
+    }
+
+    #[test]
+    fn esc_with_no_filter_is_left_for_the_screen_to_leave() {
+        let mut filter = ListFilter::default();
+        let mut selected = 4;
+        assert!(!filter_hotkeys(&mut filter, &mut selected, KeyCode::Esc));
+    }
+
+    #[test]
+    fn slash_starts_editing_and_o_toggles_sort() {
+        let mut filter = ListFilter::default();
+        let mut selected = 0;
+        assert!(filter_hotkeys(&mut filter, &mut selected, KeyCode::Char('/')));
+        assert!(filter.editing);
+        assert!(filter_hotkeys(&mut filter, &mut selected, KeyCode::Char('o')));
+        assert!(filter.sort_alpha);
+    }
+
+    #[test]
+    fn selection_clamps_at_both_ends() {
+        let mut selected = 0;
+        move_selection(&mut selected, 3, KeyCode::Up);
+        assert_eq!(selected, 0);
+        for _ in 0..5 {
+            move_selection(&mut selected, 3, KeyCode::Down);
+        }
+        assert_eq!(selected, 2);
+    }
+
+    #[test]
+    fn selection_does_not_move_in_an_empty_list() {
+        let mut selected = 0;
+        assert!(move_selection(&mut selected, 0, KeyCode::Down));
+        assert_eq!(selected, 0);
+    }
+}

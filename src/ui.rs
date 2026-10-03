@@ -447,7 +447,7 @@ impl RepeatMode {
     }
 }
 
-/// The three states the `z` key cycles through, mirroring Spotify's own
+/// The three states the `s` key cycles through, mirroring Spotify's own
 /// shuffle button: off, shuffle, smart shuffle. Smart shuffle is shuffle plus
 /// a `context_enhancement` mode, so it always implies shuffle is on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -479,14 +479,12 @@ impl ShuffleMode {
         self != Self::Off
     }
 
-    /// Status-bar text after switching to this mode. Smart shuffle says
-    /// plainly what spot-tui can't do: the recommended tracks Spotify's own
-    /// apps mix in are not added when spot-tui is the playing device.
+    /// Status-bar text after switching to this mode.
     pub fn status_label(self) -> &'static str {
         match self {
             Self::Off => "shuffle off",
             Self::On => "shuffle on",
-            Self::Smart => "smart shuffle on (no recommended songs are added from spot-tui)",
+            Self::Smart => "smart shuffle on",
         }
     }
 }
@@ -1574,6 +1572,11 @@ pub struct AppState {
     /// events -- reflects changes from any source, not just our own
     /// up/down keys (e.g. adjusting it from the phone shows up here too).
     pub volume: u16,
+    /// The volume `m` remembered when it last muted, so it can restore
+    /// exactly what was there rather than a fixed default. `None` means
+    /// not currently muted (via `m`) -- survives a track change on
+    /// purpose, since mute is a device-level state, not a per-track one.
+    pub muted_volume: Option<u16>,
     pub nav: Nav,
     pub sidebar_sel: usize,
     pub search: SearchState,
@@ -2243,14 +2246,18 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("Esc", "back one level; at the root, focus moves to Sidebar"),
             ("?", "this screen (not while typing in Search or a filter)"),
             (
-                "q",
-                "quit -- asks \"Quit spot-tui? y/n\" first by default; set confirm_quit = false in config.toml for immediate quit (not while typing in Search)",
+                "Shift+Q",
+                "quit -- asks \"Quit spot-tui? y/n\" first by default; set confirm_quit = false in config.toml for immediate quit (not while typing in Search). Plain q is add-to-queue, not quit -- see Queue below",
             ),
             (
                 "Ctrl+C",
-                "quit immediately, never confirms -- a harder interrupt than q, by convention (not while typing in Search)",
+                "quit immediately, never confirms -- a harder interrupt than Shift+Q, by convention (not while typing in Search)",
             ),
             ("Space / n / p / + / -", "play-pause / next / previous / volume -- works from any screen, including while browsing a list, not just Now Playing (not while typing in Search)"),
+            (
+                "m",
+                "mute / unmute -- restores the exact volume it muted, not a fixed default. Works from any screen except Playlist Detail, where m already means enter move-mode (not while typing in Search)",
+            ),
             ("/", "jump to Search (Sidebar, Now Playing) or open a list's filter"),
             ("l", "jump to Library"),
             (
@@ -2266,11 +2273,11 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "toggle romanized lyrics: Japanese, Chinese and Korean lyrics shown in Latin letters instead of their own script (kanji read in context, pinyin with tone marks, Revised Romanization for Korean). Works from any screen (not while typing in Search or a filter); the word-by-word highlight keeps moving. Works for unsynced lyrics too (without the word-by-word highlight, which needs synced lyrics). Set romanize_lyrics = true in config.toml to start with it on",
             ),
             (
-                "z",
-                "cycle shuffle like Spotify's own button: off, then shuffle, then smart shuffle (\u{2726} on the playbar), then off. Works from any screen (not while typing in Search or a filter). Shuffle stays on when you start a different playlist or album. Smart shuffle sets Spotify's mode but spot-tui can't add the recommended songs itself",
+                "s",
+                "cycle shuffle like Spotify's own button: off, then shuffle, then smart shuffle (\u{2726} on the playbar), then off. Works from any screen (not while typing in Search or a filter). Shuffle stays on when you start a different playlist or album. Smart shuffle mixes recommended songs from outside the playlist into the order, like Spotify's own apps (playlists only)",
             ),
             (
-                "Shift+R",
+                "r",
                 "cycle repeat: off, then the whole album/playlist, then this one song, then off. The playbar always shows \u{21c4} (shuffle) and \u{21bb} (repeat, \u{21bb}1 for this song) -- bright when on, dim when off",
             ),
         ],
@@ -2280,6 +2287,8 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("\u{2190} / \u{2192}", "seek \u{00b1}5s"),
             ("\u{2191} / \u{2193}", "volume (same as +/-)"),
+            ("v", "open the currently-playing track's album"),
+            ("Shift+V", "open the currently-playing track's artist"),
         ],
     ),
     (
@@ -2311,7 +2320,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         "Playlist CRUD",
         &[
             ("c", "create a new playlist -- works from any screen except Search"),
-            ("r", "rename -- Your Playlists: the selected playlist; Playlist Detail: the open playlist"),
+            ("Shift+R", "rename -- Your Playlists: the selected playlist; Playlist Detail: the open playlist"),
             (
                 "d",
                 "remove, always confirms first -- Your Playlists: delete the playlist; Playlist Detail: remove the selected track",
@@ -2346,7 +2355,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "follow/unfollow -- Artist Detail always follows; Followed Artists always unfollows and confirms first",
             ),
             (
-                "s",
+                "Shift+S",
                 "save/unsave the album -- Album Detail always saves; Saved Albums always unsaves and confirms first",
             ),
         ],
@@ -2360,7 +2369,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "add the selected queued track to a playlist -- the public Web API has no remove or reorder for the queue itself",
             ),
             (
-                "Shift+Q",
+                "q",
                 "add the selected track to the queue -- from Liked Songs, Playlist Detail, or Album Detail (Alt+\u{2193} from Search, where every letter types into the query box)",
             ),
             ("refreshes", "automatically every 5s while this screen is open"),
@@ -2371,7 +2380,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("\u{2191} / \u{2193}", "move selection"),
             ("Enter", "transfer playback here (keeps current play/pause state)"),
-            ("r", "refresh the device list"),
+            ("Shift+R", "refresh the device list"),
         ],
     ),
     (
@@ -2399,9 +2408,9 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "v",
-                "open the selected track's album -- Liked Songs, Playlist Detail, Queue (on Album Detail, opens the album's own artist instead -- there's no separate album to open from inside one)",
+                "open the selected track's album -- Liked Songs, Playlist Detail, Queue, Now Playing (the currently-playing track; on Album Detail, opens the album's own artist instead -- there's no separate album to open from inside one)",
             ),
-            ("Shift+V", "open the selected track's artist -- Liked Songs, Playlist Detail, Queue"),
+            ("Shift+V", "open the selected track's artist -- Liked Songs, Playlist Detail, Queue, Now Playing"),
             (
                 "Ctrl+\u{2192} / Alt+\u{2192}",
                 "open the selected result's album / artist -- Search only (plain letters all type into the query box there)",
@@ -2805,7 +2814,7 @@ fn render_devices(frame: &mut Frame, app: &AppState, list_state: &mut ListState,
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
     frame.render_widget(
-        Paragraph::new(screen_header_line("Devices", Some("Enter transfer playback, r refresh"))),
+        Paragraph::new(screen_header_line("Devices", Some("Enter transfer playback, Shift+R refresh"))),
         chunks[0],
     );
     match &app.devices.fetch {
@@ -2820,7 +2829,7 @@ fn render_devices(frame: &mut Frame, app: &AppState, list_state: &mut ListState,
                 frame,
                 chunks[1],
                 "no devices found",
-                Some("open Spotify on another device, or press r to check again"),
+                Some("open Spotify on another device, or press Shift+R to check again"),
             );
         }
         Fetch::Ready(items) => {
@@ -3458,6 +3467,12 @@ fn render_search(frame: &mut Frame, app: &AppState, list_state: &mut ListState, 
 fn header(app: &AppState, max_chars: usize) -> String {
     match (&app.track_artist, &app.track_title) {
         (Some(a), Some(t)) => truncate_ellipsis(&format!("{a} \u{2014} {t}"), max_chars),
+        // The persistent playback bar renders every frame regardless of
+        // which screen is up top, so during a reconnect it was still
+        // saying "press / to search" -- true of the idle-on-launch case
+        // this line is really for, false while the session is down and
+        // nothing can be searched yet.
+        _ if matches!(app.lyrics, LyricsState::SessionEnded) => "reconnecting\u{2026}".to_string(),
         _ => "ready \u{2014} press / to search\u{2026}".to_string(),
     }
 }
@@ -3553,9 +3568,15 @@ fn body_lines(app: &AppState) -> Vec<Line<'static>> {
         // non-synced states below (e.g. `SessionEnded`'s own distinct
         // line) rather than duplicating the header's.
         LyricsState::Idle => vec![Line::from("nothing playing yet")],
+        // Was "restart spot-tui to reconnect" -- stale from before Tier 4's
+        // auto-reconnect existed. The 'outer loop (main.rs) retries forever
+        // with capped exponential backoff and never gives up on its own, so
+        // telling the user to restart was simply wrong the whole time this
+        // screen has been reachable: the fix is already in progress the
+        // moment this message shows.
         LyricsState::SessionEnded => vec![
-            Line::from("session disconnected"),
-            Line::from("restart spot-tui to reconnect"),
+            Line::from("session disconnected -- reconnecting\u{2026}"),
+            Line::from("no need to restart, this usually clears in a few seconds"),
         ],
         LyricsState::Loading => vec![Line::from("fetching lyrics\u{2026}")],
         LyricsState::Instrumental => vec![Line::from("\u{266a} instrumental")],

@@ -33,6 +33,7 @@ pub mod library;
 pub mod playlists;
 pub mod queue;
 pub mod search;
+pub mod track;
 
 use chrono::Utc;
 use librespot_oauth::OAuthClientBuilder;

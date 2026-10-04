@@ -57,3 +57,9 @@ librespot's own already-maintained state instead of polling the Web API queue.
 | File | Change |
 |------|--------|
 | `librespot-core` `authentication.rs` | `#[expect(deprecated)]` changed to `#[allow(...)]`, silencing a lint that only warns because the crate is a path dependency |
+
+## Licensing
+
+The vendored librespot crates are MIT licensed, and their license text is kept
+in `vendor/LICENSE-librespot-MIT`. Keep it when re-applying patches on an
+upgrade. The rest of the repo is `MIT OR Apache-2.0` (see the README).

@@ -50,7 +50,8 @@ pub struct KeyCtx<'a> {
 /// terminals report it) or lowercase plus the SHIFT modifier (how some
 /// report it instead).
 pub fn is_shift_char(code: KeyCode, modifiers: KeyModifiers, upper: char, lower: char) -> bool {
-    code == KeyCode::Char(upper) || (code == KeyCode::Char(lower) && modifiers.contains(KeyModifiers::SHIFT))
+    code == KeyCode::Char(upper)
+        || (code == KeyCode::Char(lower) && modifiers.contains(KeyModifiers::SHIFT))
 }
 
 /// Like [`is_shift_char`], for the common case of matching a key event.
@@ -60,7 +61,9 @@ fn shift(key: KeyEvent, upper: char) -> bool {
 
 fn is_plain(key: KeyEvent, c: char) -> bool {
     key.code == KeyCode::Char(c)
-        && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT)
 }
 
 fn is_ctrl(key: KeyEvent, c: char) -> bool {
@@ -81,7 +84,10 @@ fn text_input_active(app: &AppState) -> bool {
         Screen::SavedAlbums => app.library.saved_albums_filter.editing,
         Screen::FollowedArtists => app.library.followed_artists_filter.editing,
         Screen::YourPlaylists => app.library.playlists_filter.editing,
-        Screen::PlaylistDetail => app.playlist_detail.as_ref().is_some_and(|pd| pd.filter.editing),
+        Screen::PlaylistDetail => app
+            .playlist_detail
+            .as_ref()
+            .is_some_and(|pd| pd.filter.editing),
         _ => false,
     }
 }
@@ -137,17 +143,26 @@ pub fn handle_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) {
             cycle_repeat(ctx.app, ctx.spirc);
             return;
         }
-        if key.code == KeyCode::Char('t') && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key.code == KeyCode::Char('t')
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             ctx.app.romanize_lyrics = !ctx.app.romanize_lyrics;
-            ctx.app.status = Some((romanizer::status(ctx.app.romanize_lyrics, &ctx.app.lyrics), false));
+            ctx.app.status = Some((
+                romanizer::status(ctx.app.romanize_lyrics, &ctx.app.lyrics),
+                false,
+            ));
             ctx.romanizer.request(ctx.app, ctx.generation);
             return;
         }
         // Shift+Q asks first when `confirm_quit` is on. Plain `q` is
         // add-to-queue, so the single most dangerous key is not the easy one.
         if shift(key, 'Q') && ctx.confirm_quit {
-            ctx.app.pending_confirm =
-                Some(PendingConfirm { message: "Quit spot-tui? y/n".to_string(), action: ConfirmAction::Quit });
+            ctx.app.pending_confirm = Some(PendingConfirm {
+                message: "Quit spot-tui? y/n".to_string(),
+                action: ConfirmAction::Quit,
+            });
             return;
         }
     }
@@ -179,10 +194,17 @@ pub fn handle_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) {
 /// Opens the palette, first starting the fetch for any lazily-loaded
 /// category not yet visited this run so it can appear in results.
 fn open_quick_jump(ctx: &mut KeyCtx<'_>) {
-    for screen in [Screen::SavedAlbums, Screen::FollowedArtists, Screen::Devices] {
+    for screen in [
+        Screen::SavedAlbums,
+        Screen::FollowedArtists,
+        Screen::Devices,
+    ] {
         ctx.svc.ensure_loaded(ctx.app, screen);
     }
-    ctx.app.quick_jump = Some(QuickJump { filter: ListFilter::default(), selected: 0 });
+    ctx.app.quick_jump = Some(QuickJump {
+        filter: ListFilter::default(),
+        selected: 0,
+    });
 }
 
 /// Switches to `screen` from the sidebar or quick jump: collapses any

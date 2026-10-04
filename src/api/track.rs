@@ -3,10 +3,10 @@
 // them only for the loaded one), and `get_track_ids` (Now Playing's
 // `v`/`Shift+V`), since librespot's `AudioItem` has names only.
 
+use rspotify::AuthCodeSpotify;
 use rspotify::clients::BaseClient;
 use rspotify::model::TrackId;
 use rspotify::prelude::Id;
-use rspotify::AuthCodeSpotify;
 
 use super::ensure_fresh;
 
@@ -22,9 +22,14 @@ pub struct NextTrackMeta {
     pub cover_url: Option<String>,
 }
 
-pub async fn get_next_track_meta(client: &AuthCodeSpotify, track_uri: &str) -> Result<NextTrackMeta, String> {
+pub async fn get_next_track_meta(
+    client: &AuthCodeSpotify,
+    track_uri: &str,
+) -> Result<NextTrackMeta, String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before get_next_track_meta failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before get_next_track_meta failed, trying with existing token anyway: {e}"
+        );
     }
     let id = TrackId::from_id_or_uri(track_uri).map_err(|e| e.to_string())?;
     let track = match client.track(id.as_ref(), None).await {
@@ -35,7 +40,11 @@ pub async fn get_next_track_meta(client: &AuthCodeSpotify, track_uri: &str) -> R
             return Err(detail);
         }
     };
-    let artist = track.artists.first().map(|a| a.name.clone()).unwrap_or_default();
+    let artist = track
+        .artists
+        .first()
+        .map(|a| a.name.clone())
+        .unwrap_or_default();
     let cover_url = track
         .album
         .images
@@ -61,7 +70,9 @@ pub struct TrackIds {
 /// live, not by unit test -- no pure logic here to isolate.
 pub async fn get_track_ids(client: &AuthCodeSpotify, track_uri: &str) -> Result<TrackIds, String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before get_track_ids failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before get_track_ids failed, trying with existing token anyway: {e}"
+        );
     }
     let id = TrackId::from_id_or_uri(track_uri).map_err(|e| e.to_string())?;
     let track = match client.track(id, None).await {
@@ -72,7 +83,15 @@ pub async fn get_track_ids(client: &AuthCodeSpotify, track_uri: &str) -> Result<
             return Err(detail);
         }
     };
-    let artist_uri = track.artists.first().and_then(|a| a.id.clone()).map(|id| id.uri()).unwrap_or_default();
+    let artist_uri = track
+        .artists
+        .first()
+        .and_then(|a| a.id.clone())
+        .map(|id| id.uri())
+        .unwrap_or_default();
     let album_uri = track.album.id.map(|id| id.uri()).unwrap_or_default();
-    Ok(TrackIds { artist_uri, album_uri })
+    Ok(TrackIds {
+        artist_uri,
+        album_uri,
+    })
 }

@@ -53,7 +53,10 @@ fn parse_mmss(s: &str) -> Option<f64> {
     if parts.len() < 2 || parts.len() > 3 {
         return None;
     }
-    if parts.iter().any(|p| p.is_empty() || !p.chars().all(|c| c.is_ascii_digit())) {
+    if parts
+        .iter()
+        .any(|p| p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()))
+    {
         return None;
     }
     let nums: Vec<u64> = parts.iter().map(|p| p.parse().unwrap()).collect();
@@ -85,7 +88,10 @@ fn best_song_candidate(
     target_duration_secs: f64,
     tolerance_secs: f64,
 ) -> Option<(usize, &YtSongCandidate)> {
-    candidates.iter().enumerate().find(|(_, c)| (c.duration_secs - target_duration_secs).abs() <= tolerance_secs)
+    candidates
+        .iter()
+        .enumerate()
+        .find(|(_, c)| (c.duration_secs - target_duration_secs).abs() <= tolerance_secs)
 }
 
 const SEARCH_SECTIONS: &[NavStep] = &[
@@ -119,19 +125,27 @@ fn parse_song_row(mrlir: &Value) -> Option<YtSongCandidate> {
     for col in flex_columns {
         let Some(runs) = nav(
             col,
-            &[NavStep::Key("musicResponsiveListItemFlexColumnRenderer"), NavStep::Key("text"), NavStep::Key("runs")],
+            &[
+                NavStep::Key("musicResponsiveListItemFlexColumnRenderer"),
+                NavStep::Key("text"),
+                NavStep::Key("runs"),
+            ],
         )
         .and_then(Value::as_array) else {
             continue;
         };
         for run in runs {
             if let Some(text) = run.get("text").and_then(Value::as_str)
-                && let Some(secs) = parse_mmss(text) {
-                    duration_secs = Some(secs);
-                }
+                && let Some(secs) = parse_mmss(text)
+            {
+                duration_secs = Some(secs);
+            }
         }
     }
-    Some(YtSongCandidate { video_id, duration_secs: duration_secs? })
+    Some(YtSongCandidate {
+        video_id,
+        duration_secs: duration_secs?,
+    })
 }
 
 fn parse_search_results(response: &Value) -> Vec<YtSongCandidate> {
@@ -140,16 +154,19 @@ fn parse_search_results(response: &Value) -> Vec<YtSongCandidate> {
     };
     let mut out = Vec::new();
     for section in sections {
-        let Some(items) =
-            section.get("musicShelfRenderer").and_then(|s| s.get("contents")).and_then(Value::as_array)
+        let Some(items) = section
+            .get("musicShelfRenderer")
+            .and_then(|s| s.get("contents"))
+            .and_then(Value::as_array)
         else {
             continue;
         };
         for item in items {
             if let Some(mrlir) = item.get("musicResponsiveListItemRenderer")
-                && let Some(candidate) = parse_song_row(mrlir) {
-                    out.push(candidate);
-                }
+                && let Some(candidate) = parse_song_row(mrlir)
+            {
+                out.push(candidate);
+            }
         }
     }
     out
@@ -172,8 +189,12 @@ const TAB_PAGE_TYPE: &[NavStep] = &[
     NavStep::Key("pageType"),
 ];
 
-const TAB_BROWSE_ID: &[NavStep] =
-    &[NavStep::Key("tabRenderer"), NavStep::Key("endpoint"), NavStep::Key("browseEndpoint"), NavStep::Key("browseId")];
+const TAB_BROWSE_ID: &[NavStep] = &[
+    NavStep::Key("tabRenderer"),
+    NavStep::Key("endpoint"),
+    NavStep::Key("browseEndpoint"),
+    NavStep::Key("browseId"),
+];
 
 /// Finds the watch-next tab tagged `MUSIC_PAGE_TYPE_TRACK_LYRICS` and
 /// returns its `browseId` -- the id the timed-lyrics `/browse` call
@@ -182,7 +203,9 @@ fn parse_lyrics_browse_id(response: &Value) -> Option<String> {
     let tabs = nav(response, WATCH_NEXT_TABS).and_then(Value::as_array)?;
     for tab in tabs {
         if nav(tab, TAB_PAGE_TYPE).and_then(Value::as_str) == Some("MUSIC_PAGE_TYPE_TRACK_LYRICS") {
-            return nav(tab, TAB_BROWSE_ID).and_then(Value::as_str).map(String::from);
+            return nav(tab, TAB_BROWSE_ID)
+                .and_then(Value::as_str)
+                .map(String::from);
         }
     }
     None
@@ -228,18 +251,16 @@ fn parse_timed_line(entry: &Value) -> Option<(f64, String)> {
         .or_else(|| entry.get("startTimeMilliseconds"))
         .or_else(|| entry.get("startTimeMs"))
         .or_else(|| entry.get("start_time"))?;
-    let start_ms = start_field.as_f64().or_else(|| start_field.as_str().and_then(|s| s.parse::<f64>().ok()))?;
+    let start_ms = start_field
+        .as_f64()
+        .or_else(|| start_field.as_str().and_then(|s| s.parse::<f64>().ok()))?;
     Some((start_ms / 1000.0, text))
 }
 
 fn find_timed_lines(value: &Value) -> Option<Vec<(f64, String)>> {
     let arr = find_timed_lyrics_array(value)?;
     let lines: Vec<(f64, String)> = arr.iter().filter_map(parse_timed_line).collect();
-    if lines.is_empty() {
-        None
-    } else {
-        Some(lines)
-    }
+    if lines.is_empty() { None } else { Some(lines) }
 }
 
 fn yt_agent() -> ureq::Agent {
@@ -248,7 +269,11 @@ fn yt_agent() -> ureq::Agent {
 
 fn yt_post(agent: &ureq::Agent, endpoint: &str, body: Value) -> Result<Value, String> {
     let url = format!("{YT_BASE}/{endpoint}?alt=json");
-    let resp = agent.post(&url).set("Content-Type", "application/json").send_json(body).map_err(|e| e.to_string())?;
+    let resp = agent
+        .post(&url)
+        .set("Content-Type", "application/json")
+        .send_json(body)
+        .map_err(|e| e.to_string())?;
     crate::http::read_json::<Value>(resp)
 }
 
@@ -294,8 +319,14 @@ fn timed_lyrics_blocking(browse_id: &str) -> Result<Option<Vec<(f64, String)>>, 
     // a wrong field-name guess and "genuinely no timed lyrics" otherwise look alike.
     if lines.is_none() {
         let dump = serde_json::to_string(&response).unwrap_or_default();
-        let truncated = if dump.len() > 2000 { &dump[..2000] } else { &dump[..] };
-        log::info!("timed_lyrics_blocking[{browse_id}]: no timedLyricsData found; response (truncated)={truncated}");
+        let truncated = if dump.len() > 2000 {
+            &dump[..2000]
+        } else {
+            &dump[..]
+        };
+        log::info!(
+            "timed_lyrics_blocking[{browse_id}]: no timedLyricsData found; response (truncated)={truncated}"
+        );
     }
     Ok(lines)
 }
@@ -308,35 +339,47 @@ pub async fn ytmusic_lyrics(artist: &str, title: &str, duration_secs: f64) -> Op
     let query = format!("{artist} {title}");
     log::info!("ytmusic_lyrics: searching {query:?} (target duration {duration_secs:.1}s)");
     let query_for_call = query.clone();
-    let candidates = match tokio::task::spawn_blocking(move || search_song_blocking(&query_for_call)).await {
-        Ok(Ok(c)) => c,
-        Ok(Err(e)) => {
-            log::info!("ytmusic_lyrics: search failed: {e}");
-            return None;
-        }
-        Err(e) => {
-            log::info!("ytmusic_lyrics: search task panicked: {e}");
-            return None;
-        }
-    };
+    let candidates =
+        match tokio::task::spawn_blocking(move || search_song_blocking(&query_for_call)).await {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => {
+                log::info!("ytmusic_lyrics: search failed: {e}");
+                return None;
+            }
+            Err(e) => {
+                log::info!("ytmusic_lyrics: search task panicked: {e}");
+                return None;
+            }
+        };
     // Full candidate dump in YouTube's rank order: the evidence a "wrong song
     // matched" report needs (was the right video in the results, and at what rank).
     for (i, c) in candidates.iter().enumerate() {
-        log::info!("ytmusic_lyrics: candidate[{i}] video_id={} duration={:.1}s", c.video_id, c.duration_secs);
+        log::info!(
+            "ytmusic_lyrics: candidate[{i}] video_id={} duration={:.1}s",
+            c.video_id,
+            c.duration_secs
+        );
     }
-    let Some((best_rank, best)) = best_song_candidate(&candidates, duration_secs, DURATION_TOLERANCE_SECS) else {
+    let Some((best_rank, best)) =
+        best_song_candidate(&candidates, duration_secs, DURATION_TOLERANCE_SECS)
+    else {
         log::info!(
             "ytmusic_lyrics: no candidate within {DURATION_TOLERANCE_SECS}s of target duration ({} candidates)",
             candidates.len()
         );
         return None;
     };
-    log::info!("ytmusic_lyrics: picked candidate[{best_rank}] video_id={}", best.video_id);
+    log::info!(
+        "ytmusic_lyrics: picked candidate[{best_rank}] video_id={}",
+        best.video_id
+    );
     let video_id = best.video_id.clone();
 
     let browse_id = {
         let video_id_for_call = video_id.clone();
-        match tokio::task::spawn_blocking(move || lyrics_browse_id_blocking(&video_id_for_call)).await {
+        match tokio::task::spawn_blocking(move || lyrics_browse_id_blocking(&video_id_for_call))
+            .await
+        {
             Ok(Ok(Some(id))) => id,
             Ok(Ok(None)) => {
                 log::info!("ytmusic_lyrics[{video_id}]: no lyrics tab found");
@@ -371,8 +414,15 @@ pub async fn ytmusic_lyrics(artist: &str, title: &str, duration_secs: f64) -> Op
             }
         }
     };
-    log::info!("ytmusic_lyrics[{video_id}]: got {} synced lines", lines.len());
-    Some(CachedLyrics::Synced { lines, credit: None, words: Vec::new() })
+    log::info!(
+        "ytmusic_lyrics[{video_id}]: got {} synced lines",
+        lines.len()
+    );
+    Some(CachedLyrics::Synced {
+        lines,
+        credit: None,
+        words: Vec::new(),
+    })
 }
 
 #[cfg(test)]
@@ -420,7 +470,10 @@ mod best_song_candidate_tests {
     use super::*;
 
     fn candidate(id: &str, secs: f64) -> YtSongCandidate {
-        YtSongCandidate { video_id: id.to_string(), duration_secs: secs }
+        YtSongCandidate {
+            video_id: id.to_string(),
+            duration_secs: secs,
+        }
     }
 
     #[test]
@@ -431,16 +484,26 @@ mod best_song_candidate_tests {
         // is the exact bug found live: picking the globally closest
         // duration handed a same-titled wrong song priority over the
         // real, correctly-ranked top hit.
-        let candidates = vec![candidate("a", 100.0), candidate("b", 223.0), candidate("c", 224.0)];
+        let candidates = vec![
+            candidate("a", 100.0),
+            candidate("b", 223.0),
+            candidate("c", 224.0),
+        ];
         let best = best_song_candidate(&candidates, 225.0, 5.0);
-        assert_eq!(best.map(|(rank, c)| (rank, c.video_id.as_str())), Some((1, "b")));
+        assert_eq!(
+            best.map(|(rank, c)| (rank, c.video_id.as_str())),
+            Some((1, "b"))
+        );
     }
 
     #[test]
     fn skips_an_earlier_out_of_tolerance_candidate_for_a_later_in_tolerance_one() {
         let candidates = vec![candidate("a", 100.0), candidate("b", 226.0)];
         let best = best_song_candidate(&candidates, 225.0, 5.0);
-        assert_eq!(best.map(|(rank, c)| (rank, c.video_id.as_str())), Some((1, "b")));
+        assert_eq!(
+            best.map(|(rank, c)| (rank, c.video_id.as_str())),
+            Some((1, "b"))
+        );
     }
 
     #[test]
@@ -499,14 +562,20 @@ mod parse_search_results_tests {
     fn extracts_video_id_and_duration_from_a_real_shaped_row() {
         let response = search_response(vec![song_row("abc123", "3:45")]);
         let results = parse_search_results(&response);
-        assert_eq!(results, vec![YtSongCandidate { video_id: "abc123".to_string(), duration_secs: 225.0 }]);
+        assert_eq!(
+            results,
+            vec![YtSongCandidate {
+                video_id: "abc123".to_string(),
+                duration_secs: 225.0
+            }]
+        );
     }
 
     #[test]
     fn a_row_missing_a_duration_run_is_skipped_not_fatal() {
         let mut row = song_row("abc123", "3:45");
-        row["musicResponsiveListItemRenderer"]["flexColumns"][1]["musicResponsiveListItemFlexColumnRenderer"]["text"]
-            ["runs"] = serde_json::json!([{"text": "Song"}]);
+        row["musicResponsiveListItemRenderer"]["flexColumns"][1]["musicResponsiveListItemFlexColumnRenderer"]
+            ["text"]["runs"] = serde_json::json!([{"text": "Song"}]);
         let response = search_response(vec![row]);
         assert!(parse_search_results(&response).is_empty());
     }
@@ -560,7 +629,10 @@ mod parse_lyrics_browse_id_tests {
             tab("MUSIC_PAGE_TYPE_TRACK_RELATED", "UCrelated"),
             tab("MUSIC_PAGE_TYPE_TRACK_LYRICS", "UClyrics"),
         ]);
-        assert_eq!(parse_lyrics_browse_id(&response), Some("UClyrics".to_string()));
+        assert_eq!(
+            parse_lyrics_browse_id(&response),
+            Some("UClyrics".to_string())
+        );
     }
 
     #[test]
@@ -591,7 +663,10 @@ mod find_timed_lines_tests {
         });
         assert_eq!(
             find_timed_lines(&response),
-            Some(vec![(1.0, "line one".to_string()), (2.5, "line two".to_string())])
+            Some(vec![
+                (1.0, "line one".to_string()),
+                (2.5, "line two".to_string())
+            ])
         );
     }
 
@@ -600,7 +675,10 @@ mod find_timed_lines_tests {
         let response = serde_json::json!({
             "timedLyricsData": [{"text": "alt line", "startTimeMs": 500}]
         });
-        assert_eq!(find_timed_lines(&response), Some(vec![(0.5, "alt line".to_string())]));
+        assert_eq!(
+            find_timed_lines(&response),
+            Some(vec![(0.5, "alt line".to_string())])
+        );
     }
 
     #[test]
@@ -623,6 +701,9 @@ mod find_timed_lines_tests {
                 {"lyricLine": "the only real line", "cueRange": {"startTimeMilliseconds": "2000"}}
             ]
         });
-        assert_eq!(find_timed_lines(&response), Some(vec![(2.0, "the only real line".to_string())]));
+        assert_eq!(
+            find_timed_lines(&response),
+            Some(vec![(2.0, "the only real line".to_string())])
+        );
     }
 }

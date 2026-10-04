@@ -30,11 +30,17 @@ pub(super) fn render_status(frame: &mut Frame, app: &AppState, area: Rect) {
     // wrap. Checked before `app.status`: Enter and Esc clear move mode before any
     // mutation is dispatched, so no result can land while this is showing.
     if *app.nav.top() == Screen::PlaylistDetail
-        && app.playlist_detail.as_ref().is_some_and(|pd| pd.move_mode.is_some())
+        && app
+            .playlist_detail
+            .as_ref()
+            .is_some_and(|pd| pd.move_mode.is_some())
     {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("MOVE MODE", Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "MOVE MODE",
+                    Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     "  \u{2191}/\u{2193} relocate, g jump to position, Enter confirm, Esc cancel",
                     Style::default().fg(DIM),
@@ -48,10 +54,16 @@ pub(super) fn render_status(frame: &mut Frame, app: &AppState, area: Rect) {
     // depth readout resumes after.
     if let Some((message, is_error)) = &app.status {
         let color = if *is_error { DANGER } else { ACCENT };
-        frame.render_widget(Paragraph::new(message.clone()).style(Style::default().fg(color)), area);
+        frame.render_widget(
+            Paragraph::new(message.clone()).style(Style::default().fg(color)),
+            area,
+        );
         return;
     }
-    let text = format!("stack depth {} \u{2014} Tab switch pane, Esc back", app.nav.depth());
+    let text = format!(
+        "stack depth {} \u{2014} Tab switch pane, Esc back",
+        app.nav.depth()
+    );
     frame.render_widget(Paragraph::new(text).style(Style::default().fg(DIM)), area);
 }
 
@@ -60,7 +72,9 @@ pub(super) fn header(app: &AppState, max_chars: usize) -> String {
         (Some(a), Some(t)) => truncate_ellipsis(&format!("{a} \u{2014} {t}"), max_chars),
         // The playbar renders on every screen, so during a reconnect it must not say
         // "press / to search", which is only true when idle after launch.
-        _ if matches!(app.lyrics, LyricsState::NoLogin) => "not logged in \u{2014} see ncspot login".to_string(),
+        _ if matches!(app.lyrics, LyricsState::NoLogin) => {
+            "not logged in \u{2014} see ncspot login".to_string()
+        }
         _ if matches!(app.lyrics, LyricsState::SessionEnded) => "reconnecting\u{2026}".to_string(),
         _ => "ready \u{2014} press / to search\u{2026}".to_string(),
     }
@@ -75,7 +89,11 @@ pub(super) fn playing_icon(app: &AppState) -> &'static str {
 }
 
 pub(super) fn time_readout(app: &AppState) -> String {
-    format!("{} / {}", format_mmss(app.position), format_mmss(app.duration))
+    format!(
+        "{} / {}",
+        format_mmss(app.position),
+        format_mmss(app.duration)
+    )
 }
 
 /// Plain text, not an emoji/icon: an emoji here would often be
@@ -99,13 +117,19 @@ pub(super) fn progress_gauge(app: &AppState) -> Gauge<'static> {
     } else {
         ACCENT
     };
-    Gauge::default().gauge_style(Style::default().fg(color)).label("").ratio(progress_ratio(app))
+    Gauge::default()
+        .gauge_style(Style::default().fg(color))
+        .label("")
+        .ratio(progress_ratio(app))
 }
 
 /// Same gauge with a border, for the fullscreen layouts. Unbordered, a gauge at
 /// low progress is nearly all background and reads as a tiny square; the border
 /// always outlines the whole capsule.
 pub(super) fn progress_gauge_bordered(app: &AppState) -> Gauge<'static> {
-    progress_gauge(app).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(DIM)))
+    progress_gauge(app).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(DIM)),
+    )
 }
-

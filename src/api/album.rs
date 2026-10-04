@@ -1,10 +1,10 @@
 // Album Detail: the album's own tracks. Read-only; saving the album is
 // `library::save_album`.
 
+use rspotify::AuthCodeSpotify;
 use rspotify::clients::BaseClient;
 use rspotify::model::AlbumId;
 use rspotify::prelude::Id;
-use rspotify::AuthCodeSpotify;
 
 use super::ensure_fresh;
 use super::search::TrackResult;
@@ -24,9 +24,14 @@ pub struct AlbumDetail {
     pub tracks: Vec<TrackResult>,
 }
 
-pub async fn get_album_detail(client: &AuthCodeSpotify, album_uri: &str) -> Result<AlbumDetail, String> {
+pub async fn get_album_detail(
+    client: &AuthCodeSpotify,
+    album_uri: &str,
+) -> Result<AlbumDetail, String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before get_album_detail failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before get_album_detail failed, trying with existing token anyway: {e}"
+        );
     }
     let id = AlbumId::from_id_or_uri(album_uri).map_err(|e| e.to_string())?;
     let album = match client.album(id.as_ref(), None).await {
@@ -39,7 +44,10 @@ pub async fn get_album_detail(client: &AuthCodeSpotify, album_uri: &str) -> Resu
     };
     let first_artist = album.artists.first();
     let artist = first_artist.map(|a| a.name.clone()).unwrap_or_default();
-    let artist_uri = first_artist.and_then(|a| a.id.clone()).map(|aid| aid.uri()).unwrap_or_default();
+    let artist_uri = first_artist
+        .and_then(|a| a.id.clone())
+        .map(|aid| aid.uri())
+        .unwrap_or_default();
     let album_uri_resolved = album.id.uri();
     let album_name = album.name;
 
@@ -48,11 +56,16 @@ pub async fn get_album_detail(client: &AuthCodeSpotify, album_uri: &str) -> Resu
     let mut tracks = Vec::new();
     let mut offset: u32 = 0;
     loop {
-        let page = match client.album_track_manual(id.as_ref(), None, Some(PAGE_LIMIT), Some(offset)).await {
+        let page = match client
+            .album_track_manual(id.as_ref(), None, Some(PAGE_LIMIT), Some(offset))
+            .await
+        {
             Ok(p) => p,
             Err(e) => {
                 let detail = super::describe_client_error(e).await;
-                log::warn!("get_album_detail: album_track_manual() failed for {album_uri} at offset {offset}: {detail}");
+                log::warn!(
+                    "get_album_detail: album_track_manual() failed for {album_uri} at offset {offset}: {detail}"
+                );
                 return Err(detail);
             }
         };
@@ -62,7 +75,9 @@ pub async fn get_album_detail(client: &AuthCodeSpotify, album_uri: &str) -> Resu
             Some(TrackResult {
                 uri: t.id?.uri(),
                 title: t.name,
-                artist: track_first_artist.map(|a| a.name.clone()).unwrap_or_default(),
+                artist: track_first_artist
+                    .map(|a| a.name.clone())
+                    .unwrap_or_default(),
                 artist_uri: track_first_artist
                     .and_then(|a| a.id.clone())
                     .map(|aid| aid.uri())
@@ -77,5 +92,11 @@ pub async fn get_album_detail(client: &AuthCodeSpotify, album_uri: &str) -> Resu
         offset += PAGE_LIMIT;
     }
 
-    Ok(AlbumDetail { uri: album_uri_resolved, name: album_name, artist, artist_uri, tracks })
+    Ok(AlbumDetail {
+        uri: album_uri_resolved,
+        name: album_name,
+        artist,
+        artist_uri,
+        tracks,
+    })
 }

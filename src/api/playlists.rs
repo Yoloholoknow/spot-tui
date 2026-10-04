@@ -5,10 +5,10 @@
 // via `PlaylistId`/`TrackId::from_id_or_uri` can fail on bad input, which
 // `ClientError` has no variant for.
 
+use rspotify::AuthCodeSpotify;
 use rspotify::clients::OAuthClient;
 use rspotify::model::{LibraryId, PlayableId, PlaylistId, TrackId};
 use rspotify::prelude::Id;
-use rspotify::AuthCodeSpotify;
 
 use super::ensure_fresh;
 use super::library::PlaylistSummary;
@@ -23,9 +23,14 @@ fn track_id(track_uri: &str) -> Result<TrackId<'_>, String> {
 
 /// `user_playlist_create`'s user-id parameter is vestigial since Feb 2026 (the
 /// request posts to `me/playlists`) but still has to be type-correct, hence `me()`.
-pub async fn create_playlist(client: &AuthCodeSpotify, name: &str) -> Result<PlaylistSummary, String> {
+pub async fn create_playlist(
+    client: &AuthCodeSpotify,
+    name: &str,
+) -> Result<PlaylistSummary, String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before create_playlist failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before create_playlist failed, trying with existing token anyway: {e}"
+        );
     }
     let user_id = client.me().await.map_err(|e| e.to_string())?.id;
     // Private, non-collaborative, no description -- v1 exposes none of
@@ -46,9 +51,15 @@ pub async fn create_playlist(client: &AuthCodeSpotify, name: &str) -> Result<Pla
 /// collaborative)`, the opposite order of `user_playlist_create`'s
 /// `(name, public, collaborative, description)`; transposing them compiles (all
 /// `Option`) and silently sends the wrong thing.
-pub async fn rename_playlist(client: &AuthCodeSpotify, playlist_uri: &str, new_name: &str) -> Result<(), String> {
+pub async fn rename_playlist(
+    client: &AuthCodeSpotify,
+    playlist_uri: &str,
+    new_name: &str,
+) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before rename_playlist failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before rename_playlist failed, trying with existing token anyway: {e}"
+        );
     }
     let id = playlist_id(playlist_uri)?;
     client
@@ -63,7 +74,9 @@ pub async fn rename_playlist(client: &AuthCodeSpotify, playlist_uri: &str, new_n
 /// `playlist_unfollow`. Needs `user-library-modify`, already in `SCOPES`.
 pub async fn delete_playlist(client: &AuthCodeSpotify, playlist_uri: &str) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before delete_playlist failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before delete_playlist failed, trying with existing token anyway: {e}"
+        );
     }
     let id = playlist_id(playlist_uri)?;
     client
@@ -75,7 +88,11 @@ pub async fn delete_playlist(client: &AuthCodeSpotify, playlist_uri: &str) -> Re
 
 /// Always appends (`position: None`) -- position-scoped insert is
 /// supported by the underlying API but not exposed in this phase.
-pub async fn add_track(client: &AuthCodeSpotify, playlist_uri: &str, track_uri: &str) -> Result<(), String> {
+pub async fn add_track(
+    client: &AuthCodeSpotify,
+    playlist_uri: &str,
+    track_uri: &str,
+) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
         log::warn!("token refresh before add_track failed, trying with existing token anyway: {e}");
     }
@@ -95,9 +112,15 @@ pub async fn add_track(client: &AuthCodeSpotify, playlist_uri: &str, track_uri: 
 /// removed both copies anyway, and with one it removed neither (a silent no-op).
 /// Non-deterministic behaviour on a destructive call is no alternative, so the
 /// Playlist Detail `d` handler warns the user when the track has duplicates.
-pub async fn remove_track(client: &AuthCodeSpotify, playlist_uri: &str, track_uri: &str) -> Result<(), String> {
+pub async fn remove_track(
+    client: &AuthCodeSpotify,
+    playlist_uri: &str,
+    track_uri: &str,
+) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before remove_track failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before remove_track failed, trying with existing token anyway: {e}"
+        );
     }
     let playlist = playlist_id(playlist_uri)?;
     let track = track_id(track_uri)?;
@@ -128,12 +151,20 @@ pub async fn reorder_track(
     to_index: usize,
 ) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before reorder_track failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before reorder_track failed, trying with existing token anyway: {e}"
+        );
     }
     let id = playlist_id(playlist_uri)?;
     let insert_before = insert_before_for_move(from_index, to_index);
     client
-        .playlist_reorder_items(id, Some(from_index as i32), Some(insert_before as i32), Some(1), None)
+        .playlist_reorder_items(
+            id,
+            Some(from_index as i32),
+            Some(insert_before as i32),
+            Some(1),
+            None,
+        )
         .await
         .map_err(|e| e.to_string())?;
     Ok(())

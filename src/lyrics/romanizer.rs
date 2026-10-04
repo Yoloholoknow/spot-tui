@@ -21,13 +21,20 @@ pub struct Romanizer {
 impl Romanizer {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel();
-        Self { tx, rx, requested: None }
+        Self {
+            tx,
+            rx,
+            requested: None,
+        }
     }
 
     /// Starts romanizing the current sheet if romanization is on, the sheet
     /// has CJK text, and it has not been started for this track yet.
     pub fn request(&mut self, app: &AppState, generation: u64) {
-        if !app.romanize_lyrics || app.romanized_lines.is_some() || self.requested == Some(generation) {
+        if !app.romanize_lyrics
+            || app.romanized_lines.is_some()
+            || self.requested == Some(generation)
+        {
             return;
         }
         let tx = self.tx.clone();
@@ -61,7 +68,9 @@ pub fn status(on: bool, lyrics: &LyricsState) -> String {
     }
     let no_cjk = "romanized lyrics on (this track has no Japanese, Chinese or Korean lyrics)";
     match lyrics {
-        LyricsState::Synced(lines) if romanize::sheet_has_cjk(lines) => "romanized lyrics on".to_string(),
+        LyricsState::Synced(lines) if romanize::sheet_has_cjk(lines) => {
+            "romanized lyrics on".to_string()
+        }
         LyricsState::Plain(text) if romanize::has_cjk(text) => "romanized lyrics on".to_string(),
         LyricsState::Synced(_) | LyricsState::Plain(_) => no_cjk.to_string(),
         LyricsState::Loading => "romanized lyrics on (applies when the lyrics load)".to_string(),
@@ -97,18 +106,27 @@ mod tests {
     fn a_track_with_nothing_to_romanize_says_why_instead_of_silently_doing_nothing() {
         let status = status(true, &synced("Stay in the middle"));
         assert!(status.starts_with("romanized lyrics on"), "{status}");
-        assert!(status.contains("no Japanese, Chinese or Korean"), "{status}");
+        assert!(
+            status.contains("no Japanese, Chinese or Korean"),
+            "{status}"
+        );
     }
 
     #[test]
     fn unsynced_lyrics_with_cjk_romanize_just_like_synced_ones() {
-        assert_eq!(status(true, &LyricsState::Plain("\u{541b}\nStay".to_string())), "romanized lyrics on");
+        assert_eq!(
+            status(true, &LyricsState::Plain("\u{541b}\nStay".to_string())),
+            "romanized lyrics on"
+        );
     }
 
     #[test]
     fn unsynced_lyrics_without_cjk_say_there_is_nothing_to_romanize() {
         let status = status(true, &LyricsState::Plain("Stay in the middle".to_string()));
-        assert!(status.contains("no Japanese, Chinese or Korean"), "{status}");
+        assert!(
+            status.contains("no Japanese, Chinese or Korean"),
+            "{status}"
+        );
     }
 
     #[test]
@@ -118,9 +136,12 @@ mod tests {
 
     #[test]
     fn no_lyrics_at_all_says_there_is_nothing_to_romanize() {
-        for lyrics in [LyricsState::NotFound, LyricsState::Idle, LyricsState::Instrumental] {
+        for lyrics in [
+            LyricsState::NotFound,
+            LyricsState::Idle,
+            LyricsState::Instrumental,
+        ] {
             assert!(status(true, &lyrics).contains("no lyrics to romanize"));
         }
     }
 }
-

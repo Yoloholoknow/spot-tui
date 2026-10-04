@@ -37,13 +37,21 @@ fn init_logging() {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else { return };
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
     // The default has to name `info` globally: a filter naming only
     // `librespot` turns every other target off, this app's own logging
     // included.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,librespot=debug"))
-        .target(env_logger::Target::Pipe(Box::new(file)))
-        .init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info,librespot=debug"),
+    )
+    .target(env_logger::Target::Pipe(Box::new(file)))
+    .init();
 }
 
 #[tokio::main]

@@ -79,7 +79,10 @@ mod square_cells_tests {
         // assumes -- fewer rows are needed to reach the same real-pixel
         // width.
         let height = square_height_cells(26, (8, 18));
-        assert!(height < 13, "expected fewer than the 2:1 fallback's 13 rows, got {height}");
+        assert!(
+            height < 13,
+            "expected fewer than the 2:1 fallback's 13 rows, got {height}"
+        );
     }
 
     #[test]
@@ -91,7 +94,10 @@ mod square_cells_tests {
         // what left the card too wide (too few rows) relative to a true
         // square.
         let height = square_height_cells(26, (8, 12));
-        assert!(height > 13, "expected more than the 2:1 fallback's 13 rows, got {height}");
+        assert!(
+            height > 13,
+            "expected more than the 2:1 fallback's 13 rows, got {height}"
+        );
     }
 
     #[test]
@@ -152,7 +158,12 @@ pub(super) fn art_color(artist: &str, album: &str) -> Color {
 }
 
 pub(super) fn monogram(artist: &str, album: &str) -> String {
-    let first_upper = |s: &str| s.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+    let first_upper = |s: &str| {
+        s.chars()
+            .next()
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_default()
+    };
     format!("{}{}", first_upper(artist), first_upper(album))
 }
 
@@ -169,7 +180,11 @@ pub(super) fn monogram(artist: &str, album: &str) -> String {
 pub(super) fn capsule_row(area: Rect, width: u16) -> Rect {
     Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(width), Constraint::Min(0)])
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(width),
+            Constraint::Min(0),
+        ])
         .split(area)[1]
 }
 
@@ -180,8 +195,22 @@ mod capsule_row_tests {
     #[test]
     fn the_gauge_capsule_lands_on_the_same_columns_as_the_art_card() {
         let column = Rect::new(3, 0, 100, 40);
-        let art = capsule_row(Rect { y: 2, height: 20, ..column }, 44);
-        let gauge = capsule_row(Rect { y: 26, height: 1, ..column }, 44);
+        let art = capsule_row(
+            Rect {
+                y: 2,
+                height: 20,
+                ..column
+            },
+            44,
+        );
+        let gauge = capsule_row(
+            Rect {
+                y: 26,
+                height: 1,
+                ..column
+            },
+            44,
+        );
         assert_eq!((art.x, art.width), (gauge.x, gauge.width));
     }
 }
@@ -196,7 +225,11 @@ mod capsule_row_tests {
 /// meant to approximate always showed up as a blank letterboxed gap, never
 /// distortion. Doing the crop ourselves, before `ratatui-image` ever sees
 /// the image, means there's no aspect mismatch left for it to mishandle.
-pub(super) fn cover_crop(image: &image::DynamicImage, target_w: u32, target_h: u32) -> image::DynamicImage {
+pub(super) fn cover_crop(
+    image: &image::DynamicImage,
+    target_w: u32,
+    target_h: u32,
+) -> image::DynamicImage {
     let (target_w, target_h) = (target_w.max(1), target_h.max(1));
     let (src_w, src_h) = (image.width().max(1), image.height().max(1));
     let scale = (target_w as f64 / src_w as f64).max(target_h as f64 / src_h as f64);
@@ -256,7 +289,14 @@ mod cover_crop_tests {
 /// image might not be showing yet: no real graphics protocol on this
 /// terminal, no cover fetched yet for this track, or the fetch/decode
 /// itself failing.
-pub(super) fn render_art(frame: &mut Frame, app: &AppState, images: &mut ImageState, artist: &str, album: &str, area: Rect) {
+pub(super) fn render_art(
+    frame: &mut Frame,
+    app: &AppState,
+    images: &mut ImageState,
+    artist: &str,
+    album: &str,
+    area: Rect,
+) {
     if let Some(deadline) = images.startup_retransmit_at
         && std::time::Instant::now() >= deadline
     {
@@ -267,7 +307,9 @@ pub(super) fn render_art(frame: &mut Frame, app: &AppState, images: &mut ImageSt
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(DIM));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(DIM));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
@@ -334,12 +376,15 @@ pub(super) fn render_art(frame: &mut Frame, app: &AppState, images: &mut ImageSt
                 images.sized_covers.remove(0);
             }
             let built = picker.new_resize_protocol(image);
-            images.sized_covers.push((uri, inner.width, inner.height, built));
+            images
+                .sized_covers
+                .push((uri, inner.width, inner.height, built));
             // Arms only off this process's very first-ever cache build,
             // never again -- see `ImageState::startup_retransmit_at`'s
             // own doc comment for the full reasoning.
             if images.startup_retransmit_at.is_none() && !images.startup_retransmit_done {
-                images.startup_retransmit_at = Some(std::time::Instant::now() + STARTUP_RETRANSMIT_DELAY);
+                images.startup_retransmit_at =
+                    Some(std::time::Instant::now() + STARTUP_RETRANSMIT_DELAY);
             }
             &mut images.sized_covers.last_mut().unwrap().3
         };
@@ -349,7 +394,8 @@ pub(super) fn render_art(frame: &mut Frame, app: &AppState, images: &mut ImageSt
         // transmission path, and rendered visibly pixelated even on an already-sized
         // image. `cover_crop`'s pre-sizing is what actually closes the gap beside the
         // image.
-        let widget = ratatui_image::StatefulImage::default().resize(ratatui_image::Resize::Scale(None));
+        let widget =
+            ratatui_image::StatefulImage::default().resize(ratatui_image::Resize::Scale(None));
         frame.render_stateful_widget(widget, inner, proto);
         return;
     }
@@ -360,10 +406,17 @@ pub(super) fn render_art(frame: &mut Frame, app: &AppState, images: &mut ImageSt
 pub(super) fn render_art_placeholder(frame: &mut Frame, artist: &str, album: &str, inner: Rect) {
     let bg = art_color(artist, album);
     frame.render_widget(Block::default().style(Style::default().bg(bg)), inner);
-    let text_style = Style::default().bg(bg).fg(Color::White).add_modifier(Modifier::BOLD);
+    let text_style = Style::default()
+        .bg(bg)
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
     let top_pad = inner.height / 2;
     let mut lines: Vec<Line> = (0..top_pad).map(|_| Line::from("")).collect();
     lines.push(Line::from(monogram(artist, album)));
-    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center).style(text_style), inner);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .style(text_style),
+        inner,
+    );
 }
-

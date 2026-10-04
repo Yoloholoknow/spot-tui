@@ -8,7 +8,9 @@ const APP: &str = "spot-tui";
 const LEGACY_CONFIG_APP: &str = "ncspot-lyrics";
 
 pub fn home() -> PathBuf {
-    std::env::var("HOME").map(PathBuf::from).expect("HOME not set")
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .expect("HOME not set")
 }
 
 /// Token, pins, lyrics and search caches, plus librespot's own cache.

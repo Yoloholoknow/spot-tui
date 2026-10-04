@@ -103,7 +103,10 @@ mod filter_tests {
     fn no_filter_no_sort_preserves_original_order() {
         let items = items();
         let filter = ListFilter::default();
-        let result: Vec<&str> = filtered_sorted(&items, &filter, &label).iter().map(|(_, i)| i.0).collect();
+        let result: Vec<&str> = filtered_sorted(&items, &filter, &label)
+            .iter()
+            .map(|(_, i)| i.0)
+            .collect();
         assert_eq!(result, vec!["banana", "Apple", "cherry"]);
     }
 
@@ -114,7 +117,10 @@ mod filter_tests {
             query: "an".to_string(),
             ..Default::default()
         };
-        let result: Vec<&str> = filtered_sorted(&items, &filter, &label).iter().map(|(_, i)| i.0).collect();
+        let result: Vec<&str> = filtered_sorted(&items, &filter, &label)
+            .iter()
+            .map(|(_, i)| i.0)
+            .collect();
         assert_eq!(result, vec!["banana"]);
     }
 
@@ -135,19 +141,30 @@ mod filter_tests {
             sort_alpha: true,
             ..Default::default()
         };
-        let result: Vec<&str> = filtered_sorted(&items, &filter, &label).iter().map(|(_, i)| i.0).collect();
+        let result: Vec<&str> = filtered_sorted(&items, &filter, &label)
+            .iter()
+            .map(|(_, i)| i.0)
+            .collect();
         assert_eq!(result, vec!["Apple", "banana", "cherry"]);
     }
 
     #[test]
     fn filter_and_sort_combine() {
-        let items = vec![Item("Zebra"), Item("apricot"), Item("azalea"), Item("banana")];
+        let items = vec![
+            Item("Zebra"),
+            Item("apricot"),
+            Item("azalea"),
+            Item("banana"),
+        ];
         let filter = ListFilter {
             query: "a".to_string(),
             sort_alpha: true,
             ..Default::default()
         };
-        let result: Vec<&str> = filtered_sorted(&items, &filter, &label).iter().map(|(_, i)| i.0).collect();
+        let result: Vec<&str> = filtered_sorted(&items, &filter, &label)
+            .iter()
+            .map(|(_, i)| i.0)
+            .collect();
         assert_eq!(result, vec!["apricot", "azalea", "banana", "Zebra"]);
     }
 
@@ -167,7 +184,10 @@ mod filter_tests {
             ..Default::default()
         };
         let result = filtered_sorted(&items, &filter, &label);
-        assert_eq!(result.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![1, 0]);
+        assert_eq!(
+            result.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![1, 0]
+        );
     }
 }
 
@@ -241,14 +261,23 @@ mod parse_move_position_tests {
 
     #[test]
     fn zero_and_past_the_end_are_rejected_with_the_real_range() {
-        assert_eq!(parse_move_position("0", 5), Err("enter a position from 1 to 5".to_string()));
-        assert_eq!(parse_move_position("6", 5), Err("enter a position from 1 to 5".to_string()));
+        assert_eq!(
+            parse_move_position("0", 5),
+            Err("enter a position from 1 to 5".to_string())
+        );
+        assert_eq!(
+            parse_move_position("6", 5),
+            Err("enter a position from 1 to 5".to_string())
+        );
     }
 
     #[test]
     fn non_numbers_are_rejected() {
         for bad in ["", "abc", "-2", "2.5", "1 2"] {
-            assert!(parse_move_position(bad, 5).is_err(), "{bad:?} should be rejected");
+            assert!(
+                parse_move_position(bad, 5).is_err(),
+                "{bad:?} should be rejected"
+            );
         }
     }
 
@@ -355,7 +384,10 @@ mod filter_cursor_tests {
 
     #[test]
     fn start_editing_places_cursor_after_existing_query_not_at_the_start() {
-        let mut f = ListFilter { query: "abc".to_string(), ..Default::default() };
+        let mut f = ListFilter {
+            query: "abc".to_string(),
+            ..Default::default()
+        };
         f.start_editing();
         assert!(f.editing);
         assert_eq!(f.cursor, 3);
@@ -370,7 +402,10 @@ mod filter_cursor_tests {
 
     #[test]
     fn insert_backspace_and_arrows_operate_at_the_cursor() {
-        let mut f = ListFilter { query: "ac".to_string(), ..Default::default() };
+        let mut f = ListFilter {
+            query: "ac".to_string(),
+            ..Default::default()
+        };
         f.start_editing(); // cursor -> 2, end of "ac"
         f.cursor_left(); // cursor -> 1, between 'a' and 'c'
         f.insert_at_cursor('b');
@@ -385,7 +420,10 @@ mod filter_cursor_tests {
 
     #[test]
     fn cancel_editing_clears_the_query_not_just_the_editing_flag() {
-        let mut f = ListFilter { query: "abc".to_string(), ..Default::default() };
+        let mut f = ListFilter {
+            query: "abc".to_string(),
+            ..Default::default()
+        };
         f.start_editing();
         f.cancel_editing();
         assert!(!f.editing);
@@ -393,4 +431,3 @@ mod filter_cursor_tests {
         assert_eq!(f.cursor, 0);
     }
 }
-

@@ -39,7 +39,9 @@ pub struct PlaylistSummary {
 
 pub async fn liked_songs(client: &AuthCodeSpotify) -> ClientResult<Vec<TrackResult>> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before liked_songs failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before liked_songs failed, trying with existing token anyway: {e}"
+        );
     }
     let mut out = Vec::new();
     let mut offset: u32 = 0;
@@ -55,7 +57,10 @@ pub async fn liked_songs(client: &AuthCodeSpotify) -> ClientResult<Vec<TrackResu
                 uri: t.id.map(|id| id.uri()).unwrap_or_default(),
                 title: t.name,
                 artist: first_artist.map(|a| a.name.clone()).unwrap_or_default(),
-                artist_uri: first_artist.and_then(|a| a.id.clone()).map(|id| id.uri()).unwrap_or_default(),
+                artist_uri: first_artist
+                    .and_then(|a| a.id.clone())
+                    .map(|id| id.uri())
+                    .unwrap_or_default(),
                 album_uri: t.album.id.clone().map(|id| id.uri()).unwrap_or_default(),
                 album: t.album.name,
             }
@@ -70,7 +75,9 @@ pub async fn liked_songs(client: &AuthCodeSpotify) -> ClientResult<Vec<TrackResu
 
 pub async fn saved_albums(client: &AuthCodeSpotify) -> ClientResult<Vec<SavedAlbumSummary>> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before saved_albums failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before saved_albums failed, trying with existing token anyway: {e}"
+        );
     }
     let mut out = Vec::new();
     let mut offset: u32 = 0;
@@ -79,10 +86,17 @@ pub async fn saved_albums(client: &AuthCodeSpotify) -> ClientResult<Vec<SavedAlb
             .current_user_saved_albums_manual(None, Some(PAGE_LIMIT), Some(offset))
             .await?;
         let got = page.items.len() as u32;
-        out.extend(page.items.into_iter().map(|saved| SavedAlbumSummary {
-            uri: saved.album.id.uri(),
-            name: saved.album.name,
-            artist: saved.album.artists.first().map(|a| a.name.clone()).unwrap_or_default(),
+        out.extend(page.items.into_iter().map(|saved| {
+            SavedAlbumSummary {
+                uri: saved.album.id.uri(),
+                name: saved.album.name,
+                artist: saved
+                    .album
+                    .artists
+                    .first()
+                    .map(|a| a.name.clone())
+                    .unwrap_or_default(),
+            }
         }));
         if got < PAGE_LIMIT || out.len() as u32 >= MAX_ITEMS {
             break;
@@ -94,7 +108,9 @@ pub async fn saved_albums(client: &AuthCodeSpotify) -> ClientResult<Vec<SavedAlb
 
 pub async fn followed_artists(client: &AuthCodeSpotify) -> ClientResult<Vec<FollowedArtist>> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before followed_artists failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before followed_artists failed, trying with existing token anyway: {e}"
+        );
     }
     let mut out = Vec::new();
     // Cursor-based, not offset-based: the next page's cursor is the last
@@ -102,7 +118,9 @@ pub async fn followed_artists(client: &AuthCodeSpotify) -> ClientResult<Vec<Foll
     // contract for this endpoint), not a numeric offset.
     let mut after: Option<String> = None;
     loop {
-        let page = client.current_user_followed_artists(after.as_deref(), Some(PAGE_LIMIT)).await?;
+        let page = client
+            .current_user_followed_artists(after.as_deref(), Some(PAGE_LIMIT))
+            .await?;
         let got = page.items.len() as u32;
         let next_after = page.items.last().map(|a| a.id.id().to_string());
         out.extend(page.items.into_iter().map(|artist| FollowedArtist {
@@ -119,12 +137,16 @@ pub async fn followed_artists(client: &AuthCodeSpotify) -> ClientResult<Vec<Foll
 
 pub async fn your_playlists(client: &AuthCodeSpotify) -> ClientResult<Vec<PlaylistSummary>> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before your_playlists failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before your_playlists failed, trying with existing token anyway: {e}"
+        );
     }
     let mut out = Vec::new();
     let mut offset: u32 = 0;
     loop {
-        let page = client.current_user_playlists_manual(Some(PAGE_LIMIT), Some(offset)).await?;
+        let page = client
+            .current_user_playlists_manual(Some(PAGE_LIMIT), Some(offset))
+            .await?;
         let got = page.items.len() as u32;
         out.extend(page.items.into_iter().map(|p| PlaylistSummary {
             uri: p.id.uri(),
@@ -145,16 +167,27 @@ pub async fn your_playlists(client: &AuthCodeSpotify) -> ClientResult<Vec<Playli
 ///
 /// Returns `String` errors rather than `ClientResult` because a bad ID is a
 /// failure mode `ClientError` has no variant for.
-pub async fn playlist_tracks(client: &AuthCodeSpotify, playlist_uri: &str) -> Result<Vec<TrackResult>, String> {
+pub async fn playlist_tracks(
+    client: &AuthCodeSpotify,
+    playlist_uri: &str,
+) -> Result<Vec<TrackResult>, String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before playlist_tracks failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before playlist_tracks failed, trying with existing token anyway: {e}"
+        );
     }
     let playlist_id = PlaylistId::from_id_or_uri(playlist_uri).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     let mut offset: u32 = 0;
     loop {
         let page = client
-            .playlist_items_manual(playlist_id.as_ref(), None, None::<Market>, Some(PAGE_LIMIT), Some(offset))
+            .playlist_items_manual(
+                playlist_id.as_ref(),
+                None,
+                None::<Market>,
+                Some(PAGE_LIMIT),
+                Some(offset),
+            )
             .await
             .map_err(|e| e.to_string())?;
         // Bounded on raw items fetched, not on the filtered output: a playlist full of
@@ -164,9 +197,19 @@ pub async fn playlist_tracks(client: &AuthCodeSpotify, playlist_uri: &str) -> Re
             Some(PlayableItem::Track(t)) => {
                 let first_artist = t.artists.first();
                 let artist = first_artist.map(|a| a.name.clone()).unwrap_or_default();
-                let artist_uri = first_artist.and_then(|a| a.id.clone()).map(|id| id.uri()).unwrap_or_default();
+                let artist_uri = first_artist
+                    .and_then(|a| a.id.clone())
+                    .map(|id| id.uri())
+                    .unwrap_or_default();
                 let album_uri = t.album.id.clone().map(|id| id.uri()).unwrap_or_default();
-                Some(TrackResult { uri: t.id?.uri(), title: t.name, artist, artist_uri, album: t.album.name, album_uri })
+                Some(TrackResult {
+                    uri: t.id?.uri(),
+                    title: t.name,
+                    artist,
+                    artist_uri,
+                    album: t.album.name,
+                    album_uri,
+                })
             }
             _ => None,
         }));
@@ -196,48 +239,78 @@ fn album_id(album_uri: &str) -> Result<AlbumId<'_>, String> {
 
 pub async fn like_track(client: &AuthCodeSpotify, track_uri: &str) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before like_track failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before like_track failed, trying with existing token anyway: {e}"
+        );
     }
     let id = track_id_for_library(track_uri)?;
-    client.library_add([LibraryId::Track(id)]).await.map_err(|e| e.to_string())
+    client
+        .library_add([LibraryId::Track(id)])
+        .await
+        .map_err(|e| e.to_string())
 }
 
 pub async fn unlike_track(client: &AuthCodeSpotify, track_uri: &str) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before unlike_track failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before unlike_track failed, trying with existing token anyway: {e}"
+        );
     }
     let id = track_id_for_library(track_uri)?;
-    client.library_remove([LibraryId::Track(id)]).await.map_err(|e| e.to_string())
+    client
+        .library_remove([LibraryId::Track(id)])
+        .await
+        .map_err(|e| e.to_string())
 }
 
 pub async fn follow_artist(client: &AuthCodeSpotify, artist_uri: &str) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before follow_artist failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before follow_artist failed, trying with existing token anyway: {e}"
+        );
     }
     let id = artist_id(artist_uri)?;
-    client.library_add([LibraryId::Artist(id)]).await.map_err(|e| e.to_string())
+    client
+        .library_add([LibraryId::Artist(id)])
+        .await
+        .map_err(|e| e.to_string())
 }
 
 pub async fn unfollow_artist(client: &AuthCodeSpotify, artist_uri: &str) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before unfollow_artist failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before unfollow_artist failed, trying with existing token anyway: {e}"
+        );
     }
     let id = artist_id(artist_uri)?;
-    client.library_remove([LibraryId::Artist(id)]).await.map_err(|e| e.to_string())
+    client
+        .library_remove([LibraryId::Artist(id)])
+        .await
+        .map_err(|e| e.to_string())
 }
 
 pub async fn save_album(client: &AuthCodeSpotify, album_uri: &str) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before save_album failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before save_album failed, trying with existing token anyway: {e}"
+        );
     }
     let id = album_id(album_uri)?;
-    client.library_add([LibraryId::Album(id)]).await.map_err(|e| e.to_string())
+    client
+        .library_add([LibraryId::Album(id)])
+        .await
+        .map_err(|e| e.to_string())
 }
 
 pub async fn unsave_album(client: &AuthCodeSpotify, album_uri: &str) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before unsave_album failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before unsave_album failed, trying with existing token anyway: {e}"
+        );
     }
     let id = album_id(album_uri)?;
-    client.library_remove([LibraryId::Album(id)]).await.map_err(|e| e.to_string())
+    client
+        .library_remove([LibraryId::Album(id)])
+        .await
+        .map_err(|e| e.to_string())
 }

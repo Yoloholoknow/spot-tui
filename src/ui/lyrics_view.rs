@@ -29,7 +29,11 @@ pub(super) fn plain_display_lines(
     lines
         .iter()
         .enumerate()
-        .map(|(i, native)| roman.and_then(|r| r[i].as_ref()).map_or_else(|| (*native).to_string(), |r| r.text.clone()))
+        .map(|(i, native)| {
+            roman
+                .and_then(|r| r[i].as_ref())
+                .map_or_else(|| (*native).to_string(), |r| r.text.clone())
+        })
         .collect()
 }
 
@@ -70,27 +74,47 @@ pub(super) fn body_lines(app: &AppState) -> Vec<Line<'static>> {
             }
             let current = app.current_line.unwrap_or(0);
             let mut out = Vec::with_capacity(lines.len() * 2);
-            let romanized = app.romanized_lines.as_deref().filter(|r| r.len() == lines.len());
+            let romanized = app
+                .romanized_lines
+                .as_deref()
+                .filter(|r| r.len() == lines.len());
             for (i, line) in lines.iter().enumerate() {
-                let (shown, words) =
-                    display_line(line, romanized.and_then(|r| r[i].as_ref()), app.romanize_lyrics);
-                let text = if shown.is_empty() { "\u{266a}".to_string() } else { shown.to_string() };
+                let (shown, words) = display_line(
+                    line,
+                    romanized.and_then(|r| r[i].as_ref()),
+                    app.romanize_lyrics,
+                );
+                let text = if shown.is_empty() {
+                    "\u{266a}".to_string()
+                } else {
+                    shown.to_string()
+                };
                 let styled = if i == current && !words.is_empty() {
                     // Word-by-word: same text, coloured by how far the voice
                     // has got. Sung = accent, still to come = white, both bold
                     // so nothing shifts as the sweep passes.
                     let sung = Style::default().fg(ACCENT).add_modifier(Modifier::BOLD);
-                    let unsung = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+                    let unsung = Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD);
                     Line::from(
                         sweep_runs(words, app.position.as_secs_f64())
                             .into_iter()
-                            .map(|(run, fill)| Span::styled(run, if fill == Fill::Sung { sung } else { unsung }))
+                            .map(|(run, fill)| {
+                                Span::styled(run, if fill == Fill::Sung { sung } else { unsung })
+                            })
                             .collect::<Vec<_>>(),
                     )
                 } else if i == current {
-                    Line::from(Span::styled(text, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))
+                    Line::from(Span::styled(
+                        text,
+                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    ))
                 } else {
-                    Line::from(Span::styled(text, Style::default().fg(lyric_tier_color(i.abs_diff(current)))))
+                    Line::from(Span::styled(
+                        text,
+                        Style::default().fg(lyric_tier_color(i.abs_diff(current))),
+                    ))
                 };
                 out.push(styled);
                 out.push(Line::from(""));
@@ -162,12 +186,18 @@ pub fn sweep_runs(words: &[crate::lyrics::WordSeg], pos_secs: f64) -> Vec<(Strin
 /// has word timing. Only then does the event loop redraw faster than its
 /// normal tick, so nothing else (line-level lyrics, paused playback) pays for
 /// the extra frames.
-pub fn word_sweep_active(lyrics: &LyricsState, current_line: Option<usize>, playing: Option<bool>) -> bool {
+pub fn word_sweep_active(
+    lyrics: &LyricsState,
+    current_line: Option<usize>,
+    playing: Option<bool>,
+) -> bool {
     if playing != Some(true) {
         return false;
     }
     match (lyrics, current_line) {
-        (LyricsState::Synced(lines), Some(i)) => lines.get(i).is_some_and(|line| !line.words.is_empty()),
+        (LyricsState::Synced(lines), Some(i)) => {
+            lines.get(i).is_some_and(|line| !line.words.is_empty())
+        }
         _ => false,
     }
 }
@@ -188,7 +218,11 @@ pub(super) fn current_body_line_row(app: &AppState) -> Option<usize> {
 /// per line drifts further off-centre with every earlier line that wraps.
 pub(super) fn line_row_height(line: &Line<'static>, width: u16) -> usize {
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-    if text.trim().is_empty() { 1 } else { wrapped_line_count(&text, width) as usize }
+    if text.trim().is_empty() {
+        1
+    } else {
+        wrapped_line_count(&text, width) as usize
+    }
 }
 
 /// The current line's vertical middle in wrapped rows, shared by
@@ -248,9 +282,16 @@ pub(super) fn center_current_line(
 /// a small pane on blank padding and makes the text read smaller. Unlike the
 /// fullscreen view, settling at the top (song start) and bottom (song end) is
 /// ordinary scrolling, so nothing needs padding.
-pub(super) fn top_anchored_offset(lines: &[Line<'static>], current_row: Option<usize>, viewport_height: u16, width: u16) -> u16 {
+pub(super) fn top_anchored_offset(
+    lines: &[Line<'static>],
+    current_row: Option<usize>,
+    viewport_height: u16,
+    width: u16,
+) -> u16 {
     const TOP_MARGIN: usize = 2;
-    let Some(current_row) = current_row else { return 0 };
+    let Some(current_row) = current_row else {
+        return 0;
+    };
     let anchor_row = anchor_row_of(lines, current_row, width);
     let total_rows = total_row_height(lines, width);
     let max_offset = total_rows.saturating_sub(viewport_height as usize);
@@ -383,7 +424,11 @@ mod sweep_tests {
     use crate::lyrics::WordSeg;
 
     fn seg(text: &str, start: f64, end: f64) -> WordSeg {
-        WordSeg { text: text.to_string(), start, end }
+        WordSeg {
+            text: text.to_string(),
+            start,
+            end,
+        }
     }
 
     fn hi_there() -> Vec<WordSeg> {
@@ -400,14 +445,26 @@ mod sweep_tests {
 
     #[test]
     fn before_the_first_word_the_whole_line_is_unsung() {
-        assert_eq!(sweep_runs(&hi_there(), 0.5), vec![run("hi there", Fill::Unsung)]);
-        assert_eq!(sweep_runs(&hi_there(), 1.0), vec![run("hi there", Fill::Unsung)]);
+        assert_eq!(
+            sweep_runs(&hi_there(), 0.5),
+            vec![run("hi there", Fill::Unsung)]
+        );
+        assert_eq!(
+            sweep_runs(&hi_there(), 1.0),
+            vec![run("hi there", Fill::Unsung)]
+        );
     }
 
     #[test]
     fn after_the_last_word_the_whole_line_is_sung() {
-        assert_eq!(sweep_runs(&hi_there(), 2.0), vec![run("hi there", Fill::Sung)]);
-        assert_eq!(sweep_runs(&hi_there(), 60.0), vec![run("hi there", Fill::Sung)]);
+        assert_eq!(
+            sweep_runs(&hi_there(), 2.0),
+            vec![run("hi there", Fill::Sung)]
+        );
+        assert_eq!(
+            sweep_runs(&hi_there(), 60.0),
+            vec![run("hi there", Fill::Sung)]
+        );
     }
 
     #[test]
@@ -423,9 +480,15 @@ mod sweep_tests {
     fn a_word_s_trailing_space_is_not_sung_until_the_word_is_finished() {
         let words = vec![seg("hi ", 1.0, 1.4), seg("there", 1.4, 2.0)];
         // Half through "hi": floor(0.5 * 2) = 1 char of "hi", the space still unsung.
-        assert_eq!(sweep_runs(&words, 1.2), vec![run("h", Fill::Sung), run("i there", Fill::Unsung)]);
+        assert_eq!(
+            sweep_runs(&words, 1.2),
+            vec![run("h", Fill::Sung), run("i there", Fill::Unsung)]
+        );
         // Exactly at the end of "hi ": the space is sung with it.
-        assert_eq!(sweep_runs(&words, 1.4), vec![run("hi ", Fill::Sung), run("there", Fill::Unsung)]);
+        assert_eq!(
+            sweep_runs(&words, 1.4),
+            vec![run("hi ", Fill::Sung), run("there", Fill::Unsung)]
+        );
     }
 
     #[test]
@@ -433,7 +496,10 @@ mod sweep_tests {
         let words = vec![seg("\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}", 0.0, 1.0)];
         assert_eq!(
             sweep_runs(&words, 0.5),
-            vec![run("\u{3053}\u{3093}", Fill::Sung), run("\u{306b}\u{3061}\u{306f}", Fill::Unsung)]
+            vec![
+                run("\u{3053}\u{3093}", Fill::Sung),
+                run("\u{306b}\u{3061}\u{306f}", Fill::Unsung)
+            ]
         );
     }
 
@@ -441,7 +507,10 @@ mod sweep_tests {
     fn a_zero_length_word_flips_at_its_start() {
         let words = vec![seg("a ", 1.0, 1.0), seg("b", 2.0, 2.0)];
         assert_eq!(sweep_runs(&words, 0.9), vec![run("a b", Fill::Unsung)]);
-        assert_eq!(sweep_runs(&words, 1.0), vec![run("a ", Fill::Sung), run("b", Fill::Unsung)]);
+        assert_eq!(
+            sweep_runs(&words, 1.0),
+            vec![run("a ", Fill::Sung), run("b", Fill::Unsung)]
+        );
         assert_eq!(sweep_runs(&words, 2.0), vec![run("a b", Fill::Sung)]);
     }
 
@@ -457,7 +526,13 @@ mod sweep_tests {
 
     #[test]
     fn the_runs_always_re_form_the_line_whatever_the_position() {
-        let words = vec![seg("I ", 27.395, 27.549), seg("been ", 27.549, 27.74), seg("try", 27.74, 27.908), seg("na ", 27.908, 28.077), seg("call", 28.077, 28.96)];
+        let words = vec![
+            seg("I ", 27.395, 27.549),
+            seg("been ", 27.549, 27.74),
+            seg("try", 27.74, 27.908),
+            seg("na ", 27.908, 28.077),
+            seg("call", 28.077, 28.96),
+        ];
         let text: String = words.iter().map(|w| w.text.as_str()).collect();
         let mut pos = 26.0;
         while pos < 30.0 {
@@ -488,7 +563,15 @@ mod sweep_active_tests {
         LyricLine {
             timestamp: Duration::from_secs(1),
             text: "hi".to_string(),
-            words: if words { vec![WordSeg { text: "hi".to_string(), start: 1.0, end: 2.0 }] } else { Vec::new() },
+            words: if words {
+                vec![WordSeg {
+                    text: "hi".to_string(),
+                    start: 1.0,
+                    end: 2.0,
+                }]
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -522,53 +605,84 @@ mod sweep_active_tests {
     fn no_current_line_or_other_lyric_states_are_inactive() {
         let lyrics = LyricsState::Synced(vec![line(true)]);
         assert!(!word_sweep_active(&lyrics, None, Some(true)));
-        assert!(!word_sweep_active(&LyricsState::Loading, Some(0), Some(true)));
-        assert!(!word_sweep_active(&LyricsState::Synced(vec![line(true)]), Some(9), Some(true)));
+        assert!(!word_sweep_active(
+            &LyricsState::Loading,
+            Some(0),
+            Some(true)
+        ));
+        assert!(!word_sweep_active(
+            &LyricsState::Synced(vec![line(true)]),
+            Some(9),
+            Some(true)
+        ));
     }
 }
 
 #[cfg(test)]
 mod display_line_tests {
     use super::*;
-    use crate::lyrics::{LyricLine, WordSeg};
     use crate::lyrics::romanize::RomanLine;
+    use crate::lyrics::{LyricLine, WordSeg};
     use std::time::Duration;
 
     fn seg(text: &str) -> WordSeg {
-        WordSeg { text: text.to_string(), start: 1.0, end: 2.0 }
+        WordSeg {
+            text: text.to_string(),
+            start: 1.0,
+            end: 2.0,
+        }
     }
 
     fn native() -> LyricLine {
-        LyricLine { timestamp: Duration::from_secs(1), text: "\u{541b}".to_string(), words: vec![seg("\u{541b}")] }
+        LyricLine {
+            timestamp: Duration::from_secs(1),
+            text: "\u{541b}".to_string(),
+            words: vec![seg("\u{541b}")],
+        }
     }
 
     fn roman() -> RomanLine {
-        RomanLine { text: "kimi".to_string(), words: vec![seg("kimi")] }
+        RomanLine {
+            text: "kimi".to_string(),
+            words: vec![seg("kimi")],
+        }
     }
 
     #[test]
     fn the_native_line_shows_when_romanization_is_off() {
         let (line, roman) = (native(), roman());
-        assert_eq!(display_line(&line, Some(&roman), false), ("\u{541b}", &line.words[..]));
+        assert_eq!(
+            display_line(&line, Some(&roman), false),
+            ("\u{541b}", &line.words[..])
+        );
     }
 
     #[test]
     fn the_romanized_line_and_its_words_replace_it_when_on() {
         let (line, roman) = (native(), roman());
-        assert_eq!(display_line(&line, Some(&roman), true), ("kimi", &roman.words[..]));
+        assert_eq!(
+            display_line(&line, Some(&roman), true),
+            ("kimi", &roman.words[..])
+        );
     }
 
     #[test]
     fn a_line_with_no_romanization_stays_native_even_when_on() {
         let line = native();
-        assert_eq!(display_line(&line, None, true), ("\u{541b}", &line.words[..]));
+        assert_eq!(
+            display_line(&line, None, true),
+            ("\u{541b}", &line.words[..])
+        );
     }
 
     #[test]
     fn a_romanized_line_without_re_timed_words_is_drawn_whole_not_swept() {
         // Falling back to the native words would sweep the wrong text.
         let line = native();
-        let plain = RomanLine { text: "kimi".to_string(), words: Vec::new() };
+        let plain = RomanLine {
+            text: "kimi".to_string(),
+            words: Vec::new(),
+        };
         let (text, words) = display_line(&line, Some(&plain), true);
         assert_eq!(text, "kimi");
         assert!(words.is_empty());
@@ -581,20 +695,30 @@ mod plain_display_tests {
     use crate::lyrics::romanize::RomanLine;
 
     fn roman(text: &str) -> Option<RomanLine> {
-        Some(RomanLine { text: text.to_string(), words: Vec::new() })
+        Some(RomanLine {
+            text: text.to_string(),
+            words: Vec::new(),
+        })
     }
 
     #[test]
     fn native_text_shows_when_romanization_is_off() {
         let r = vec![roman("kimi")];
-        assert_eq!(plain_display_lines("\u{541b}", Some(&r), false), vec!["\u{541b}"]);
+        assert_eq!(
+            plain_display_lines("\u{541b}", Some(&r), false),
+            vec!["\u{541b}"]
+        );
     }
 
     #[test]
     fn romanized_lines_replace_native_ones_when_on() {
         let r = vec![roman("kimi"), None, roman("sayonara")];
         assert_eq!(
-            plain_display_lines("\u{541b}\nStay\n\u{3055}\u{3088}\u{306a}\u{3089}", Some(&r), true),
+            plain_display_lines(
+                "\u{541b}\nStay\n\u{3055}\u{3088}\u{306a}\u{3089}",
+                Some(&r),
+                true
+            ),
             vec!["kimi", "Stay", "sayonara"]
         );
     }
@@ -602,7 +726,10 @@ mod plain_display_tests {
     #[test]
     fn blank_lines_are_kept_so_the_layout_does_not_shift() {
         let r = vec![roman("kimi"), None, roman("nani")];
-        assert_eq!(plain_display_lines("\u{541b}\n\n\u{4f55}", Some(&r), true), vec!["kimi", "", "nani"]);
+        assert_eq!(
+            plain_display_lines("\u{541b}\n\n\u{4f55}", Some(&r), true),
+            vec!["kimi", "", "nani"]
+        );
     }
 
     #[test]
@@ -614,10 +741,12 @@ mod plain_display_tests {
     fn a_result_that_does_not_line_up_is_ignored_rather_than_misplaced() {
         // Defensive: entries for a different number of lines than the text has.
         let r = vec![roman("kimi")];
-        assert_eq!(plain_display_lines("a\nb\nc", Some(&r), true), vec!["a", "b", "c"]);
+        assert_eq!(
+            plain_display_lines("a\nb\nc", Some(&r), true),
+            vec!["a", "b", "c"]
+        );
     }
 }
-
 
 #[cfg(test)]
 mod connect_state_tests {
@@ -631,7 +760,10 @@ mod connect_state_tests {
     }
 
     fn text(lines: &[Line<'static>]) -> String {
-        lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.as_ref())).collect()
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect()
     }
 
     #[test]

@@ -11,7 +11,10 @@ pub struct QueueState {
 
 impl QueueState {
     pub fn new() -> Self {
-        Self { fetch: Fetch::NotStarted, selected: 0 }
+        Self {
+            fetch: Fetch::NotStarted,
+            selected: 0,
+        }
     }
 }
 
@@ -30,7 +33,10 @@ pub struct DevicesState {
 
 impl DevicesState {
     pub fn new() -> Self {
-        Self { fetch: Fetch::NotStarted, selected: 0 }
+        Self {
+            fetch: Fetch::NotStarted,
+            selected: 0,
+        }
     }
 }
 
@@ -116,4 +122,3 @@ pub struct AlbumDetailState {
 // Esc-back semantics; one interception at the top of key handling and one
 // draw at the end of `render` cover them, and the screen underneath resumes
 // untouched when the overlay closes.
-

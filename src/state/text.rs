@@ -1,9 +1,11 @@
-
 /// Cursor editing shared by every text field (Search, list filters, the text
 /// prompt, the overlays). The cursor is a character index, not a byte
 /// offset, so this is correct on multi-byte UTF-8.
 pub(super) fn text_char_byte_offset(s: &str, char_idx: usize) -> usize {
-    s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(b, _)| b)
+        .unwrap_or(s.len())
 }
 
 /// Inserts `c` at `*cursor` and advances it by one character.
@@ -32,4 +34,3 @@ pub(super) fn text_cursor_left(cursor: &mut usize) {
 pub(super) fn text_cursor_right(s: &str, cursor: &mut usize) {
     *cursor = (*cursor + 1).min(s.chars().count());
 }
-

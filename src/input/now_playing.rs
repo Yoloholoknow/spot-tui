@@ -1,7 +1,7 @@
 //! The Now Playing screen. "The selected track" here means the track that is
 //! playing, not a list row.
 
-use super::{common, is_shift_char, KeyCtx};
+use super::{KeyCtx, common, is_shift_char};
 use crate::services::TrackView;
 use crate::state::Screen;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -20,7 +20,9 @@ pub fn handle(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
                 ctx.svc.like_track(ctx.app, uri);
             }
         }
-        KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'V', 'v') => open_track_view(ctx, TrackView::Artist),
+        KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'V', 'v') => {
+            open_track_view(ctx, TrackView::Artist)
+        }
         KeyCode::Char('v') => open_track_view(ctx, TrackView::Album),
         KeyCode::Char('a') => {
             if let Some(uri) = playing_uri(ctx) {

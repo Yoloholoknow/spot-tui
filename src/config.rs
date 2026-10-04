@@ -43,7 +43,9 @@ pub fn resolve_key(config_value: Option<&ApiKey>, env_value: Option<&str>) -> Op
         let trimmed = raw.trim();
         (!trimmed.is_empty()).then(|| ApiKey::new(trimmed))
     };
-    env_value.and_then(usable).or_else(|| config_value.and_then(|k| usable(k.expose())))
+    env_value
+        .and_then(usable)
+        .or_else(|| config_value.and_then(|k| usable(k.expose())))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -64,19 +66,29 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { confirm_quit: true, spicy_lyrics_key: None, romanize_lyrics: false }
+        Self {
+            confirm_quit: true,
+            spicy_lyrics_key: None,
+            romanize_lyrics: false,
+        }
     }
 }
 
 impl Config {
     /// The Spicy Lyrics key in effect (environment first, then the file).
     pub fn spicy_lyrics_key(&self) -> Option<ApiKey> {
-        resolve_key(self.spicy_lyrics_key.as_ref(), std::env::var(SPICY_LYRICS_KEY_ENV).ok().as_deref())
+        resolve_key(
+            self.spicy_lyrics_key.as_ref(),
+            std::env::var(SPICY_LYRICS_KEY_ENV).ok().as_deref(),
+        )
     }
 }
 
 pub fn load() -> Config {
-    let Some(raw) = crate::paths::config_files().iter().find_map(|path| std::fs::read_to_string(path).ok()) else {
+    let Some(raw) = crate::paths::config_files()
+        .iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+    else {
         return Config::default();
     };
     toml::from_str(&raw).unwrap_or_else(|e| {
@@ -132,25 +144,39 @@ mod tests {
     #[test]
     fn env_key_beats_the_config_file() {
         let cfg = Some(ApiKey::new("from_config"));
-        assert_eq!(resolve_key(cfg.as_ref(), Some("from_env")).unwrap().expose(), "from_env");
+        assert_eq!(
+            resolve_key(cfg.as_ref(), Some("from_env"))
+                .unwrap()
+                .expose(),
+            "from_env"
+        );
     }
 
     #[test]
     fn config_key_is_used_when_env_is_unset() {
         let cfg = Some(ApiKey::new("from_config"));
-        assert_eq!(resolve_key(cfg.as_ref(), None).unwrap().expose(), "from_config");
+        assert_eq!(
+            resolve_key(cfg.as_ref(), None).unwrap().expose(),
+            "from_config"
+        );
     }
 
     #[test]
     fn a_blank_env_var_does_not_shadow_the_config_key() {
         // `SPICY_LYRICS_API_KEY=` (set but empty) is a common shell accident.
         let cfg = Some(ApiKey::new("from_config"));
-        assert_eq!(resolve_key(cfg.as_ref(), Some("   ")).unwrap().expose(), "from_config");
+        assert_eq!(
+            resolve_key(cfg.as_ref(), Some("   ")).unwrap().expose(),
+            "from_config"
+        );
     }
 
     #[test]
     fn keys_are_trimmed() {
-        assert_eq!(resolve_key(None, Some("  sl_sk_x \n")).unwrap().expose(), "sl_sk_x");
+        assert_eq!(
+            resolve_key(None, Some("  sl_sk_x \n")).unwrap().expose(),
+            "sl_sk_x"
+        );
         let cfg = Some(ApiKey::new("  sl_sk_y "));
         assert_eq!(resolve_key(cfg.as_ref(), None).unwrap().expose(), "sl_sk_y");
     }

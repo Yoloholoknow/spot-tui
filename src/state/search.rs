@@ -127,4 +127,3 @@ mod search_cursor_tests {
         assert_eq!(s.query, "友人A君");
     }
 }
-

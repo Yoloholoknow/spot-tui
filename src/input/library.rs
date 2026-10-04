@@ -1,11 +1,11 @@
 //! The Library home menu and the four list screens under it.
 
 use super::lists::{edit_filter, filter_hotkeys, move_selection};
-use super::{common, shift, tracks, KeyCtx};
+use super::{KeyCtx, common, shift, tracks};
 use crate::api::library::PlaylistSummary;
 use crate::pins;
 use crate::player::play_context;
-use crate::state::{AppState, ConfirmAction, PendingConfirm, LIBRARY_ENTRIES};
+use crate::state::{AppState, ConfirmAction, LIBRARY_ENTRIES, PendingConfirm};
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub fn home(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
@@ -27,9 +27,15 @@ pub fn home(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
 
 pub fn liked_songs(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
     let lib = &mut ctx.app.library;
-    if edit_filter(&mut lib.liked_songs_filter, &mut lib.liked_songs_selected, key.code)
-        || filter_hotkeys(&mut lib.liked_songs_filter, &mut lib.liked_songs_selected, key.code)
-    {
+    if edit_filter(
+        &mut lib.liked_songs_filter,
+        &mut lib.liked_songs_selected,
+        key.code,
+    ) || filter_hotkeys(
+        &mut lib.liked_songs_filter,
+        &mut lib.liked_songs_selected,
+        key.code,
+    ) {
         return true;
     }
     match key.code {
@@ -39,7 +45,9 @@ pub fn liked_songs(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
             if let Some(track) = ctx.app.selected_track() {
                 ctx.app.pending_confirm = Some(PendingConfirm {
                     message: format!("Unlike \"{} \u{2014} {}\"? y/n", track.artist, track.title),
-                    action: ConfirmAction::UnlikeTrack { track_uri: track.uri },
+                    action: ConfirmAction::UnlikeTrack {
+                        track_uri: track.uri,
+                    },
                 });
             }
         }
@@ -51,7 +59,13 @@ pub fn liked_songs(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
         // Enter, not Right: it plays and jumps to Now Playing.
         KeyCode::Enter => {
             if let Some(track) = ctx.app.selected_track() {
-                play_context(ctx.app, ctx.spirc, track.uri, None, "Liked Songs".to_string());
+                play_context(
+                    ctx.app,
+                    ctx.spirc,
+                    track.uri,
+                    None,
+                    "Liked Songs".to_string(),
+                );
             }
         }
         _ => return tracks::handle(ctx, key, true),
@@ -61,9 +75,15 @@ pub fn liked_songs(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
 
 pub fn saved_albums(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
     let lib = &mut ctx.app.library;
-    if edit_filter(&mut lib.saved_albums_filter, &mut lib.saved_albums_selected, key.code)
-        || filter_hotkeys(&mut lib.saved_albums_filter, &mut lib.saved_albums_selected, key.code)
-    {
+    if edit_filter(
+        &mut lib.saved_albums_filter,
+        &mut lib.saved_albums_selected,
+        key.code,
+    ) || filter_hotkeys(
+        &mut lib.saved_albums_filter,
+        &mut lib.saved_albums_selected,
+        key.code,
+    ) {
         return true;
     }
     let selected = ctx.app.library.saved_albums_selected;
@@ -74,7 +94,9 @@ pub fn saved_albums(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
             if let Some(&(_, album)) = ctx.app.saved_albums_display().get(selected) {
                 let (message, action) = (
                     format!("Unsave \"{} \u{2014} {}\"? y/n", album.name, album.artist),
-                    ConfirmAction::UnsaveAlbum { album_uri: album.uri.clone() },
+                    ConfirmAction::UnsaveAlbum {
+                        album_uri: album.uri.clone(),
+                    },
                 );
                 ctx.app.pending_confirm = Some(PendingConfirm { message, action });
             }
@@ -86,7 +108,11 @@ pub fn saved_albums(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
         }
         // Navigation only: opening an album plays nothing.
         KeyCode::Enter | KeyCode::Right => {
-            let uri = ctx.app.saved_albums_display().get(selected).map(|&(_, a)| a.uri.clone());
+            let uri = ctx
+                .app
+                .saved_albums_display()
+                .get(selected)
+                .map(|&(_, a)| a.uri.clone());
             if let Some(uri) = uri {
                 ctx.svc.open_album_detail(ctx.app, uri);
             }
@@ -98,9 +124,15 @@ pub fn saved_albums(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
 
 pub fn followed_artists(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
     let lib = &mut ctx.app.library;
-    if edit_filter(&mut lib.followed_artists_filter, &mut lib.followed_artists_selected, key.code)
-        || filter_hotkeys(&mut lib.followed_artists_filter, &mut lib.followed_artists_selected, key.code)
-    {
+    if edit_filter(
+        &mut lib.followed_artists_filter,
+        &mut lib.followed_artists_selected,
+        key.code,
+    ) || filter_hotkeys(
+        &mut lib.followed_artists_filter,
+        &mut lib.followed_artists_selected,
+        key.code,
+    ) {
         return true;
     }
     let selected = ctx.app.library.followed_artists_selected;
@@ -111,7 +143,9 @@ pub fn followed_artists(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
             if let Some(&(_, artist)) = ctx.app.followed_artists_display().get(selected) {
                 let (message, action) = (
                     format!("Unfollow \"{}\"? y/n", artist.name),
-                    ConfirmAction::UnfollowArtist { artist_uri: artist.uri.clone() },
+                    ConfirmAction::UnfollowArtist {
+                        artist_uri: artist.uri.clone(),
+                    },
                 );
                 ctx.app.pending_confirm = Some(PendingConfirm { message, action });
             }
@@ -119,10 +153,18 @@ pub fn followed_artists(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
         KeyCode::Esc | KeyCode::Left => ctx.app.nav.escape(),
         KeyCode::Up | KeyCode::Down => {
             let len = ctx.app.followed_artists_display().len();
-            move_selection(&mut ctx.app.library.followed_artists_selected, len, key.code);
+            move_selection(
+                &mut ctx.app.library.followed_artists_selected,
+                len,
+                key.code,
+            );
         }
         KeyCode::Enter | KeyCode::Right => {
-            let uri = ctx.app.followed_artists_display().get(selected).map(|&(_, a)| a.uri.clone());
+            let uri = ctx
+                .app
+                .followed_artists_display()
+                .get(selected)
+                .map(|&(_, a)| a.uri.clone());
             if let Some(uri) = uri {
                 ctx.svc.open_artist_detail(ctx.app, uri);
             }
@@ -134,9 +176,15 @@ pub fn followed_artists(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
 
 pub fn your_playlists(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
     let lib = &mut ctx.app.library;
-    if edit_filter(&mut lib.playlists_filter, &mut lib.playlists_selected, key.code)
-        || filter_hotkeys(&mut lib.playlists_filter, &mut lib.playlists_selected, key.code)
-    {
+    if edit_filter(
+        &mut lib.playlists_filter,
+        &mut lib.playlists_selected,
+        key.code,
+    ) || filter_hotkeys(
+        &mut lib.playlists_filter,
+        &mut lib.playlists_selected,
+        key.code,
+    ) {
         return true;
     }
     match key.code {
@@ -173,5 +221,7 @@ pub fn your_playlists(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
 }
 
 fn selected_playlist(app: &AppState) -> Option<PlaylistSummary> {
-    app.playlists_display().get(app.library.playlists_selected).map(|&(_, p)| p.clone())
+    app.playlists_display()
+        .get(app.library.playlists_selected)
+        .map(|&(_, p)| p.clone())
 }

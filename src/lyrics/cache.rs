@@ -14,7 +14,11 @@ fn cache_path(cache_dir: &std::path::Path, track_uri: &str) -> std::path::PathBu
     cache_dir.join(format!("{hash}.json"))
 }
 
-pub(super) fn read_cache(cache_dir: &std::path::Path, track_uri: &str, now_unix: u64) -> Option<CachedLyrics> {
+pub(super) fn read_cache(
+    cache_dir: &std::path::Path,
+    track_uri: &str,
+    now_unix: u64,
+) -> Option<CachedLyrics> {
     let path = cache_path(cache_dir, track_uri);
     let data = std::fs::read_to_string(path).ok()?;
     let entry: CacheEntry = serde_json::from_str(&data).ok()?;
@@ -45,8 +49,13 @@ pub(super) fn write_cache(
 /// only accepts synced hits on purpose: an earlier lrclib `Plain` or
 /// negative `NotFound` entry for the same track is exactly the case Spicy
 /// exists to improve, so it must not count as "already answered".
-pub fn cached_synced(cache_dir: &std::path::Path, track_uri: &str, now_unix: u64) -> Option<CachedLyrics> {
-    read_cache(cache_dir, track_uri, now_unix).filter(|cached| matches!(cached, CachedLyrics::Synced { .. }))
+pub fn cached_synced(
+    cache_dir: &std::path::Path,
+    track_uri: &str,
+    now_unix: u64,
+) -> Option<CachedLyrics> {
+    read_cache(cache_dir, track_uri, now_unix)
+        .filter(|cached| matches!(cached, CachedLyrics::Synced { .. }))
 }
 
 /// Stores a synced result, overwriting any weaker entry for the track.
@@ -58,7 +67,16 @@ pub fn store_synced(
     credit: Option<String>,
     now_unix: u64,
 ) -> std::io::Result<()> {
-    write_cache(cache_dir, track_uri, &CachedLyrics::Synced { lines, words, credit }, now_unix)
+    write_cache(
+        cache_dir,
+        track_uri,
+        &CachedLyrics::Synced {
+            lines,
+            words,
+            credit,
+        },
+        now_unix,
+    )
 }
 
 /// The cache key for a Spicy Lyrics result. Its own namespace, so entries
@@ -73,7 +91,8 @@ mod spicy_cache_tests {
     use super::*;
 
     fn fresh_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("spot-tui-test-spicy-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("spot-tui-test-spicy-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -84,7 +103,14 @@ mod spicy_cache_tests {
     fn cache_files_written_before_credits_existed_still_load() {
         let old = r#"{"kind":"Synced","lines":[[1.0,"a"]]}"#;
         let parsed: CachedLyrics = serde_json::from_str(old).unwrap();
-        assert_eq!(parsed, CachedLyrics::Synced { lines: vec![(1.0, "a".to_string())], credit: None, words: Vec::new() });
+        assert_eq!(
+            parsed,
+            CachedLyrics::Synced {
+                lines: vec![(1.0, "a".to_string())],
+                credit: None,
+                words: Vec::new()
+            }
+        );
     }
 
     #[test]
@@ -94,13 +120,19 @@ mod spicy_cache_tests {
             words: Vec::new(),
             credit: Some("Apple Music via Spicy Lyrics".to_string()),
         };
-        let back: CachedLyrics = serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+        let back: CachedLyrics =
+            serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
         assert_eq!(back, original);
     }
 
     #[test]
     fn no_credit_is_left_out_of_the_file_entirely() {
-        let json = serde_json::to_string(&CachedLyrics::Synced { lines: vec![], credit: None, words: Vec::new() }).unwrap();
+        let json = serde_json::to_string(&CachedLyrics::Synced {
+            lines: vec![],
+            credit: None,
+            words: Vec::new(),
+        })
+        .unwrap();
         assert!(!json.contains("credit"), "{json}");
     }
 
@@ -110,7 +142,9 @@ mod spicy_cache_tests {
         // Spicy being asked -- that is exactly the track it exists for.
         let dir = fresh_dir("hits");
         for (i, weaker) in [
-            CachedLyrics::Plain { text: "x".to_string() },
+            CachedLyrics::Plain {
+                text: "x".to_string(),
+            },
             CachedLyrics::NotFound,
             CachedLyrics::Instrumental,
         ]
@@ -127,8 +161,15 @@ mod spicy_cache_tests {
     #[test]
     fn a_synced_entry_is_a_hit_and_keeps_its_credit() {
         let dir = fresh_dir("synced");
-        store_synced(&dir, URI, vec![(2.5, "line".to_string())], Vec::new(), Some("credit".to_string()), 100)
-            .unwrap();
+        store_synced(
+            &dir,
+            URI,
+            vec![(2.5, "line".to_string())],
+            Vec::new(),
+            Some("credit".to_string()),
+            100,
+        )
+        .unwrap();
         assert_eq!(
             cached_synced(&dir, URI, 101),
             Some(CachedLyrics::Synced {
@@ -141,7 +182,11 @@ mod spicy_cache_tests {
     }
 
     fn seg(text: &str, start: f64, end: f64) -> WordSeg {
-        WordSeg { text: text.to_string(), start, end }
+        WordSeg {
+            text: text.to_string(),
+            start,
+            end,
+        }
     }
 
     #[test]
@@ -151,7 +196,8 @@ mod spicy_cache_tests {
             words: vec![vec![seg("hi ", 1.0, 1.4), seg("there", 1.4, 2.0)]],
             credit: None,
         };
-        let back: CachedLyrics = serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+        let back: CachedLyrics =
+            serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
         assert_eq!(back, original);
     }
 
@@ -168,7 +214,8 @@ mod spicy_cache_tests {
 
     #[test]
     fn cache_files_written_before_word_timing_existed_still_load() {
-        let old = r#"{"kind":"Synced","lines":[[1.0,"a"]],"credit":"Apple Music via Spicy Lyrics"}"#;
+        let old =
+            r#"{"kind":"Synced","lines":[[1.0,"a"]],"credit":"Apple Music via Spicy Lyrics"}"#;
         let parsed: CachedLyrics = serde_json::from_str(old).unwrap();
         assert_eq!(
             parsed,
@@ -188,9 +235,25 @@ mod spicy_cache_tests {
         // Apple Music line sync legitimately has none.
         assert_eq!(spicy_cache_key(URI), format!("spicy:{URI}"));
         let dir = fresh_dir("keys");
-        store_synced(&dir, URI, vec![(1.0, "old line-level".to_string())], Vec::new(), None, 100).unwrap();
+        store_synced(
+            &dir,
+            URI,
+            vec![(1.0, "old line-level".to_string())],
+            Vec::new(),
+            None,
+            100,
+        )
+        .unwrap();
         assert_eq!(cached_synced(&dir, &spicy_cache_key(URI), 101), None);
-        store_synced(&dir, &spicy_cache_key(URI), vec![(1.0, "new".to_string())], Vec::new(), None, 102).unwrap();
+        store_synced(
+            &dir,
+            &spicy_cache_key(URI),
+            vec![(1.0, "new".to_string())],
+            Vec::new(),
+            None,
+            102,
+        )
+        .unwrap();
         assert!(cached_synced(&dir, &spicy_cache_key(URI), 103).is_some());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -198,11 +261,29 @@ mod spicy_cache_tests {
     #[test]
     fn a_synced_result_upgrades_an_earlier_plain_entry() {
         let dir = fresh_dir("upgrade");
-        write_cache(&dir, URI, &CachedLyrics::Plain { text: "unsynced".to_string() }, 100).unwrap();
+        write_cache(
+            &dir,
+            URI,
+            &CachedLyrics::Plain {
+                text: "unsynced".to_string(),
+            },
+            100,
+        )
+        .unwrap();
         assert_eq!(cached_synced(&dir, URI, 101), None);
-        store_synced(&dir, URI, vec![(1.0, "now synced".to_string())], Vec::new(), None, 102).unwrap();
-        assert!(matches!(cached_synced(&dir, URI, 103), Some(CachedLyrics::Synced { .. })));
+        store_synced(
+            &dir,
+            URI,
+            vec![(1.0, "now synced".to_string())],
+            Vec::new(),
+            None,
+            102,
+        )
+        .unwrap();
+        assert!(matches!(
+            cached_synced(&dir, URI, 103),
+            Some(CachedLyrics::Synced { .. })
+        ));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
-

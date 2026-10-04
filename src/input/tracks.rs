@@ -1,7 +1,7 @@
 //! Keys for the track under the cursor, shared by every screen that lists
 //! tracks (Liked Songs, Playlist Detail, Queue, Album Detail).
 
-use super::{shift, KeyCtx};
+use super::{KeyCtx, shift};
 use crate::state::{ListFilter, PlaylistPicker};
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -44,5 +44,9 @@ pub fn handle(ctx: &mut KeyCtx<'_>, key: KeyEvent, allow_queue: bool) -> bool {
 }
 
 pub fn open_picker(ctx: &mut KeyCtx<'_>, track_uri: String) {
-    ctx.app.playlist_picker = Some(PlaylistPicker { track_uri, selected: 0, filter: ListFilter::default() });
+    ctx.app.playlist_picker = Some(PlaylistPicker {
+        track_uri,
+        selected: 0,
+        filter: ListFilter::default(),
+    });
 }

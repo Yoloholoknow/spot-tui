@@ -33,12 +33,21 @@ fn classify_spotify(body: SpotifyLyricsBody) -> Option<CachedLyrics> {
     let lines: Vec<(f64, String)> = body
         .lines
         .iter()
-        .filter_map(|l| l.start_time_ms.parse::<f64>().ok().map(|ms| (ms / 1000.0, l.words.clone())))
+        .filter_map(|l| {
+            l.start_time_ms
+                .parse::<f64>()
+                .ok()
+                .map(|ms| (ms / 1000.0, l.words.clone()))
+        })
         .collect();
     if lines.is_empty() {
         return None;
     }
-    Some(CachedLyrics::Synced { lines, credit: None, words: Vec::new() })
+    Some(CachedLyrics::Synced {
+        lines,
+        credit: None,
+        words: Vec::new(),
+    })
 }
 
 /// Spotify's own catalogue lyrics, via librespot's authenticated session (the same
@@ -55,7 +64,12 @@ pub async fn spotify_lyrics(
     // app's own code), so a track that shows unsynced can be traced to timeout, request
     // error, bad JSON or a genuinely non-synced result.
     let id = track_id.to_base62().unwrap_or_default();
-    let bytes = match tokio::time::timeout(Duration::from_secs(5), session.spclient().get_lyrics(&track_id)).await {
+    let bytes = match tokio::time::timeout(
+        Duration::from_secs(5),
+        session.spclient().get_lyrics(&track_id),
+    )
+    .await
+    {
         Ok(Ok(bytes)) => bytes,
         Ok(Err(e)) => {
             log::info!("spotify_lyrics[{id}]: get_lyrics request failed: {e}");
@@ -80,7 +94,9 @@ pub async fn spotify_lyrics(
     let line_count = response.lyrics.lines.len();
     let result = classify_spotify(response.lyrics);
     if result.is_none() {
-        log::info!("spotify_lyrics[{id}]: no usable synced result (syncType={sync_type}, lines={line_count})");
+        log::info!(
+            "spotify_lyrics[{id}]: no usable synced result (syncType={sync_type}, lines={line_count})"
+        );
     } else {
         log::info!("spotify_lyrics[{id}]: got {line_count} synced lines");
     }
@@ -96,7 +112,10 @@ mod spotify_lyrics_tests {
             sync_type: sync_type.to_string(),
             lines: lines
                 .into_iter()
-                .map(|(ms, words)| SpotifyLyricsLine { start_time_ms: ms.to_string(), words: words.to_string() })
+                .map(|(ms, words)| SpotifyLyricsLine {
+                    start_time_ms: ms.to_string(),
+                    words: words.to_string(),
+                })
                 .collect(),
         }
     }
@@ -104,12 +123,22 @@ mod spotify_lyrics_tests {
     #[test]
     fn line_synced_with_real_lines_converts_ms_to_seconds() {
         let result = classify_spotify(body("LINE_SYNCED", vec![("960", "One, two, three, four")]));
-        assert_eq!(result, Some(CachedLyrics::Synced { lines: vec![(0.96, "One, two, three, four".to_string())], credit: None, words: Vec::new() }));
+        assert_eq!(
+            result,
+            Some(CachedLyrics::Synced {
+                lines: vec![(0.96, "One, two, three, four".to_string())],
+                credit: None,
+                words: Vec::new()
+            })
+        );
     }
 
     #[test]
     fn unsynced_falls_through_to_lrclib() {
-        assert_eq!(classify_spotify(body("UNSYNCED", vec![("0", "some line")])), None);
+        assert_eq!(
+            classify_spotify(body("UNSYNCED", vec![("0", "some line")])),
+            None
+        );
     }
 
     #[test]
@@ -120,9 +149,19 @@ mod spotify_lyrics_tests {
     #[test]
     fn a_line_with_an_unparseable_timestamp_is_dropped_not_fatal() {
         let mut b = body("LINE_SYNCED", vec![("960", "good line")]);
-        b.lines.push(SpotifyLyricsLine { start_time_ms: "not-a-number".to_string(), words: "bad line".to_string() });
+        b.lines.push(SpotifyLyricsLine {
+            start_time_ms: "not-a-number".to_string(),
+            words: "bad line".to_string(),
+        });
         let result = classify_spotify(b);
-        assert_eq!(result, Some(CachedLyrics::Synced { lines: vec![(0.96, "good line".to_string())], credit: None, words: Vec::new() }));
+        assert_eq!(
+            result,
+            Some(CachedLyrics::Synced {
+                lines: vec![(0.96, "good line".to_string())],
+                credit: None,
+                words: Vec::new()
+            })
+        );
     }
 
     #[test]
@@ -131,4 +170,3 @@ mod spotify_lyrics_tests {
         assert_eq!(classify_spotify(b), None);
     }
 }
-

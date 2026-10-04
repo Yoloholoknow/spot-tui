@@ -1,4 +1,4 @@
-use super::{LyricLine};
+use super::LyricLine;
 use std::time::Duration;
 
 const MAX_TAGS_PER_LINE: usize = 32;
@@ -151,4 +151,3 @@ mod parse_tests {
         assert_eq!(two_digit[0].timestamp, three_digit[0].timestamp);
     }
 }
-

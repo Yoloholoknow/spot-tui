@@ -1,6 +1,6 @@
-use super::*;
 use super::cache::{read_cache, write_cache};
 use super::lrc::parse_lrc;
+use super::*;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct LrcLibEntry {
@@ -104,9 +104,10 @@ impl LyricsClient {
         }
 
         if let Ok(resp) = req.call()
-            && let Ok(entry) = crate::http::read_json::<LrcLibEntry>(resp) {
-                return classify(&entry);
-            }
+            && let Ok(entry) = crate::http::read_json::<LrcLibEntry>(resp)
+        {
+            return classify(&entry);
+        }
 
         // Fall back to fuzzy search when the exact match misses.
         let search = self
@@ -119,9 +120,10 @@ impl LyricsClient {
 
         if let Ok(resp) = search
             && let Ok(candidates) = crate::http::read_json::<Vec<LrcLibEntry>>(resp)
-                && let Some(best) = best_search_candidate(&candidates, duration_secs) {
-                    return classify(best);
-                }
+            && let Some(best) = best_search_candidate(&candidates, duration_secs)
+        {
+            return classify(best);
+        }
 
         CachedLyrics::NotFound
     }
@@ -136,7 +138,11 @@ fn classify(entry: &LrcLibEntry) -> CachedLyrics {
             .into_iter()
             .map(|l| (l.timestamp.as_secs_f64(), l.text))
             .collect();
-        return CachedLyrics::Synced { lines, credit: None, words: Vec::new() };
+        return CachedLyrics::Synced {
+            lines,
+            credit: None,
+            words: Vec::new(),
+        };
     }
     if let Some(plain) = &entry.plain_lyrics {
         return CachedLyrics::Plain {
@@ -249,10 +255,8 @@ mod client_tests {
 
     #[test]
     fn cache_round_trips_write_then_read() {
-        let dir = std::env::temp_dir().join(format!(
-            "spot-tui-test-roundtrip-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("spot-tui-test-roundtrip-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let result = CachedLyrics::Synced {
             lines: vec![(1.0, "hi".to_string())],
@@ -273,12 +277,20 @@ mod client_tests {
 
         // Just under 7 days later: still cached as NotFound.
         assert_eq!(
-            read_cache(&dir, "spotify:track:y", 1_000_000 + NEGATIVE_CACHE_TTL_SECS - 1),
+            read_cache(
+                &dir,
+                "spotify:track:y",
+                1_000_000 + NEGATIVE_CACHE_TTL_SECS - 1
+            ),
             Some(CachedLyrics::NotFound)
         );
         // Just over 7 days later: treated as stale, allow refetch.
         assert_eq!(
-            read_cache(&dir, "spotify:track:y", 1_000_000 + NEGATIVE_CACHE_TTL_SECS + 1),
+            read_cache(
+                &dir,
+                "spotify:track:y",
+                1_000_000 + NEGATIVE_CACHE_TTL_SECS + 1
+            ),
             None
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -290,10 +302,8 @@ mod client_tests {
     /// lyrics starting "When you were here before".
     #[test]
     fn integration_fetches_real_synced_lyrics_from_lrclib() {
-        let dir = std::env::temp_dir().join(format!(
-            "spot-tui-test-integration-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("spot-tui-test-integration-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let client = LyricsClient::new(dir.clone());
 
@@ -317,10 +327,8 @@ mod client_tests {
 
     #[test]
     fn integration_second_fetch_is_cache_only_no_network() {
-        let dir = std::env::temp_dir().join(format!(
-            "spot-tui-test-cachehit-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("spot-tui-test-cachehit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
         let live = LyricsClient::new(dir.clone());
@@ -347,4 +355,3 @@ mod client_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
-

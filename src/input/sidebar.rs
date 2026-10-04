@@ -1,8 +1,8 @@
 //! Keys while the sidebar has focus.
 
-use super::{common, go_to_screen, is_shift_char, KeyCtx};
+use super::{KeyCtx, common, go_to_screen, is_shift_char};
 use crate::pins;
-use crate::state::{sidebar_rows, Focus, Screen, SidebarRow};
+use crate::state::{Focus, Screen, SidebarRow, sidebar_rows};
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub fn handle(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
@@ -22,7 +22,9 @@ pub fn handle(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
             ctx.app.nav.focus = Focus::Main;
         }
         KeyCode::Char('/') => go_to_screen(ctx, Screen::Search),
-        KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'P', 'p') => pin_selected_playlist(ctx),
+        KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'P', 'p') => {
+            pin_selected_playlist(ctx)
+        }
         KeyCode::Up => ctx.app.sidebar_sel = ctx.app.sidebar_sel.saturating_sub(1),
         KeyCode::Down => {
             let rows = sidebar_rows(ctx.app).len();

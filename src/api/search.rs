@@ -44,7 +44,11 @@ fn search_cache_path(cache_dir: &std::path::Path, query: &str) -> std::path::Pat
     cache_dir.join(format!("{hash}.json"))
 }
 
-fn read_search_cache(cache_dir: &std::path::Path, query: &str, now_unix: u64) -> Option<Vec<TrackResult>> {
+fn read_search_cache(
+    cache_dir: &std::path::Path,
+    query: &str,
+    now_unix: u64,
+) -> Option<Vec<TrackResult>> {
     let path = search_cache_path(cache_dir, query);
     let data = std::fs::read_to_string(path).ok()?;
     let entry: SearchCacheEntry = serde_json::from_str(&data).ok()?;
@@ -54,7 +58,12 @@ fn read_search_cache(cache_dir: &std::path::Path, query: &str, now_unix: u64) ->
     Some(entry.results)
 }
 
-fn write_search_cache(cache_dir: &std::path::Path, query: &str, results: &[TrackResult], now_unix: u64) {
+fn write_search_cache(
+    cache_dir: &std::path::Path,
+    query: &str,
+    results: &[TrackResult],
+    now_unix: u64,
+) {
     let _ = std::fs::create_dir_all(cache_dir);
     let entry = SearchCacheEntry {
         fetched_at_unix: now_unix,
@@ -77,7 +86,10 @@ mod cache_tests {
     use super::*;
 
     fn scratch_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("spot-tui-search-cache-test-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "spot-tui-search-cache-test-{name}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -104,7 +116,10 @@ mod cache_tests {
         let dir = scratch_dir("roundtrip");
         let results = vec![track("a"), track("b")];
         write_search_cache(&dir, "my query", &results, 1_000_000);
-        assert_eq!(read_search_cache(&dir, "my query", 1_000_010), Some(results));
+        assert_eq!(
+            read_search_cache(&dir, "my query", 1_000_010),
+            Some(results)
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -158,7 +173,11 @@ fn is_field_scoped(query: &str) -> bool {
 /// while still backfilling with the broader (higher-recall) plain
 /// results so a query with no exact track-name hit still returns
 /// something.
-fn merge_results(field_scoped: Vec<TrackResult>, plain: Vec<TrackResult>, limit: usize) -> Vec<TrackResult> {
+fn merge_results(
+    field_scoped: Vec<TrackResult>,
+    plain: Vec<TrackResult>,
+    limit: usize,
+) -> Vec<TrackResult> {
     let mut seen = std::collections::HashSet::new();
     let mut merged = Vec::with_capacity(limit);
     for t in field_scoped.into_iter().chain(plain) {
@@ -205,7 +224,10 @@ mod relevance_tests {
         let scoped = vec![track("a"), track("b")];
         let plain = vec![track("c"), track("d")];
         let merged = merge_results(scoped, plain, 10);
-        assert_eq!(merged.iter().map(|t| t.uri.as_str()).collect::<Vec<_>>(), vec!["a", "b", "c", "d"]);
+        assert_eq!(
+            merged.iter().map(|t| t.uri.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "c", "d"]
+        );
     }
 
     #[test]
@@ -213,7 +235,10 @@ mod relevance_tests {
         let scoped = vec![track("a")];
         let plain = vec![track("a"), track("b")];
         let merged = merge_results(scoped, plain, 10);
-        assert_eq!(merged.iter().map(|t| t.uri.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!(
+            merged.iter().map(|t| t.uri.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
     }
 
     #[test]
@@ -221,16 +246,30 @@ mod relevance_tests {
         let scoped = vec![track("a"), track("b")];
         let plain = vec![track("c"), track("d")];
         let merged = merge_results(scoped, plain, 3);
-        assert_eq!(merged.iter().map(|t| t.uri.as_str()).collect::<Vec<_>>(), vec!["a", "b", "c"]);
+        assert_eq!(
+            merged.iter().map(|t| t.uri.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
     }
 }
 
-async fn run_query(client: &AuthCodeSpotify, query: &str, limit: u32) -> ClientResult<Vec<TrackResult>> {
+async fn run_query(
+    client: &AuthCodeSpotify,
+    query: &str,
+    limit: u32,
+) -> ClientResult<Vec<TrackResult>> {
     // Dev Mode apps cap this at 10 (down from 50 since Spotify's Feb 2026
     // migration); anything higher is a 400 "Invalid limit". Clamped here as
     // well as at the call site so another caller can't regress it.
     let result = client
-        .search(query, SearchType::Track, None, None, Some(limit.min(10)), None)
+        .search(
+            query,
+            SearchType::Track,
+            None,
+            None,
+            Some(limit.min(10)),
+            None,
+        )
         .await?;
 
     let rspotify::model::SearchResult::Tracks(page) = result else {
@@ -246,7 +285,10 @@ async fn run_query(client: &AuthCodeSpotify, query: &str, limit: u32) -> ClientR
                 uri: t.id.map(|id| id.uri()).unwrap_or_default(),
                 title: t.name,
                 artist: first_artist.map(|a| a.name.clone()).unwrap_or_default(),
-                artist_uri: first_artist.and_then(|a| a.id.clone()).map(|id| id.uri()).unwrap_or_default(),
+                artist_uri: first_artist
+                    .and_then(|a| a.id.clone())
+                    .map(|id| id.uri())
+                    .unwrap_or_default(),
                 album_uri: t.album.id.clone().map(|id| id.uri()).unwrap_or_default(),
                 album: t.album.name,
             }
@@ -273,7 +315,10 @@ pub async fn search_tracks(
         run_query(client, query, limit).await?
     } else {
         let scoped_query = format!("track:\"{}\"", query.trim());
-        let (scoped, plain) = tokio::join!(run_query(client, &scoped_query, limit), run_query(client, query, limit));
+        let (scoped, plain) = tokio::join!(
+            run_query(client, &scoped_query, limit),
+            run_query(client, query, limit)
+        );
         // The plain query is the pre-existing, always-worked baseline --
         // its failure still propagates. The scoped query is this tier's
         // speculative addition on top; if it errors, degrade to

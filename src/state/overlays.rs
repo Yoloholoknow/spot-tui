@@ -21,10 +21,19 @@ impl TextPrompt {
     /// `initial` pre-seeds the field (rename needs the current name) with
     /// the cursor placed after it, matching a normal text field regaining
     /// focus -- an empty `initial` (create) just starts at 0, same thing.
-    pub fn new(title: impl Into<String>, initial: impl Into<String>, action: TextPromptAction) -> Self {
+    pub fn new(
+        title: impl Into<String>,
+        initial: impl Into<String>,
+        action: TextPromptAction,
+    ) -> Self {
         let query: String = initial.into();
         let cursor = query.chars().count();
-        Self { title: title.into(), query, cursor, action }
+        Self {
+            title: title.into(),
+            query,
+            cursor,
+            action,
+        }
     }
 
     pub fn insert_at_cursor(&mut self, c: char) {
@@ -53,11 +62,18 @@ pub struct PendingConfirm {
 
 pub enum ConfirmAction {
     DeletePlaylist(crate::api::library::PlaylistSummary),
-    RemoveTrack { playlist_uri: String, track_uri: String, occurrences: usize },
+    RemoveTrack {
+        playlist_uri: String,
+        track_uri: String,
+        occurrences: usize,
+    },
     /// Confirmed past the "this playlist already has this track" warning
     /// -- adds it anyway, the exact same call `TrackAdded`'s normal path
     /// uses, just reached from the confirm overlay instead of directly.
-    AddTrackAnyway { playlist_uri: String, track_uri: String },
+    AddTrackAnyway {
+        playlist_uri: String,
+        track_uri: String,
+    },
     /// `q`, when `Config::confirm_quit` is on -- the one confirm action
     /// that doesn't mutate anything, just tells the main loop to actually
     /// exit once confirmed.
@@ -65,9 +81,15 @@ pub enum ConfirmAction {
     // Liking, following and saving fire immediately, like add-to-playlist.
     // The reverse (unlike/unfollow/unsave), always reached from the list
     // that owns the item, confirms first, like every removal.
-    UnlikeTrack { track_uri: String },
-    UnfollowArtist { artist_uri: String },
-    UnsaveAlbum { album_uri: String },
+    UnlikeTrack {
+        track_uri: String,
+    },
+    UnfollowArtist {
+        artist_uri: String,
+    },
+    UnsaveAlbum {
+        album_uri: String,
+    },
 }
 
 /// How carefully to read a confirmation. Derived from the action rather
@@ -81,7 +103,9 @@ pub enum ConfirmSeverity {
 impl ConfirmAction {
     pub fn severity(&self) -> ConfirmSeverity {
         match self {
-            ConfirmAction::DeletePlaylist(_) | ConfirmAction::RemoveTrack { .. } => ConfirmSeverity::Danger,
+            ConfirmAction::DeletePlaylist(_) | ConfirmAction::RemoveTrack { .. } => {
+                ConfirmSeverity::Danger
+            }
             // Warn, not Danger -- unlike RemoveTrack/DeletePlaylist,
             // undoing any of these is one more keypress away (like/
             // follow/save again), not a real, harder-to-recover loss.
@@ -162,17 +186,19 @@ pub const QUICK_JUMP_SCREENS: &[(&str, Screen)] = &[
 pub fn quick_jump_entries(app: &AppState, filter: &ListFilter) -> Vec<QuickJumpEntry> {
     let mut entries: Vec<QuickJumpEntry> = QUICK_JUMP_SCREENS
         .iter()
-        .map(|(label, screen)| QuickJumpEntry { label: format!("[Go] {label}"), kind: QuickJumpKind::Screen(*screen) })
+        .map(|(label, screen)| QuickJumpEntry {
+            label: format!("[Go] {label}"),
+            kind: QuickJumpKind::Screen(*screen),
+        })
         .collect();
     if filter.query.is_empty() {
         return entries;
     }
     if let Fetch::Ready(items) = &app.library.playlists {
-        entries.extend(
-            items
-                .iter()
-                .map(|p| QuickJumpEntry { label: format!("[Playlist] {}", p.name), kind: QuickJumpKind::Playlist(p.clone()) }),
-        );
+        entries.extend(items.iter().map(|p| QuickJumpEntry {
+            label: format!("[Playlist] {}", p.name),
+            kind: QuickJumpKind::Playlist(p.clone()),
+        }));
     }
     if let Fetch::Ready(items) = &app.library.followed_artists {
         entries.extend(items.iter().map(|a| QuickJumpEntry {
@@ -187,9 +213,10 @@ pub fn quick_jump_entries(app: &AppState, filter: &ListFilter) -> Vec<QuickJumpE
         }));
     }
     if let Fetch::Ready(items) = &app.devices.fetch {
-        entries.extend(
-            items.iter().map(|d| QuickJumpEntry { label: format!("[Device] {}", d.name), kind: QuickJumpKind::Device(d.clone()) }),
-        );
+        entries.extend(items.iter().map(|d| QuickJumpEntry {
+            label: format!("[Device] {}", d.name),
+            kind: QuickJumpKind::Device(d.clone()),
+        }));
     }
     if let Fetch::Ready(items) = &app.library.liked_songs {
         entries.extend(items.iter().map(|t| QuickJumpEntry {
@@ -244,4 +271,3 @@ mod text_prompt_tests {
         assert_eq!(p.query, "ab");
     }
 }
-

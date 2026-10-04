@@ -30,7 +30,10 @@ pub fn romanize(text: &str) -> String {
     let mut last_was_syllable = false;
     for c in text.chars() {
         if let Some(syllable) = c.to_pinyin() {
-            let needs_space = out.chars().last().is_some_and(|last| !last.is_whitespace() && !matches!(last, '(' | '"'));
+            let needs_space = out
+                .chars()
+                .last()
+                .is_some_and(|last| !last.is_whitespace() && !matches!(last, '(' | '"'));
             if needs_space {
                 out.push(' ');
             }

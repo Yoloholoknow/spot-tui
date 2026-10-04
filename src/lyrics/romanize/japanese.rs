@@ -42,11 +42,17 @@ const IPADIC_READING: usize = 7;
 const IPADIC_PRONUNCIATION: usize = 8;
 
 fn field(details: &[&str], index: usize) -> Option<String> {
-    details.get(index).map(|d| d.to_string()).filter(|d| d != "*")
+    details
+        .get(index)
+        .map(|d| d.to_string())
+        .filter(|d| d != "*")
 }
 
 fn is_verbal(pos1: &str) -> bool {
-    matches!(pos1, "\u{52d5}\u{8a5e}" | "\u{5f62}\u{5bb9}\u{8a5e}" | "\u{52a9}\u{52d5}\u{8a5e}")
+    matches!(
+        pos1,
+        "\u{52d5}\u{8a5e}" | "\u{5f62}\u{5bb9}\u{8a5e}" | "\u{52a9}\u{52d5}\u{8a5e}"
+    )
 }
 
 /// Whether `word` continues the word before it (no space): verb endings and
@@ -81,7 +87,10 @@ fn ascii_punctuation(c: char) -> Option<char> {
 }
 
 fn is_punctuation(text: &str) -> bool {
-    !text.is_empty() && text.chars().all(|c| ascii_punctuation(c).is_some() || c.is_ascii_punctuation())
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|c| ascii_punctuation(c).is_some() || c.is_ascii_punctuation())
 }
 
 fn macron(vowel: char) -> char {
@@ -120,13 +129,14 @@ fn kana_to_romaji(kana: &str) -> String {
 /// that can be followed by a lengthening vowel.
 fn vowel_row(c: char) -> Option<char> {
     Some(match c {
-        'ア' | 'カ' | 'ガ' | 'サ' | 'ザ' | 'タ' | 'ダ' | 'ナ' | 'ハ' | 'バ' | 'パ' | 'マ' | 'ヤ' | 'ラ' | 'ワ' | 'ャ'
-        | 'ァ' => 'a',
-        'ウ' | 'ク' | 'グ' | 'ス' | 'ズ' | 'ツ' | 'ヅ' | 'ヌ' | 'フ' | 'ブ' | 'プ' | 'ム' | 'ユ' | 'ル' | 'ュ' | 'ゥ'
-        | 'ヴ' => 'u',
-        'エ' | 'ケ' | 'ゲ' | 'セ' | 'ゼ' | 'テ' | 'デ' | 'ネ' | 'ヘ' | 'ベ' | 'ペ' | 'メ' | 'レ' | 'ェ' => 'e',
-        'オ' | 'コ' | 'ゴ' | 'ソ' | 'ゾ' | 'ト' | 'ド' | 'ノ' | 'ホ' | 'ボ' | 'ポ' | 'モ' | 'ヨ' | 'ロ' | 'ヲ' | 'ョ'
-        | 'ォ' => 'o',
+        'ア' | 'カ' | 'ガ' | 'サ' | 'ザ' | 'タ' | 'ダ' | 'ナ' | 'ハ' | 'バ' | 'パ' | 'マ'
+        | 'ヤ' | 'ラ' | 'ワ' | 'ャ' | 'ァ' => 'a',
+        'ウ' | 'ク' | 'グ' | 'ス' | 'ズ' | 'ツ' | 'ヅ' | 'ヌ' | 'フ' | 'ブ' | 'プ' | 'ム'
+        | 'ユ' | 'ル' | 'ュ' | 'ゥ' | 'ヴ' => 'u',
+        'エ' | 'ケ' | 'ゲ' | 'セ' | 'ゼ' | 'テ' | 'デ' | 'ネ' | 'ヘ' | 'ベ' | 'ペ' | 'メ'
+        | 'レ' | 'ェ' => 'e',
+        'オ' | 'コ' | 'ゴ' | 'ソ' | 'ゾ' | 'ト' | 'ド' | 'ノ' | 'ホ' | 'ボ' | 'ポ' | 'モ'
+        | 'ヨ' | 'ロ' | 'ヲ' | 'ョ' | 'ォ' => 'o',
         _ => return None,
     })
 }
@@ -143,7 +153,11 @@ fn mark_long_vowels(reading: &str, verb_dictionary_form: bool) -> String {
         let previous = i.checked_sub(1).and_then(|j| vowel_row(chars[j]));
         let lengthens = matches!(
             (previous, c),
-            (Some('a'), 'ア') | (Some('u'), 'ウ') | (Some('e'), 'エ') | (Some('o'), 'オ') | (Some('o'), 'ウ')
+            (Some('a'), 'ア')
+                | (Some('u'), 'ウ')
+                | (Some('e'), 'エ')
+                | (Some('o'), 'オ')
+                | (Some('o'), 'ウ')
         );
         let verb_ending = verb_dictionary_form && c == 'ウ' && i + 1 == chars.len();
         out.push(if lengthens && !verb_ending { 'ー' } else { c });
@@ -194,24 +208,48 @@ pub fn romanize(text: &str) -> String {
         let pos2 = field(&details, IPADIC_POS2).unwrap_or_default();
         // The particles は and へ are spoken wa and e; the pronunciation field
         // knows, the reading field doesn't.
-        let particle = pos1 == "\u{52a9}\u{8a5e}" && matches!(surface.as_str(), "\u{306f}" | "\u{3078}");
-        let reading = if particle { field(&details, IPADIC_PRONUNCIATION) } else { field(&details, IPADIC_READING) };
+        let particle =
+            pos1 == "\u{52a9}\u{8a5e}" && matches!(surface.as_str(), "\u{306f}" | "\u{3078}");
+        let reading = if particle {
+            field(&details, IPADIC_PRONUNCIATION)
+        } else {
+            field(&details, IPADIC_READING)
+        };
         let verb_dictionary_form = pos1 == "\u{52d5}\u{8a5e}"
-            && field(&details, IPADIC_CONJUGATION_FORM).as_deref() == Some("\u{57fa}\u{672c}\u{5f62}");
-        let text = mark_long_vowels(&reading.unwrap_or_else(|| surface.clone()), verb_dictionary_form);
-        let word = Word { text, pos1, pos2, surface };
+            && field(&details, IPADIC_CONJUGATION_FORM).as_deref()
+                == Some("\u{57fa}\u{672c}\u{5f62}");
+        let text = mark_long_vowels(
+            &reading.unwrap_or_else(|| surface.clone()),
+            verb_dictionary_form,
+        );
+        let word = Word {
+            text,
+            pos1,
+            pos2,
+            surface,
+        };
 
         if is_punctuation(&word.surface) {
             flush(&mut group, &mut out);
-            out.extend(word.surface.chars().map(|c| ascii_punctuation(c).unwrap_or(c)));
+            out.extend(
+                word.surface
+                    .chars()
+                    .map(|c| ascii_punctuation(c).unwrap_or(c)),
+            );
             current = None;
             continue;
         }
 
-        let joins = current.as_ref().is_some_and(|previous| attaches_to_previous(previous, &word));
+        let joins = current
+            .as_ref()
+            .is_some_and(|previous| attaches_to_previous(previous, &word));
         if !joins {
             flush(&mut group, &mut out);
-            if out.chars().last().is_some_and(|last| !last.is_whitespace() && !matches!(last, '(' | '"')) {
+            if out
+                .chars()
+                .last()
+                .is_some_and(|last| !last.is_whitespace() && !matches!(last, '(' | '"'))
+            {
                 out.push(' ');
             }
         }
@@ -241,8 +279,14 @@ mod tests {
 
     #[test]
     fn verb_endings_join_the_verb() {
-        assert_eq!(romanize("その一言で全てが分かった"), "sono hitokoto de subete ga wakatta");
-        assert_eq!(romanize("いざ始まればひとり芝居だ"), "iza hajimareba hitori shibai da");
+        assert_eq!(
+            romanize("その一言で全てが分かった"),
+            "sono hitokoto de subete ga wakatta"
+        );
+        assert_eq!(
+            romanize("いざ始まればひとり芝居だ"),
+            "iza hajimareba hitori shibai da"
+        );
     }
 
     #[test]
@@ -300,7 +344,10 @@ mod tests {
 
     #[test]
     fn latin_text_and_spacing_inside_a_line_are_kept() {
-        assert_eq!(romanize("Stay in the middle 君と"), "Stay in the middle kimi to");
+        assert_eq!(
+            romanize("Stay in the middle 君と"),
+            "Stay in the middle kimi to"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! The four overlays that own the keyboard while open: yes/no confirm, text
 //! prompt, add-to-playlist picker and the quick-jump palette.
 
-use super::{go_to_screen, is_ctrl, KeyCtx};
+use super::{KeyCtx, go_to_screen, is_ctrl};
 use crate::player::play_context;
 use crate::state::{ConfirmAction, Focus, QuickJumpKind, Screen, TextPromptAction};
 use crossterm::event::{KeyCode, KeyEvent};
@@ -26,10 +26,15 @@ fn fire_confirmed(ctx: &mut KeyCtx<'_>, action: ConfirmAction) {
     match action {
         ConfirmAction::Quit => ctx.quit = true,
         ConfirmAction::DeletePlaylist(playlist) => svc.delete_playlist(app, playlist),
-        ConfirmAction::RemoveTrack { playlist_uri, track_uri, occurrences } => {
-            svc.remove_track(app, playlist_uri, track_uri, occurrences)
-        }
-        ConfirmAction::AddTrackAnyway { playlist_uri, track_uri } => svc.add_track_to_playlist(app, playlist_uri, track_uri),
+        ConfirmAction::RemoveTrack {
+            playlist_uri,
+            track_uri,
+            occurrences,
+        } => svc.remove_track(app, playlist_uri, track_uri, occurrences),
+        ConfirmAction::AddTrackAnyway {
+            playlist_uri,
+            track_uri,
+        } => svc.add_track_to_playlist(app, playlist_uri, track_uri),
         ConfirmAction::UnlikeTrack { track_uri } => svc.unlike_track(app, track_uri),
         ConfirmAction::UnfollowArtist { artist_uri } => svc.unfollow_artist(app, artist_uri),
         ConfirmAction::UnsaveAlbum { album_uri } => svc.unsave_album(app, album_uri),
@@ -43,7 +48,9 @@ pub fn handle_text_prompt(ctx: &mut KeyCtx<'_>, code: KeyCode) {
         KeyCode::Esc => ctx.app.text_prompt = None,
         KeyCode::Enter => submit_text_prompt(ctx),
         _ => {
-            let Some(prompt) = &mut ctx.app.text_prompt else { return };
+            let Some(prompt) = &mut ctx.app.text_prompt else {
+                return;
+            };
             match code {
                 KeyCode::Backspace => prompt.backspace_at_cursor(),
                 KeyCode::Left => prompt.cursor_left(),
@@ -56,7 +63,9 @@ pub fn handle_text_prompt(ctx: &mut KeyCtx<'_>, code: KeyCode) {
 }
 
 fn submit_text_prompt(ctx: &mut KeyCtx<'_>) {
-    let Some(prompt) = ctx.app.text_prompt.take() else { return };
+    let Some(prompt) = ctx.app.text_prompt.take() else {
+        return;
+    };
     // Purely local: needs neither a name nor the API.
     if matches!(prompt.action, TextPromptAction::MoveToPosition) {
         apply_move_to_position(ctx, &prompt.query);
@@ -69,7 +78,9 @@ fn submit_text_prompt(ctx: &mut KeyCtx<'_>) {
     }
     match prompt.action {
         TextPromptAction::CreatePlaylist => ctx.svc.create_playlist(ctx.app, name),
-        TextPromptAction::RenamePlaylist(playlist) => ctx.svc.rename_playlist(ctx.app, playlist.uri, name),
+        TextPromptAction::RenamePlaylist(playlist) => {
+            ctx.svc.rename_playlist(ctx.app, playlist.uri, name)
+        }
         TextPromptAction::MoveToPosition => {}
     }
 }
@@ -80,11 +91,15 @@ fn submit_text_prompt(ctx: &mut KeyCtx<'_>) {
 /// `reorder_track` for the net displacement and `Esc` still walks it back.
 fn apply_move_to_position(ctx: &mut KeyCtx<'_>, input: &str) {
     let app = &mut *ctx.app;
-    let Some(pd) = &mut app.playlist_detail else { return };
+    let Some(pd) = &mut app.playlist_detail else {
+        return;
+    };
     if pd.move_mode.is_none() {
         return;
     }
-    let crate::state::Fetch::Ready(items) = &mut pd.tracks else { return };
+    let crate::state::Fetch::Ready(items) = &mut pd.tracks else {
+        return;
+    };
     match crate::state::parse_move_position(input, items.len()) {
         Ok(target) => pd.selected = crate::state::move_item_to(items, pd.selected, target),
         Err(message) => app.status = Some((message, true)),
@@ -103,18 +118,24 @@ pub fn handle_picker(ctx: &mut KeyCtx<'_>, code: KeyCode) {
             }
         }
         KeyCode::Enter => {
-            let picked = ctx
-                .app
-                .playlist_picker
-                .as_ref()
-                .and_then(|picker| ctx.app.picker_display().get(picker.selected).map(|&(_, p)| (p.uri.clone(), p.name.clone())));
-            let Some(picker) = ctx.app.playlist_picker.take() else { return };
+            let picked = ctx.app.playlist_picker.as_ref().and_then(|picker| {
+                ctx.app
+                    .picker_display()
+                    .get(picker.selected)
+                    .map(|&(_, p)| (p.uri.clone(), p.name.clone()))
+            });
+            let Some(picker) = ctx.app.playlist_picker.take() else {
+                return;
+            };
             if let Some((playlist_uri, playlist_name)) = picked {
-                ctx.svc.add_track_checked(ctx.app, playlist_uri, playlist_name, picker.track_uri);
+                ctx.svc
+                    .add_track_checked(ctx.app, playlist_uri, playlist_name, picker.track_uri);
             }
         }
         _ => {
-            let Some(picker) = &mut ctx.app.playlist_picker else { return };
+            let Some(picker) = &mut ctx.app.playlist_picker else {
+                return;
+            };
             match code {
                 KeyCode::Left => picker.filter.cursor_left(),
                 KeyCode::Right => picker.filter.cursor_right(),
@@ -149,18 +170,21 @@ pub fn handle_quick_jump(ctx: &mut KeyCtx<'_>, key: KeyEvent) {
             }
         }
         KeyCode::Enter => {
-            let picked = ctx
-                .app
-                .quick_jump
-                .as_ref()
-                .and_then(|qj| ctx.app.quick_jump_matches().get(qj.selected).map(|e| e.kind.clone()));
+            let picked = ctx.app.quick_jump.as_ref().and_then(|qj| {
+                ctx.app
+                    .quick_jump_matches()
+                    .get(qj.selected)
+                    .map(|e| e.kind.clone())
+            });
             ctx.app.quick_jump = None;
             if let Some(kind) = picked {
                 activate_quick_jump(ctx, kind);
             }
         }
         _ => {
-            let Some(qj) = &mut ctx.app.quick_jump else { return };
+            let Some(qj) = &mut ctx.app.quick_jump else {
+                return;
+            };
             match code {
                 KeyCode::Left => qj.filter.cursor_left(),
                 KeyCode::Right => qj.filter.cursor_right(),
@@ -204,7 +228,13 @@ fn activate_quick_jump(ctx: &mut KeyCtx<'_>, kind: QuickJumpKind) {
             ctx.svc.open_album_detail(ctx.app, uri);
             ctx.app.nav.focus = Focus::Main;
         }
-        QuickJumpKind::Track(track) => play_context(ctx.app, ctx.spirc, track.uri, None, "Liked Songs".to_string()),
+        QuickJumpKind::Track(track) => play_context(
+            ctx.app,
+            ctx.spirc,
+            track.uri,
+            None,
+            "Liked Songs".to_string(),
+        ),
         // Stays wherever the user was.
         QuickJumpKind::Device(device) => ctx.svc.transfer_playback(ctx.app, device.id),
     }

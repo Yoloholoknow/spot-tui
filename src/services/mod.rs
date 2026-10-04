@@ -14,7 +14,9 @@ pub use results::{CrudResult, LibraryFetchResult, TrackView};
 use crate::api;
 use crate::api::library::PlaylistSummary;
 use crate::api::search::TrackResult;
-use crate::state::{AlbumDetailState, AppState, ArtistDetailState, Fetch, ListFilter, PlaylistDetailState, Screen};
+use crate::state::{
+    AlbumDetailState, AppState, ArtistDetailState, Fetch, ListFilter, PlaylistDetailState, Screen,
+};
 use rspotify::AuthCodeSpotify;
 use std::future::Future;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -39,8 +41,11 @@ pub struct ServiceReceivers {
     pub search: Receiver<SearchResult>,
 }
 
-fn spawn_send<T, M>(tx: &Sender<M>, work: impl Future<Output = T> + Send + 'static, wrap: impl FnOnce(T) -> M + Send + 'static)
-where
+fn spawn_send<T, M>(
+    tx: &Sender<M>,
+    work: impl Future<Output = T> + Send + 'static,
+    wrap: impl FnOnce(T) -> M + Send + 'static,
+) where
     T: Send + 'static,
     M: Send + 'static,
 {
@@ -55,7 +60,19 @@ impl Services {
         let (library_tx, library) = mpsc::channel();
         let (crud_tx, crud) = mpsc::channel();
         let (search_tx, search) = mpsc::channel();
-        (Self { client: None, library_tx, crud_tx, search_tx }, ServiceReceivers { library, crud, search })
+        (
+            Self {
+                client: None,
+                library_tx,
+                crud_tx,
+                search_tx,
+            },
+            ServiceReceivers {
+                library,
+                crud,
+                search,
+            },
+        )
     }
 
     /// The client, or a "not ready" status message for the user.
@@ -68,11 +85,17 @@ impl Services {
 
     /// Runs `job` against the client and delivers its result on the CRUD
     /// channel. `status` is shown while it is in flight.
-    fn mutate<Fut>(&self, app: &mut AppState, status: Option<&str>, job: impl FnOnce(AuthCodeSpotify) -> Fut)
-    where
+    fn mutate<Fut>(
+        &self,
+        app: &mut AppState,
+        status: Option<&str>,
+        job: impl FnOnce(AuthCodeSpotify) -> Fut,
+    ) where
         Fut: Future<Output = CrudResult> + Send + 'static,
     {
-        let Some(client) = self.client_or_status(app) else { return };
+        let Some(client) = self.client_or_status(app) else {
+            return;
+        };
         if let Some(status) = status {
             app.status = Some((format!("{status}\u{2026}"), false));
         }
@@ -104,7 +127,11 @@ impl Services {
     pub fn refetch_playlists(&self, app: &mut AppState) {
         self.load(
             &mut app.library.playlists,
-            |c| async move { api::library::your_playlists(&c).await.map_err(|e| e.to_string()) },
+            |c| async move {
+                api::library::your_playlists(&c)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
             LibraryFetchResult::Playlists,
         );
     }
@@ -112,7 +139,11 @@ impl Services {
     pub fn refetch_liked_songs(&self, app: &mut AppState) {
         self.load(
             &mut app.library.liked_songs,
-            |c| async move { api::library::liked_songs(&c).await.map_err(|e| e.to_string()) },
+            |c| async move {
+                api::library::liked_songs(&c)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
             LibraryFetchResult::LikedSongs,
         );
     }
@@ -120,7 +151,11 @@ impl Services {
     pub fn refetch_saved_albums(&self, app: &mut AppState) {
         self.load(
             &mut app.library.saved_albums,
-            |c| async move { api::library::saved_albums(&c).await.map_err(|e| e.to_string()) },
+            |c| async move {
+                api::library::saved_albums(&c)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
             LibraryFetchResult::SavedAlbums,
         );
     }
@@ -128,7 +163,11 @@ impl Services {
     pub fn refetch_followed_artists(&self, app: &mut AppState) {
         self.load(
             &mut app.library.followed_artists,
-            |c| async move { api::library::followed_artists(&c).await.map_err(|e| e.to_string()) },
+            |c| async move {
+                api::library::followed_artists(&c)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
             LibraryFetchResult::FollowedArtists,
         );
     }
@@ -146,26 +185,44 @@ impl Services {
     /// screen. It never shows a loading state, to avoid flicker.
     pub fn refetch_queue(&self) {
         if let Some(client) = self.client.clone() {
-            spawn_send(&self.library_tx, async move { api::queue::current_queue(&client).await }, LibraryFetchResult::Queue);
+            spawn_send(
+                &self.library_tx,
+                async move { api::queue::current_queue(&client).await },
+                LibraryFetchResult::Queue,
+            );
         }
     }
 
     /// Fetches whatever a list screen needs that has not been loaded yet.
     pub fn ensure_loaded(&self, app: &mut AppState, screen: Screen) {
         match screen {
-            Screen::LikedSongs if matches!(app.library.liked_songs, Fetch::NotStarted) => self.refetch_liked_songs(app),
-            Screen::SavedAlbums if matches!(app.library.saved_albums, Fetch::NotStarted) => self.refetch_saved_albums(app),
-            Screen::FollowedArtists if matches!(app.library.followed_artists, Fetch::NotStarted) => {
+            Screen::LikedSongs if matches!(app.library.liked_songs, Fetch::NotStarted) => {
+                self.refetch_liked_songs(app)
+            }
+            Screen::SavedAlbums if matches!(app.library.saved_albums, Fetch::NotStarted) => {
+                self.refetch_saved_albums(app)
+            }
+            Screen::FollowedArtists
+                if matches!(app.library.followed_artists, Fetch::NotStarted) =>
+            {
                 self.refetch_followed_artists(app)
             }
-            Screen::YourPlaylists if matches!(app.library.playlists, Fetch::NotStarted) => self.refetch_playlists(app),
-            Screen::Devices if matches!(app.devices.fetch, Fetch::NotStarted) => self.refetch_devices(app),
+            Screen::YourPlaylists if matches!(app.library.playlists, Fetch::NotStarted) => {
+                self.refetch_playlists(app)
+            }
+            Screen::Devices if matches!(app.devices.fetch, Fetch::NotStarted) => {
+                self.refetch_devices(app)
+            }
             _ => {}
         }
     }
 
     pub fn refetch_playlist_tracks(&self, app: &mut AppState, playlist_uri: String) {
-        let Some(pd) = app.playlist_detail.as_mut().filter(|pd| pd.playlist.uri == playlist_uri) else {
+        let Some(pd) = app
+            .playlist_detail
+            .as_mut()
+            .filter(|pd| pd.playlist.uri == playlist_uri)
+        else {
             // Not open: nothing on screen to mark loading, but still warm
             // the membership cache.
             self.spawn_playlist_tracks(playlist_uri);
@@ -181,14 +238,19 @@ impl Services {
     }
 
     fn spawn_playlist_tracks(&self, playlist_uri: String) {
-        let Some(client) = self.client.clone() else { return };
+        let Some(client) = self.client.clone() else {
+            return;
+        };
         spawn_send(
             &self.library_tx,
             {
                 let uri = playlist_uri.clone();
                 async move { api::library::playlist_tracks(&client, &uri).await }
             },
-            move |result| LibraryFetchResult::PlaylistTracks { playlist_uri, result },
+            move |result| LibraryFetchResult::PlaylistTracks {
+                playlist_uri,
+                result,
+            },
         );
     }
 
@@ -211,7 +273,11 @@ impl Services {
             return;
         }
         app.nav.push(Screen::ArtistDetail);
-        let mut state = ArtistDetailState { artist_uri: artist_uri.clone(), detail: Fetch::Loading, selected: 0 };
+        let mut state = ArtistDetailState {
+            artist_uri: artist_uri.clone(),
+            detail: Fetch::Loading,
+            selected: 0,
+        };
         match self.client.clone() {
             Some(client) => spawn_send(
                 &self.library_tx,
@@ -232,7 +298,11 @@ impl Services {
             return;
         }
         app.nav.push(Screen::AlbumDetail);
-        let mut state = AlbumDetailState { album_uri: album_uri.clone(), detail: Fetch::Loading, selected: 0 };
+        let mut state = AlbumDetailState {
+            album_uri: album_uri.clone(),
+            detail: Fetch::Loading,
+            selected: 0,
+        };
         match self.client.clone() {
             Some(client) => spawn_send(
                 &self.library_tx,
@@ -250,7 +320,9 @@ impl Services {
     /// Looks up a playing track's artist/album, then opens `view`. Used by
     /// Now Playing, which only has the track's own URI.
     pub fn open_track_view(&self, app: &mut AppState, track_uri: &str, view: TrackView) {
-        let Some(client) = self.client_or_status(app) else { return };
+        let Some(client) = self.client_or_status(app) else {
+            return;
+        };
         let uri = track_uri.to_string();
         spawn_send(
             &self.library_tx,
@@ -260,11 +332,21 @@ impl Services {
     }
 
     pub fn search(&self, app: &mut AppState, query: String) {
-        let Some(client) = self.client_or_status(app) else { return };
+        let Some(client) = self.client_or_status(app) else {
+            return;
+        };
         app.search.searching = true;
         app.search.error = None;
         // Dev Mode apps cap search at 10 results; anything higher is a 400.
-        spawn_send(&self.search_tx, async move { api::search::search_tracks(&client, &query, 10).await.map_err(|e| e.to_string()) }, |r| r);
+        spawn_send(
+            &self.search_tx,
+            async move {
+                api::search::search_tracks(&client, &query, 10)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            |r| r,
+        );
     }
 
     // -- writes -----------------------------------------------------------
@@ -272,42 +354,66 @@ impl Services {
     pub fn like_track(&self, app: &mut AppState, track_uri: String) {
         self.mutate(app, None, |c| async move {
             let result = api::library::like_track(&c, &track_uri).await;
-            CrudResult::LikeToggled { track_uri, liked: true, result }
+            CrudResult::LikeToggled {
+                track_uri,
+                liked: true,
+                result,
+            }
         });
     }
 
     pub fn unlike_track(&self, app: &mut AppState, track_uri: String) {
         self.mutate(app, Some("unliking"), |c| async move {
             let result = api::library::unlike_track(&c, &track_uri).await;
-            CrudResult::LikeToggled { track_uri, liked: false, result }
+            CrudResult::LikeToggled {
+                track_uri,
+                liked: false,
+                result,
+            }
         });
     }
 
     pub fn follow_artist(&self, app: &mut AppState, artist_uri: String) {
         self.mutate(app, None, |c| async move {
             let result = api::library::follow_artist(&c, &artist_uri).await;
-            CrudResult::FollowToggled { artist_uri, followed: true, result }
+            CrudResult::FollowToggled {
+                artist_uri,
+                followed: true,
+                result,
+            }
         });
     }
 
     pub fn unfollow_artist(&self, app: &mut AppState, artist_uri: String) {
         self.mutate(app, Some("unfollowing"), |c| async move {
             let result = api::library::unfollow_artist(&c, &artist_uri).await;
-            CrudResult::FollowToggled { artist_uri, followed: false, result }
+            CrudResult::FollowToggled {
+                artist_uri,
+                followed: false,
+                result,
+            }
         });
     }
 
     pub fn save_album(&self, app: &mut AppState, album_uri: String) {
         self.mutate(app, None, |c| async move {
             let result = api::library::save_album(&c, &album_uri).await;
-            CrudResult::SaveToggled { album_uri, saved: true, result }
+            CrudResult::SaveToggled {
+                album_uri,
+                saved: true,
+                result,
+            }
         });
     }
 
     pub fn unsave_album(&self, app: &mut AppState, album_uri: String) {
         self.mutate(app, Some("unsaving"), |c| async move {
             let result = api::library::unsave_album(&c, &album_uri).await;
-            CrudResult::SaveToggled { album_uri, saved: false, result }
+            CrudResult::SaveToggled {
+                album_uri,
+                saved: false,
+                result,
+            }
         });
     }
 
@@ -320,22 +426,42 @@ impl Services {
     pub fn rename_playlist(&self, app: &mut AppState, playlist_uri: String, new_name: String) {
         self.mutate(app, Some("renaming playlist"), |c| async move {
             let result = api::playlists::rename_playlist(&c, &playlist_uri, &new_name).await;
-            CrudResult::PlaylistRenamed { playlist_uri, new_name, result }
+            CrudResult::PlaylistRenamed {
+                playlist_uri,
+                new_name,
+                result,
+            }
         });
     }
 
     pub fn delete_playlist(&self, app: &mut AppState, playlist: PlaylistSummary) {
-        self.mutate(app, Some(&format!("deleting \"{}\"", playlist.name)), |c| async move {
-            let playlist_uri = playlist.uri;
-            let result = api::playlists::delete_playlist(&c, &playlist_uri).await;
-            CrudResult::PlaylistDeleted { playlist_uri, result }
-        });
+        self.mutate(
+            app,
+            Some(&format!("deleting \"{}\"", playlist.name)),
+            |c| async move {
+                let playlist_uri = playlist.uri;
+                let result = api::playlists::delete_playlist(&c, &playlist_uri).await;
+                CrudResult::PlaylistDeleted {
+                    playlist_uri,
+                    result,
+                }
+            },
+        );
     }
 
-    pub fn add_track_to_playlist(&self, app: &mut AppState, playlist_uri: String, track_uri: String) {
+    pub fn add_track_to_playlist(
+        &self,
+        app: &mut AppState,
+        playlist_uri: String,
+        track_uri: String,
+    ) {
         self.mutate(app, Some("adding to playlist"), |c| async move {
             let result = api::playlists::add_track(&c, &playlist_uri, &track_uri).await;
-            CrudResult::TrackAdded { playlist_uri, track_uri, result }
+            CrudResult::TrackAdded {
+                playlist_uri,
+                track_uri,
+                result,
+            }
         });
     }
 
@@ -345,7 +471,13 @@ impl Services {
     /// Spotify has no "does this playlist contain X" endpoint, so the check
     /// fetches the whole playlist (which also refreshes the membership
     /// cache). If that fetch fails the add goes ahead unchecked.
-    pub fn add_track_checked(&self, app: &mut AppState, playlist_uri: String, playlist_name: String, track_uri: String) {
+    pub fn add_track_checked(
+        &self,
+        app: &mut AppState,
+        playlist_uri: String,
+        playlist_name: String,
+        track_uri: String,
+    ) {
         let library_tx = self.library_tx.clone();
         self.mutate(app, Some("adding to playlist"), |c| async move {
             match api::library::playlist_tracks(&c, &playlist_uri).await {
@@ -368,17 +500,31 @@ impl Services {
         });
     }
 
-    pub fn remove_track(&self, app: &mut AppState, playlist_uri: String, track_uri: String, occurrences: usize) {
+    pub fn remove_track(
+        &self,
+        app: &mut AppState,
+        playlist_uri: String,
+        track_uri: String,
+        occurrences: usize,
+    ) {
         self.mutate(app, Some("removing track"), |c| async move {
             let result = api::playlists::remove_track(&c, &playlist_uri, &track_uri).await;
-            CrudResult::TrackRemoved { playlist_uri, track_uri, occurrences, result }
+            CrudResult::TrackRemoved {
+                playlist_uri,
+                track_uri,
+                occurrences,
+                result,
+            }
         });
     }
 
     pub fn reorder_track(&self, app: &mut AppState, playlist_uri: String, from: usize, to: usize) {
         self.mutate(app, Some("reordering"), |c| async move {
             let result = api::playlists::reorder_track(&c, &playlist_uri, from, to).await;
-            CrudResult::TrackReordered { playlist_uri, result }
+            CrudResult::TrackReordered {
+                playlist_uri,
+                result,
+            }
         });
     }
 

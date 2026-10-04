@@ -8,12 +8,12 @@ use crate::input::{self, KeyCtx};
 use crate::lyrics::pipeline::{LyricsPipeline, TrackMeta};
 use crate::lyrics::romanizer::Romanizer;
 use crate::lyrics::spicy::SpicyClient;
-use crate::lyrics::{current_line_index, CachedLyrics, LyricLine};
-use crate::player::{self, Connection, ConnectError};
+use crate::lyrics::{CachedLyrics, LyricLine, current_line_index};
+use crate::player::{self, ConnectError, Connection};
 use crate::position::PositionTracker;
 use crate::services::{ServiceReceivers, Services};
 use crate::state::{AppState, LyricsState, RepeatMode, Screen};
-use crate::terminal::{detect_graphics_picker, install_panic_hook, TerminalGuard};
+use crate::terminal::{TerminalGuard, detect_graphics_picker, install_panic_hook};
 use crate::{api, pins, ui};
 use crossterm::event::{self, Event};
 use image::DynamicImage;
@@ -136,7 +136,11 @@ pub async fn run() -> std::io::Result<()> {
     let spicy = cfg.spicy_lyrics_key().map(SpicyClient::new);
     log::info!(
         "spicy_lyrics: {}",
-        if spicy.is_some() { "key configured, used first" } else { "no key configured, skipped" }
+        if spicy.is_some() {
+            "key configured, used first"
+        } else {
+            "no key configured, skipped"
+        }
     );
     let (lyrics, lyrics_rx) = LyricsPipeline::new(spicy.clone());
     let (svc, service_rx) = Services::new();
@@ -145,9 +149,17 @@ pub async fn run() -> std::io::Result<()> {
 
     let mut rt = Runtime {
         terminal,
-        app: AppState::new(cfg.romanize_lyrics, pins::load("playlists"), pins::load("tracks"), player::INITIAL_VOLUME),
+        app: AppState::new(
+            cfg.romanize_lyrics,
+            pins::load("playlists"),
+            pins::load("tracks"),
+            player::INITIAL_VOLUME,
+        ),
         cfg,
-        images: ui::ImageState { picker, ..Default::default() },
+        images: ui::ImageState {
+            picker,
+            ..Default::default()
+        },
         scroll: ui::ScrollState::default(),
         tracker: PositionTracker::new(),
         svc,
@@ -158,7 +170,12 @@ pub async fn run() -> std::io::Result<()> {
         lyrics,
         lyrics_rx,
         romanizer: Romanizer::new(),
-        covers: CoverChannels { tx: cover_tx, rx: cover_rx, prefetch_tx, prefetch_rx },
+        covers: CoverChannels {
+            tx: cover_tx,
+            rx: cover_rx,
+            prefetch_tx,
+            prefetch_rx,
+        },
         generation: 0,
         pending_lyrics: None,
         synced_lines: Vec::new(),
@@ -199,7 +216,9 @@ impl Runtime {
             // off"). `transfer` with this device on both ends is a no-op if
             // it is already active, so it is safe on every (re)connect.
             match conn.spirc.transfer(None) {
-                Ok(()) => log::info!("spirc.transfer(None) sent, reclaiming the last active session"),
+                Ok(()) => {
+                    log::info!("spirc.transfer(None) sent, reclaiming the last active session")
+                }
                 Err(e) => log::warn!("spirc.transfer(None) failed: {e}"),
             }
             // A fresh session must not keep showing the old one's state.
@@ -277,12 +296,22 @@ impl Runtime {
         self.app.track_artist = None;
         self.app.track_album = None;
         self.app.playing = None;
-        self.app.lyrics = if no_login { LyricsState::NoLogin } else { LyricsState::SessionEnded };
+        self.app.lyrics = if no_login {
+            LyricsState::NoLogin
+        } else {
+            LyricsState::SessionEnded
+        };
         self.draw()
     }
 
     fn draw(&mut self) -> std::io::Result<()> {
-        let Self { terminal, app, scroll, images, .. } = self;
+        let Self {
+            terminal,
+            app,
+            scroll,
+            images,
+            ..
+        } = self;
         terminal.draw(|f| ui::render(f, app, scroll, images))?;
         Ok(())
     }
@@ -304,11 +333,13 @@ impl Runtime {
             self.update_playback_fields();
             self.draw()?;
 
-            let tick = if ui::word_sweep_active(&self.app.lyrics, self.app.current_line, self.app.playing) {
-                WORD_TICK
-            } else {
-                TICK
-            };
+            let tick =
+                if ui::word_sweep_active(&self.app.lyrics, self.app.current_line, self.app.playing)
+                {
+                    WORD_TICK
+                } else {
+                    TICK
+                };
             if !event::poll(tick)? {
                 continue;
             }
@@ -367,9 +398,14 @@ impl Runtime {
 
     fn on_track_changed(&mut self, conn: &Connection, item: &librespot_metadata::audio::AudioItem) {
         let (artist, album) = match &item.unique_fields {
-            UniqueFields::Track { artists, album, .. } => {
-                (artists.0.first().map(|a| a.name.clone()).unwrap_or_default(), Some(album.clone()))
-            }
+            UniqueFields::Track { artists, album, .. } => (
+                artists
+                    .0
+                    .first()
+                    .map(|a| a.name.clone())
+                    .unwrap_or_default(),
+                Some(album.clone()),
+            ),
             _ => (String::new(), None),
         };
         let uri = item.track_id.to_string();
@@ -429,10 +465,14 @@ impl Runtime {
     }
 
     fn start_due_lyrics_fetch(&mut self, conn: &Connection) {
-        if self.pending_lyrics.as_ref().is_some_and(|p| Instant::now() >= p.due)
+        if self
+            .pending_lyrics
+            .as_ref()
+            .is_some_and(|p| Instant::now() >= p.due)
             && let Some(pending) = self.pending_lyrics.take()
         {
-            self.lyrics.request(&conn.session, pending.generation, pending.meta);
+            self.lyrics
+                .request(&conn.session, pending.generation, pending.meta);
         }
     }
 
@@ -442,7 +482,9 @@ impl Runtime {
         if self.client_checked {
             return;
         }
-        let Ok(client) = self.client_rx.try_recv() else { return };
+        let Ok(client) = self.client_rx.try_recv() else {
+            return;
+        };
         self.client_checked = true;
         self.app.search.client_ready = client.is_some();
         self.svc.client = client;
@@ -459,7 +501,11 @@ impl Runtime {
             self.queue_last_fetched = None;
             return;
         }
-        if self.queue_last_fetched.is_none_or(|t| t.elapsed() >= QUEUE_POLL_INTERVAL) && self.svc.client.is_some() {
+        if self
+            .queue_last_fetched
+            .is_none_or(|t| t.elapsed() >= QUEUE_POLL_INTERVAL)
+            && self.svc.client.is_some()
+        {
             self.queue_last_fetched = Some(Instant::now());
             self.svc.refetch_queue();
         }
@@ -527,7 +573,10 @@ impl Runtime {
     fn update_playback_fields(&mut self) {
         let now = Instant::now();
         self.app.position = Duration::from_millis(self.tracker.progress_ms(now) as u64);
-        self.app.playing = self.tracker.current_track_id().map(|_| self.tracker.is_playing());
+        self.app.playing = self
+            .tracker
+            .current_track_id()
+            .map(|_| self.tracker.is_playing());
         self.app.current_line = if matches!(self.app.lyrics, LyricsState::Synced(_)) {
             current_line_index(&self.synced_lines, self.app.position)
         } else {
@@ -542,7 +591,10 @@ mod backoff_tests {
 
     #[test]
     fn the_wait_doubles_from_the_initial_backoff() {
-        assert_eq!(next_backoff(RECONNECT_INITIAL_BACKOFF), Duration::from_secs(1));
+        assert_eq!(
+            next_backoff(RECONNECT_INITIAL_BACKOFF),
+            Duration::from_secs(1)
+        );
         assert_eq!(next_backoff(Duration::from_secs(1)), Duration::from_secs(2));
     }
 

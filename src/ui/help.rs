@@ -25,12 +25,18 @@ pub(super) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "Ctrl+C",
                 "quit immediately, never confirms -- works everywhere, including while typing",
             ),
-            ("Space / n / p / + / -", "play-pause / next / previous / volume -- works from any screen, including while browsing a list, not just Now Playing (not while typing in Search)"),
+            (
+                "Space / n / p / + / -",
+                "play-pause / next / previous / volume -- works from any screen, including while browsing a list, not just Now Playing (not while typing in Search)",
+            ),
             (
                 "m",
                 "mute / unmute -- restores the exact volume it muted, not a fixed default. Works from any screen except Playlist Detail, where m already means enter move-mode (not while typing in Search)",
             ),
-            ("/", "jump to Search (Sidebar, Now Playing) or open a list's filter"),
+            (
+                "/",
+                "jump to Search (Sidebar, Now Playing) or open a list's filter",
+            ),
             ("l", "jump to Library"),
             (
                 "f",
@@ -77,7 +83,10 @@ pub(super) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("\u{2191} / \u{2193}", "move selection"),
             ("Enter", "play the selected track"),
-            ("Enter / \u{2192}", "open (Your Playlists \u{2192} Playlist Detail only)"),
+            (
+                "Enter / \u{2192}",
+                "open (Your Playlists \u{2192} Playlist Detail only)",
+            ),
             ("\u{2190}", "back to Sidebar (same as Esc)"),
             ("/", "open this list's filter (live-narrows as you type)"),
             (
@@ -91,8 +100,14 @@ pub(super) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
     (
         "Playlist CRUD",
         &[
-            ("c", "create a new playlist -- works from any screen except Search"),
-            ("Shift+R", "rename -- Your Playlists: the selected playlist; Playlist Detail: the open playlist"),
+            (
+                "c",
+                "create a new playlist -- works from any screen except Search",
+            ),
+            (
+                "Shift+R",
+                "rename -- Your Playlists: the selected playlist; Playlist Detail: the open playlist",
+            ),
             (
                 "d",
                 "remove, always confirms first -- Your Playlists: delete the playlist; Playlist Detail: remove the selected track",
@@ -144,21 +159,30 @@ pub(super) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "q",
                 "add the selected track to the queue -- from Liked Songs, Playlist Detail, or Album Detail (Alt+\u{2193} from Search, where every letter types into the query box)",
             ),
-            ("refreshes", "automatically every 5s while this screen is open"),
+            (
+                "refreshes",
+                "automatically every 5s while this screen is open",
+            ),
         ],
     ),
     (
         "Devices",
         &[
             ("\u{2191} / \u{2193}", "move selection"),
-            ("Enter", "transfer playback here (keeps current play/pause state)"),
+            (
+                "Enter",
+                "transfer playback here (keeps current play/pause state)",
+            ),
             ("Shift+R", "refresh the device list"),
         ],
     ),
     (
         "Artist Detail (Followed Artists, or `v`/Ctrl+\u{2192} from a track)",
         &[
-            ("\u{2191} / \u{2193}", "move selection among the artist's albums"),
+            (
+                "\u{2191} / \u{2193}",
+                "move selection among the artist's albums",
+            ),
             ("Enter / \u{2192}", "open the selected album"),
             (
                 "(no top tracks)",
@@ -169,8 +193,14 @@ pub(super) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
     (
         "Album Detail (Saved Albums, an artist's album list, or `v` from a track)",
         &[
-            ("\u{2191} / \u{2193}", "move selection among the album's tracks"),
-            ("Enter", "play the album as context, starting from the selected track"),
+            (
+                "\u{2191} / \u{2193}",
+                "move selection among the album's tracks",
+            ),
+            (
+                "Enter",
+                "play the album as context, starting from the selected track",
+            ),
             ("a", "add the selected track to a playlist"),
             ("v", "view this album's artist"),
         ],
@@ -182,7 +212,10 @@ pub(super) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "v",
                 "open the selected track's album -- Liked Songs, Playlist Detail, Queue, Now Playing (the currently-playing track; on Album Detail, opens the album's own artist instead -- there's no separate album to open from inside one)",
             ),
-            ("Shift+V", "open the selected track's artist -- Liked Songs, Playlist Detail, Queue, Album Detail, Now Playing"),
+            (
+                "Shift+V",
+                "open the selected track's artist -- Liked Songs, Playlist Detail, Queue, Album Detail, Now Playing",
+            ),
             (
                 "Ctrl+\u{2192} / Alt+\u{2192}",
                 "open the selected result's album / artist -- Search only (plain letters all type into the query box there)",
@@ -191,41 +224,71 @@ pub(super) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "Ctrl+\u{2193}",
                 "add the selected result to a playlist -- Search only, opens the picker without needing to play or leave first",
             ),
-            ("Enter / \u{2192}", "open the album from Saved Albums; open the artist from Followed Artists"),
+            (
+                "Enter / \u{2192}",
+                "open the album from Saved Albums; open the artist from Followed Artists",
+            ),
         ],
     ),
     (
         "Move mode (Playlist Detail, after `m`)",
         &[
-            ("\u{2191} / \u{2193}", "relocate the track one slot at a time, locally -- no network call per keystroke"),
-            ("g", "jump the track straight to a typed position (1 = top) instead of nudging it slot by slot -- still local, still confirmed or cancelled with Enter/Esc afterward"),
-            ("Enter", "confirm -- one reorder call for the net displacement"),
+            (
+                "\u{2191} / \u{2193}",
+                "relocate the track one slot at a time, locally -- no network call per keystroke",
+            ),
+            (
+                "g",
+                "jump the track straight to a typed position (1 = top) instead of nudging it slot by slot -- still local, still confirmed or cancelled with Enter/Esc afterward",
+            ),
+            (
+                "Enter",
+                "confirm -- one reorder call for the net displacement",
+            ),
             ("Esc", "cancel -- walks the track back to where it started"),
         ],
     ),
     (
         "Prompt / confirm / picker overlays",
         &[
-            ("Enter", "prompt: submit. picker: add to the selected playlist. confirm: same as y"),
+            (
+                "Enter",
+                "prompt: submit. picker: add to the selected playlist. confirm: same as y",
+            ),
             ("y / n", "confirm: y does it, n cancels"),
             ("Esc", "cancel and close, no exceptions"),
-            ("\u{2190} / \u{2192}", "prompt: move the cursor within the text. picker: move the cursor within its filter"),
+            (
+                "\u{2190} / \u{2192}",
+                "prompt: move the cursor within the text. picker: move the cursor within its filter",
+            ),
             ("\u{2191} / \u{2193}", "picker: move the selected playlist"),
             (
                 "any letter/number",
                 "picker: narrows the list by name -- always live, no separate key to start typing",
             ),
-            ("Backspace", "picker: delete the character before the cursor in its filter"),
+            (
+                "Backspace",
+                "picker: delete the character before the cursor in its filter",
+            ),
         ],
     ),
     (
         "While typing (a filter, or Search's query)",
         &[
-            ("\u{2191} / \u{2193}", "move the highlighted track (filters only -- keeps working while typing)"),
+            (
+                "\u{2191} / \u{2193}",
+                "move the highlighted track (filters only -- keeps working while typing)",
+            ),
             ("\u{2190} / \u{2192}", "move the cursor within the text"),
             ("Backspace", "delete the character before the cursor"),
-            ("Enter", "commit (Search: run the search; filters: stop editing, keep the narrowed list)"),
-            ("Esc", "Search: back. Filters: stop editing AND clear the filter back to the full list"),
+            (
+                "Enter",
+                "commit (Search: run the search; filters: stop editing, keep the narrowed list)",
+            ),
+            (
+                "Esc",
+                "Search: back. Filters: stop editing AND clear the filter back to the full list",
+            ),
         ],
     ),
     (
@@ -242,7 +305,11 @@ pub(super) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
 /// hanging indent so continuation lines stay under the description, which also
 /// makes the rendered height exactly `lines.len()`, which the scroll clamp in
 /// `render_help` relies on.
-pub(super) fn help_section_lines(title: &str, rows: &[(&str, &str)], width: usize) -> Vec<Line<'static>> {
+pub(super) fn help_section_lines(
+    title: &str,
+    rows: &[(&str, &str)],
+    width: usize,
+) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
         title.to_string(),
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
@@ -258,7 +325,10 @@ pub(super) fn help_section_lines(title: &str, rows: &[(&str, &str)], width: usiz
                     Span::styled(piece, Style::default().fg(DIM)),
                 ]));
             } else {
-                lines.push(Line::from(vec![Span::raw(indent.clone()), Span::styled(piece, Style::default().fg(DIM))]));
+                lines.push(Line::from(vec![
+                    Span::raw(indent.clone()),
+                    Span::styled(piece, Style::default().fg(DIM)),
+                ]));
             }
         }
     }
@@ -283,9 +353,14 @@ pub(super) fn help_column_split(section_heights: &[usize]) -> usize {
 }
 
 pub(super) fn render_help(frame: &mut Frame, area: Rect, offset: &mut u16) {
-    let shell =
-        Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(1)]).split(area);
-    frame.render_widget(Paragraph::new(screen_header_line("Keybinds", None)), shell[0]);
+    let shell = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new(screen_header_line("Keybinds", None)),
+        shell[0],
+    );
     let body_area = shell[1];
 
     if body_area.width < HELP_TWO_COLUMN_MIN_WIDTH {
@@ -305,12 +380,18 @@ pub(super) fn render_help(frame: &mut Frame, area: Rect, offset: &mut u16) {
 
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(1), Constraint::Length(4), Constraint::Min(1)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(4),
+            Constraint::Min(1),
+        ])
         .split(body_area);
     let col_width = cols[0].width as usize;
 
-    let section_lines: Vec<Vec<Line>> =
-        HELP_SECTIONS.iter().map(|&(title, rows)| help_section_lines(title, rows, col_width)).collect();
+    let section_lines: Vec<Vec<Line>> = HELP_SECTIONS
+        .iter()
+        .map(|&(title, rows)| help_section_lines(title, rows, col_width))
+        .collect();
     let section_heights: Vec<usize> = section_lines.iter().map(Vec::len).collect();
     let split = help_column_split(&section_heights);
 

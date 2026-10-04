@@ -1,9 +1,9 @@
 //! Album art fetching: for the track that just started, and a prefetch of
 //! the one queued after it.
 
-use crate::{api, http};
 use crate::lyrics::pipeline::{self, TrackMeta};
 use crate::lyrics::spicy::SpicyClient;
+use crate::{api, http};
 use image::DynamicImage;
 use librespot_connect::Spirc;
 use rspotify::AuthCodeSpotify;
@@ -29,7 +29,9 @@ pub async fn prefetch_next_track(
     spicy: Option<SpicyClient>,
     cover_tx: Sender<(String, DynamicImage)>,
 ) {
-    let Ok(Some(next_uri)) = spirc.peek_next_track().await else { return };
+    let Ok(Some(next_uri)) = spirc.peek_next_track().await else {
+        return;
+    };
     let Some(client) = client else { return };
     let meta = match api::track::get_next_track_meta(&client, &next_uri).await {
         Ok(meta) => meta,

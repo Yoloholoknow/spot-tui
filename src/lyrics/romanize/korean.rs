@@ -13,14 +13,14 @@ const T_COUNT: u32 = 28;
 const VOWEL_I: usize = 20;
 
 const ONSETS: [char; 19] = [
-    '\u{3131}', '\u{3132}', '\u{3134}', '\u{3137}', '\u{3138}', '\u{3139}', '\u{3141}', '\u{3142}', '\u{3143}',
-    '\u{3145}', '\u{3146}', '\u{3147}', '\u{3148}', '\u{3149}', '\u{314A}', '\u{314B}', '\u{314C}', '\u{314D}',
-    '\u{314E}',
+    '\u{3131}', '\u{3132}', '\u{3134}', '\u{3137}', '\u{3138}', '\u{3139}', '\u{3141}', '\u{3142}',
+    '\u{3143}', '\u{3145}', '\u{3146}', '\u{3147}', '\u{3148}', '\u{3149}', '\u{314A}', '\u{314B}',
+    '\u{314C}', '\u{314D}', '\u{314E}',
 ];
 
 const VOWELS: [&str; 21] = [
-    "a", "ae", "ya", "yae", "eo", "e", "yeo", "ye", "o", "wa", "wae", "oe", "yo", "u", "wo", "we", "wi", "yu", "eu",
-    "ui", "i",
+    "a", "ae", "ya", "yae", "eo", "e", "yeo", "ye", "o", "wa", "wae", "oe", "yo", "u", "wo", "we",
+    "wi", "yu", "eu", "ui", "i",
 ];
 
 /// Final consonants by index (0 = none), as their jamo.
@@ -134,7 +134,8 @@ fn sounded_final(coda: &[char]) -> Option<char> {
     };
     Some(match simplified {
         '\u{3131}' | '\u{3132}' | '\u{314B}' => G,
-        '\u{3137}' | '\u{3145}' | '\u{3146}' | '\u{3148}' | '\u{314A}' | '\u{314C}' | '\u{314E}' => D,
+        '\u{3137}' | '\u{3145}' | '\u{3146}' | '\u{3148}' | '\u{314A}' | '\u{314C}'
+        | '\u{314E}' => D,
         '\u{3142}' | '\u{314D}' => B,
         other => other,
     })
@@ -214,7 +215,11 @@ fn join(cur: &mut Syl, next: &mut Syl) {
 fn render(syls: &[Syl], out: &mut String) {
     let mut previous_final_l = false;
     for syl in syls {
-        let onset = if syl.onset == R && previous_final_l { "l" } else { onset_text(syl.onset) };
+        let onset = if syl.onset == R && previous_final_l {
+            "l"
+        } else {
+            onset_text(syl.onset)
+        };
         out.push_str(onset);
         out.push_str(VOWELS[syl.vowel]);
         let sound = sounded_final(&syl.coda);

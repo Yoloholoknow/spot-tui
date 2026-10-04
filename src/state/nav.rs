@@ -41,7 +41,9 @@ impl Nav {
     }
 
     pub fn top(&self) -> &Screen {
-        self.stack.last().expect("stack is never empty -- NowPlaying is the permanent root")
+        self.stack
+            .last()
+            .expect("stack is never empty -- NowPlaying is the permanent root")
     }
 
     pub fn depth(&self) -> usize {
@@ -120,13 +122,17 @@ pub enum SidebarRow<'a> {
 /// The menu entries followed by the user's playlists, pinned first. Used by
 /// both rendering and key handling, so they agree on what row N is.
 pub fn sidebar_rows(app: &AppState) -> Vec<SidebarRow<'_>> {
-    let mut rows: Vec<SidebarRow> =
-        SIDEBAR_ENTRIES.iter().map(|(label, screen)| SidebarRow::Menu(label, *screen)).collect();
+    let mut rows: Vec<SidebarRow> = SIDEBAR_ENTRIES
+        .iter()
+        .map(|(label, screen)| SidebarRow::Menu(label, *screen))
+        .collect();
     if let Fetch::Ready(items) = &app.library.playlists {
         let label = |p: &crate::api::library::PlaylistSummary| p.name.clone();
-        let ordered = pinned_first(filtered_sorted(items, &ListFilter::default(), &label), &app.pinned_playlists, |p| {
-            p.uri.as_str()
-        });
+        let ordered = pinned_first(
+            filtered_sorted(items, &ListFilter::default(), &label),
+            &app.pinned_playlists,
+            |p| p.uri.as_str(),
+        );
         rows.extend(ordered.into_iter().map(|(_, p)| SidebarRow::Playlist(p)));
     }
     rows
@@ -258,4 +264,3 @@ mod nav_tests {
         assert_eq!(nav.focus, Focus::Sidebar);
     }
 }
-

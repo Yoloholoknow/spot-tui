@@ -55,10 +55,16 @@ fn token_cache_path() -> std::path::PathBuf {
 }
 
 fn is_expired(token: &Token) -> bool {
-    token.expires_at.map(|exp| exp <= Utc::now()).unwrap_or(true)
+    token
+        .expires_at
+        .map(|exp| exp <= Utc::now())
+        .unwrap_or(true)
 }
 
-fn oauth_token_to_rspotify(fresh: librespot_oauth::OAuthToken, prior_refresh: Option<&str>) -> Token {
+fn oauth_token_to_rspotify(
+    fresh: librespot_oauth::OAuthToken,
+    prior_refresh: Option<&str>,
+) -> Token {
     let remaining = fresh
         .expires_at
         .saturating_duration_since(std::time::Instant::now());
@@ -88,7 +94,9 @@ fn refresh_blocking(refresh_token: &str) -> Result<Token, String> {
     let client = OAuthClientBuilder::new(CLIENT_ID, REDIRECT_URI, SCOPES.to_vec())
         .build()
         .map_err(|e| e.to_string())?;
-    let fresh = client.refresh_token(refresh_token).map_err(|e| e.to_string())?;
+    let fresh = client
+        .refresh_token(refresh_token)
+        .map_err(|e| e.to_string())?;
     Ok(oauth_token_to_rspotify(fresh, Some(refresh_token)))
 }
 
@@ -121,21 +129,22 @@ pub async fn load_or_refresh_token() -> Result<Token, String> {
     let path = token_cache_path();
 
     if let Ok(raw) = std::fs::read_to_string(&path)
-        && let Ok(cached) = serde_json::from_str::<Token>(&raw) {
-            if !is_expired(&cached) {
-                return Ok(cached);
-            }
-            if let Some(refresh_token) = cached.refresh_token.clone() {
-                let refreshed = tokio::task::spawn_blocking(move || refresh_blocking(&refresh_token))
-                    .await
-                    .map_err(|e| e.to_string())?;
-                if let Ok(fresh) = refreshed {
-                    write_token_cache(&fresh);
-                    return Ok(fresh);
-                }
-                log::warn!("cached refresh_token no longer works, falling back to interactive login");
-            }
+        && let Ok(cached) = serde_json::from_str::<Token>(&raw)
+    {
+        if !is_expired(&cached) {
+            return Ok(cached);
         }
+        if let Some(refresh_token) = cached.refresh_token.clone() {
+            let refreshed = tokio::task::spawn_blocking(move || refresh_blocking(&refresh_token))
+                .await
+                .map_err(|e| e.to_string())?;
+            if let Ok(fresh) = refreshed {
+                write_token_cache(&fresh);
+                return Ok(fresh);
+            }
+            log::warn!("cached refresh_token no longer works, falling back to interactive login");
+        }
+    }
 
     let fresh = tokio::task::spawn_blocking(login_blocking)
         .await
@@ -166,7 +175,10 @@ pub async fn client_from_token(token: Token) -> AuthCodeSpotify {
 async fn ensure_fresh(client: &AuthCodeSpotify) -> Result<(), String> {
     let (needs_refresh, refresh_token) = {
         let token_arc = client.get_token();
-        let guard = token_arc.lock().await.map_err(|_| "lock error".to_string())?;
+        let guard = token_arc
+            .lock()
+            .await
+            .map_err(|_| "lock error".to_string())?;
         let token = guard.as_ref().ok_or("client has no token at all")?;
         let expiring_soon = token
             .expires_at
@@ -187,7 +199,10 @@ async fn ensure_fresh(client: &AuthCodeSpotify) -> Result<(), String> {
     write_token_cache(&fresh);
 
     let token_arc = client.get_token();
-    let mut guard = token_arc.lock().await.map_err(|_| "lock error".to_string())?;
+    let mut guard = token_arc
+        .lock()
+        .await
+        .map_err(|_| "lock error".to_string())?;
     *guard = Some(fresh);
     Ok(())
 }
@@ -201,7 +216,10 @@ pub async fn describe_client_error(err: rspotify::ClientError) -> String {
         rspotify::ClientError::Http(http_err) => match *http_err {
             rspotify::http::HttpError::StatusCode(response) => {
                 let status = response.status();
-                let body = response.text().await.unwrap_or_else(|e| format!("<failed to read body: {e}>"));
+                let body = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|e| format!("<failed to read body: {e}>"));
                 format!("HTTP {status}: {body}")
             }
             other => other.to_string(),

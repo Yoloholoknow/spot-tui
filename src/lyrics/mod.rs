@@ -6,8 +6,8 @@ mod cache;
 mod lrc;
 mod lrclib;
 pub mod pipeline;
-pub mod romanizer;
 pub mod romanize;
+pub mod romanizer;
 pub mod spicy;
 mod spotify;
 pub mod ytmusic;
@@ -17,7 +17,6 @@ pub use lrclib::LyricsClient;
 pub use spotify::spotify_lyrics;
 
 use std::time::Duration;
-
 
 /// One timed piece of a lyric line -- a word, or a syllable of one -- for
 /// word-by-word highlighting. `text` carries its own trailing space, so a
@@ -57,7 +56,9 @@ pub enum CachedLyrics {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credit: Option<String>,
     },
-    Plain { text: String },
+    Plain {
+        text: String,
+    },
     Instrumental,
     NotFound,
 }
@@ -78,9 +79,21 @@ mod current_line_tests {
 
     fn lines() -> Vec<LyricLine> {
         vec![
-            LyricLine { timestamp: Duration::from_secs(10), text: "a".into(), words: Vec::new() },
-            LyricLine { timestamp: Duration::from_secs(20), text: "b".into(), words: Vec::new() },
-            LyricLine { timestamp: Duration::from_secs(30), text: "c".into(), words: Vec::new() },
+            LyricLine {
+                timestamp: Duration::from_secs(10),
+                text: "a".into(),
+                words: Vec::new(),
+            },
+            LyricLine {
+                timestamp: Duration::from_secs(20),
+                text: "b".into(),
+                words: Vec::new(),
+            },
+            LyricLine {
+                timestamp: Duration::from_secs(30),
+                text: "c".into(),
+                words: Vec::new(),
+            },
         ]
     }
 
@@ -91,17 +104,26 @@ mod current_line_tests {
 
     #[test]
     fn exactly_on_a_timestamp_selects_that_line() {
-        assert_eq!(current_line_index(&lines(), Duration::from_secs(20)), Some(1));
+        assert_eq!(
+            current_line_index(&lines(), Duration::from_secs(20)),
+            Some(1)
+        );
     }
 
     #[test]
     fn between_timestamps_selects_the_earlier_line() {
-        assert_eq!(current_line_index(&lines(), Duration::from_secs(25)), Some(1));
+        assert_eq!(
+            current_line_index(&lines(), Duration::from_secs(25)),
+            Some(1)
+        );
     }
 
     #[test]
     fn after_last_line_selects_the_last_line() {
-        assert_eq!(current_line_index(&lines(), Duration::from_secs(999)), Some(2));
+        assert_eq!(
+            current_line_index(&lines(), Duration::from_secs(999)),
+            Some(2)
+        );
     }
 
     #[test]
@@ -109,4 +131,3 @@ mod current_line_tests {
         assert_eq!(current_line_index(&[], Duration::from_secs(5)), None);
     }
 }
-

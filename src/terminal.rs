@@ -2,8 +2,10 @@
 //! zoom, and detecting which graphics protocol album art can use.
 
 use crossterm::event::{DisableFocusChange, EnableFocusChange};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
-use crossterm::{execute, ExecutableCommand};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
+use crossterm::{ExecutableCommand, execute};
 use ratatui_image::picker::{Picker, ProtocolType};
 use std::io::stdout;
 
@@ -41,7 +43,9 @@ pub fn install_panic_hook() {
 /// No-op outside tmux.
 pub fn tmux_toggle_zoom() {
     if std::env::var("TMUX").is_ok() {
-        let _ = std::process::Command::new("tmux").args(["resize-pane", "-Z"]).status();
+        let _ = std::process::Command::new("tmux")
+            .args(["resize-pane", "-Z"])
+            .status();
     }
 }
 
@@ -57,10 +61,13 @@ fn is_ghostty() -> bool {
         return true;
     }
     if std::env::var("TMUX").is_ok()
-        && let Ok(output) =
-            std::process::Command::new("tmux").args(["display-message", "-p", "#{client_termtype}"]).output()
+        && let Ok(output) = std::process::Command::new("tmux")
+            .args(["display-message", "-p", "#{client_termtype}"])
+            .output()
     {
-        return String::from_utf8_lossy(&output.stdout).to_lowercase().contains("ghostty");
+        return String::from_utf8_lossy(&output.stdout)
+            .to_lowercase()
+            .contains("ghostty");
     }
     false
 }

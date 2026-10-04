@@ -14,7 +14,8 @@ pub(super) fn render_library_home(frame: &mut Frame, app: &AppState, area: Rect)
         .enumerate()
         .map(|(i, (label, _))| {
             if i == app.library.home_selected {
-                ListItem::new(*label).style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
+                ListItem::new(*label)
+                    .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
             } else {
                 ListItem::new(*label)
             }
@@ -27,7 +28,12 @@ pub(super) fn render_library_home(frame: &mut Frame, app: &AppState, area: Rect)
 /// Not the shared `render_list_screen`: pinned tracks (a local-only feature, see
 /// `pins.rs`) bubble to the top and get a marker glyph, which the generic renderer
 /// has no notion of.
-pub(super) fn render_playlist_detail(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
+pub(super) fn render_playlist_detail(
+    frame: &mut Frame,
+    app: &AppState,
+    list_state: &mut ListState,
+    area: Rect,
+) {
     let Some(pd) = &app.playlist_detail else {
         frame.render_widget(Paragraph::new("no playlist selected"), area);
         return;
@@ -42,9 +48,15 @@ pub(super) fn render_playlist_detail(frame: &mut Frame, app: &AppState, list_sta
         // no wrap.
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(pd.playlist.name.clone(), Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    pd.playlist.name.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
                 Span::raw("  "),
-                Span::styled("MOVE MODE", Style::default().fg(WARN).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "MOVE MODE",
+                    Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+                ),
             ])),
             chunks[0],
         );
@@ -71,8 +83,15 @@ pub(super) fn render_playlist_detail(frame: &mut Frame, app: &AppState, list_sta
                 // real index into `natural` here, so the moving track's URI is looked up once.
                 let moving_uri = natural.get(pd.selected).map(|(_, t)| t.uri.as_str());
                 let move_line = |t: &TrackResult| {
-                    let marker = if Some(t.uri.as_str()) == moving_uri { "\u{2192} " } else { "  " };
-                    Line::from(vec![Span::styled(marker, Style::default().fg(WARN)), Span::raw(label(t))])
+                    let marker = if Some(t.uri.as_str()) == moving_uri {
+                        "\u{2192} "
+                    } else {
+                        "  "
+                    };
+                    Line::from(vec![
+                        Span::styled(marker, Style::default().fg(WARN)),
+                        Span::raw(label(t)),
+                    ])
                 };
                 render_display_list_lines(
                     frame,
@@ -86,7 +105,11 @@ pub(super) fn render_playlist_detail(frame: &mut Frame, app: &AppState, list_sta
             } else {
                 let display = pinned_first(natural, &app.pinned_tracks, |t| t.uri.as_str());
                 let pin_label = |t: &TrackResult| {
-                    let marker = if app.pinned_tracks.contains(&t.uri) { "* " } else { "  " };
+                    let marker = if app.pinned_tracks.contains(&t.uri) {
+                        "* "
+                    } else {
+                        "  "
+                    };
                     format!("{marker}{}", label(t))
                 };
                 render_display_list(
@@ -105,7 +128,12 @@ pub(super) fn render_playlist_detail(frame: &mut Frame, app: &AppState, list_sta
 
 /// Your Playlists' own renderer: pinned playlists (local-only, since the Web API
 /// exposes no pinning) bubble to the top and get a marker glyph.
-pub(super) fn render_your_playlists(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
+pub(super) fn render_your_playlists(
+    frame: &mut Frame,
+    app: &AppState,
+    list_state: &mut ListState,
+    area: Rect,
+) {
     let label =
         |p: &crate::api::library::PlaylistSummary| format!("{} ({} tracks)", p.name, p.track_count);
     let chunks = Layout::default()
@@ -113,8 +141,11 @@ pub(super) fn render_your_playlists(frame: &mut Frame, app: &AppState, list_stat
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
     frame.render_widget(
-        Paragraph::new(filter_header("Your Playlists", &app.library.playlists_filter))
-            .style(Style::default().add_modifier(Modifier::BOLD)),
+        Paragraph::new(filter_header(
+            "Your Playlists",
+            &app.library.playlists_filter,
+        ))
+        .style(Style::default().add_modifier(Modifier::BOLD)),
         chunks[0],
     );
     match &app.library.playlists {
@@ -131,7 +162,11 @@ pub(super) fn render_your_playlists(frame: &mut Frame, app: &AppState, list_stat
                 |p| p.uri.as_str(),
             );
             let pin_label = |p: &crate::api::library::PlaylistSummary| {
-                let marker = if app.pinned_playlists.contains(&p.uri) { "* " } else { "  " };
+                let marker = if app.pinned_playlists.contains(&p.uri) {
+                    "* "
+                } else {
+                    "  "
+                };
                 format!("{marker}{}", label(p))
             };
             render_display_list(
@@ -150,10 +185,20 @@ pub(super) fn render_your_playlists(frame: &mut Frame, app: &AppState, list_stat
 /// The Connect queue: a "currently playing" caption above the list of what is
 /// up next. A pure view: the Web API has no remove or reorder endpoint for the
 /// queue (see `api::queue`).
-pub(super) fn render_queue(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
-    let chunks =
-        Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(1)]).split(area);
-    frame.render_widget(Paragraph::new(screen_header_line("Queue", Some("auto-refreshing"))), chunks[0]);
+pub(super) fn render_queue(
+    frame: &mut Frame,
+    app: &AppState,
+    list_state: &mut ListState,
+    area: Rect,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new(screen_header_line("Queue", Some("auto-refreshing"))),
+        chunks[0],
+    );
     match &app.queue.fetch {
         // Full-height body, not squeezed into a 1-row caption slot --
         // `render_fetch_error`'s bordered box needs real rows to draw a
@@ -183,20 +228,36 @@ pub(super) fn render_queue(frame: &mut Frame, app: &AppState, list_state: &mut L
             }
             let label = |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title);
             let display: Vec<(usize, &TrackResult)> = summary.queue.iter().enumerate().collect();
-            render_display_list(frame, body[1], &display, app.queue.selected, &label, true, list_state);
+            render_display_list(
+                frame,
+                body[1],
+                &display,
+                app.queue.selected,
+                &label,
+                true,
+                list_state,
+            );
         }
     }
 }
 
 /// Connect devices: a plain list with the active one marked. `Shift+R`
 /// refetches; unlike the queue this does not poll (see `DevicesState`).
-pub(super) fn render_devices(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
+pub(super) fn render_devices(
+    frame: &mut Frame,
+    app: &AppState,
+    list_state: &mut ListState,
+    area: Rect,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
     frame.render_widget(
-        Paragraph::new(screen_header_line("Devices", Some("Enter transfer playback, Shift+R refresh"))),
+        Paragraph::new(screen_header_line(
+            "Devices",
+            Some("Enter transfer playback, Shift+R refresh"),
+        )),
         chunks[0],
     );
     match &app.devices.fetch {
@@ -220,14 +281,26 @@ pub(super) fn render_devices(frame: &mut Frame, app: &AppState, list_state: &mut
             // `render_display_list_lines` rather than the plain-string variant.
             let line = |d: &crate::api::devices::DeviceSummary| {
                 let marker = if d.is_active { "\u{25cf} " } else { "  " };
-                let volume = d.volume_percent.map(|v| format!(", {v}%")).unwrap_or_default();
+                let volume = d
+                    .volume_percent
+                    .map(|v| format!(", {v}%"))
+                    .unwrap_or_default();
                 Line::from(vec![
                     Span::styled(marker, Style::default().fg(ACCENT)),
                     Span::raw(format!("{} ({}{volume})", d.name, d.kind)),
                 ])
             };
-            let display: Vec<(usize, &crate::api::devices::DeviceSummary)> = items.iter().enumerate().collect();
-            render_display_list_lines(frame, chunks[1], &display, app.devices.selected, &line, true, list_state);
+            let display: Vec<(usize, &crate::api::devices::DeviceSummary)> =
+                items.iter().enumerate().collect();
+            render_display_list_lines(
+                frame,
+                chunks[1],
+                &display,
+                app.devices.selected,
+                &line,
+                true,
+                list_state,
+            );
         }
     }
 }
@@ -249,15 +322,23 @@ pub(super) fn render_detail_screen<D, T>(
     empty_headline: &str,
     empty_hint: Option<&str>,
 ) {
-    let chunks =
-        Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(1)]).split(area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
     match detail {
         Fetch::NotStarted | Fetch::Loading => {
-            frame.render_widget(Paragraph::new(screen_header_line(fallback_title, None)), chunks[0]);
+            frame.render_widget(
+                Paragraph::new(screen_header_line(fallback_title, None)),
+                chunks[0],
+            );
             render_loading(frame, chunks[1]);
         }
         Fetch::Failed(e) => {
-            frame.render_widget(Paragraph::new(screen_header_line(fallback_title, None)), chunks[0]);
+            frame.render_widget(
+                Paragraph::new(screen_header_line(fallback_title, None)),
+                chunks[0],
+            );
             render_fetch_error(frame, chunks[1], e);
         }
         Fetch::Ready(d) => {
@@ -268,14 +349,21 @@ pub(super) fn render_detail_screen<D, T>(
                 return;
             }
             let display: Vec<(usize, &T)> = child_items.iter().enumerate().collect();
-            render_display_list(frame, chunks[1], &display, selected, &label, true, list_state);
+            render_display_list(
+                frame, chunks[1], &display, selected, &label, true, list_state,
+            );
         }
     }
 }
 
 /// Artist Detail: name and genres in the header, albums below. No top-tracks
 /// section, since Spotify removed that endpoint (see `api::artist`).
-pub(super) fn render_artist_detail(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
+pub(super) fn render_artist_detail(
+    frame: &mut Frame,
+    app: &AppState,
+    list_state: &mut ListState,
+    area: Rect,
+) {
     let Some(state) = &app.artist_detail else {
         frame.render_widget(Paragraph::new("no artist selected"), area);
         return;
@@ -300,7 +388,12 @@ pub(super) fn render_artist_detail(frame: &mut Frame, app: &AppState, list_state
 
 /// Album Detail: name and artist in the header, tracks below. `Enter` plays the
 /// album as context from the selected track, as in Playlist Detail.
-pub(super) fn render_album_detail(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
+pub(super) fn render_album_detail(
+    frame: &mut Frame,
+    app: &AppState,
+    list_state: &mut ListState,
+    area: Rect,
+) {
     let Some(state) = &app.album_detail else {
         frame.render_widget(Paragraph::new("no album selected"), area);
         return;
@@ -314,7 +407,11 @@ pub(super) fn render_album_detail(frame: &mut Frame, app: &AppState, list_state:
         "Album",
         |album: &crate::api::album::AlbumDetail| {
             // Single-space em dash, matching every other track label.
-            let meta = format!("\u{2014} {} \u{00b7} {} tracks \u{00b7} v view artist", album.artist, album.tracks.len());
+            let meta = format!(
+                "\u{2014} {} \u{00b7} {} tracks \u{00b7} v view artist",
+                album.artist,
+                album.tracks.len()
+            );
             screen_header_line(&album.name, Some(&meta))
         },
         |album: &crate::api::album::AlbumDetail| album.tracks.as_slice(),
@@ -342,13 +439,19 @@ pub(super) fn render_list_screen<T>(
     list_state: &mut ListState,
     label: impl Fn(&T) -> String,
 ) {
-    let ListView { title, fetch, filter, selected } = view;
+    let ListView {
+        title,
+        fetch,
+        filter,
+        selected,
+    } = view;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
     frame.render_widget(
-        Paragraph::new(filter_header(title, filter)).style(Style::default().add_modifier(Modifier::BOLD)),
+        Paragraph::new(filter_header(title, filter))
+            .style(Style::default().add_modifier(Modifier::BOLD)),
         chunks[0],
     );
     match fetch {
@@ -376,7 +479,11 @@ pub(super) fn render_list_screen<T>(
 /// Renders `query` with a block cursor at char index `cursor`: the app's one
 /// text-input convention, used by every filter box, Search and the overlays.
 pub(super) fn cursor_text(query: &str, cursor: usize) -> String {
-    let byte_pos = query.char_indices().nth(cursor).map(|(b, _)| b).unwrap_or(query.len());
+    let byte_pos = query
+        .char_indices()
+        .nth(cursor)
+        .map(|(b, _)| b)
+        .unwrap_or(query.len());
     let (before, after) = query.split_at(byte_pos);
     format!("{before}\u{2588}{after}")
 }
@@ -384,7 +491,10 @@ pub(super) fn cursor_text(query: &str, cursor: usize) -> String {
 /// The screen-header row: bold title with an optional secondary fact beside it in
 /// `DIM`, instead of cramming key hints into the title.
 pub(super) fn screen_header_line(title: &str, meta: Option<&str>) -> Line<'static> {
-    let mut spans = vec![Span::styled(title.to_string(), Style::default().add_modifier(Modifier::BOLD))];
+    let mut spans = vec![Span::styled(
+        title.to_string(),
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
     if let Some(meta) = meta {
         spans.push(Span::styled(format!("  {meta}"), Style::default().fg(DIM)));
     }
@@ -427,7 +537,11 @@ pub(super) fn render_display_list_lines<T>(
     list_state: &mut ListState,
 ) {
     if display.is_empty() {
-        let msg = if filter_empty { "nothing here yet" } else { "no matches" };
+        let msg = if filter_empty {
+            "nothing here yet"
+        } else {
+            "no matches"
+        };
         render_empty_state(frame, area, msg, None);
         return;
     }
@@ -458,10 +572,23 @@ pub(super) fn render_display_list<T>(
     filter_empty: bool,
     list_state: &mut ListState,
 ) {
-    render_display_list_lines(frame, area, display, selected, &|it: &T| Line::from(label(it)), filter_empty, list_state);
+    render_display_list_lines(
+        frame,
+        area,
+        display,
+        selected,
+        &|it: &T| Line::from(label(it)),
+        filter_empty,
+        list_state,
+    );
 }
 
-pub(super) fn render_sidebar(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
+pub(super) fn render_sidebar(
+    frame: &mut Frame,
+    app: &AppState,
+    list_state: &mut ListState,
+    area: Rect,
+) {
     let rows = sidebar_rows(app);
     let mut items: Vec<ListItem> = Vec::with_capacity(rows.len() + 1);
     let mut saw_playlists_header = false;
@@ -476,9 +603,16 @@ pub(super) fn render_sidebar(frame: &mut Frame, app: &AppState, list_state: &mut
         let (text, is_open) = match row {
             SidebarRow::Menu(label, screen) => (label.to_string(), app.nav.top() == screen),
             SidebarRow::Playlist(p) => {
-                let marker = if app.pinned_playlists.contains(&p.uri) { "* " } else { "  " };
+                let marker = if app.pinned_playlists.contains(&p.uri) {
+                    "* "
+                } else {
+                    "  "
+                };
                 let is_open = *app.nav.top() == Screen::PlaylistDetail
-                    && app.playlist_detail.as_ref().is_some_and(|pd| pd.playlist.uri == p.uri);
+                    && app
+                        .playlist_detail
+                        .as_ref()
+                        .is_some_and(|pd| pd.playlist.uri == p.uri);
                 (format!("{marker}{}", p.name), is_open)
             }
         };
@@ -495,7 +629,11 @@ pub(super) fn render_sidebar(frame: &mut Frame, app: &AppState, list_state: &mut
     // The "PLAYLISTS" header takes one visual row that `sidebar_sel` (an index into
     // logical rows, no header) does not count, so shift the on-screen selection down
     // by one once the cursor is on a playlist.
-    let header_offset = if saw_playlists_header && app.sidebar_sel >= SIDEBAR_ENTRIES.len() { 1 } else { 0 };
+    let header_offset = if saw_playlists_header && app.sidebar_sel >= SIDEBAR_ENTRIES.len() {
+        1
+    } else {
+        0
+    };
     list_state.select(Some(app.sidebar_sel + header_offset));
     frame.render_stateful_widget(
         List::new(items).block(
@@ -508,7 +646,12 @@ pub(super) fn render_sidebar(frame: &mut Frame, app: &AppState, list_state: &mut
     );
 }
 
-pub(super) fn render_search(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
+pub(super) fn render_search(
+    frame: &mut Frame,
+    app: &AppState,
+    list_state: &mut ListState,
+    area: Rect,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(1)])
@@ -585,6 +728,9 @@ mod cursor_text_tests {
         // Same real fixture the SearchState cursor tests already use --
         // chars are 0:友 1:人 2:A 3:君, so cursor=2 sits immediately
         // before 'A', not mid-codepoint.
-        assert_eq!(cursor_text("\u{53cb}\u{4eba}A\u{541b}", 2), "\u{53cb}\u{4eba}\u{2588}A\u{541b}");
+        assert_eq!(
+            cursor_text("\u{53cb}\u{4eba}A\u{541b}", 2),
+            "\u{53cb}\u{4eba}\u{2588}A\u{541b}"
+        );
     }
 }

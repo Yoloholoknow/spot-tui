@@ -209,7 +209,11 @@ mod shuffle_mode_tests {
     fn status_labels_name_the_mode() {
         assert_eq!(ShuffleMode::Off.status_label(), "shuffle off");
         assert_eq!(ShuffleMode::On.status_label(), "shuffle on");
-        assert!(ShuffleMode::Smart.status_label().starts_with("smart shuffle on"));
+        assert!(
+            ShuffleMode::Smart
+                .status_label()
+                .starts_with("smart shuffle on")
+        );
     }
 }
 
@@ -261,7 +265,10 @@ mod playback_modes_tests {
         // once -- otherwise the track title's truncation point would jump
         // every time shuffle or repeat changed.
         let width = |shuffle, smart, repeat| {
-            playback_modes(shuffle, smart, repeat).iter().map(|(text, _)| text.chars().count()).sum::<usize>()
+            playback_modes(shuffle, smart, repeat)
+                .iter()
+                .map(|(text, _)| text.chars().count())
+                .sum::<usize>()
         };
         let expected = width(false, false, RepeatMode::Off);
         for shuffle in [false, true] {
@@ -277,7 +284,6 @@ mod playback_modes_tests {
         }
     }
 }
-
 
 impl From<CachedLyrics> for LyricsState {
     fn from(cached: CachedLyrics) -> Self {
@@ -310,7 +316,11 @@ mod lyric_words_tests {
     use crate::lyrics::WordSeg;
 
     fn seg(text: &str, start: f64, end: f64) -> WordSeg {
-        WordSeg { text: text.to_string(), start, end }
+        WordSeg {
+            text: text.to_string(),
+            start,
+            end,
+        }
     }
 
     fn lines_of(state: LyricsState) -> Vec<LyricLine> {
@@ -336,11 +346,17 @@ mod lyric_words_tests {
     fn each_line_gets_its_own_words() {
         let state = LyricsState::from(CachedLyrics::Synced {
             lines: vec![(1.0, "hi there".to_string()), (5.0, "bye".to_string())],
-            words: vec![vec![seg("hi ", 1.0, 1.4), seg("there", 1.4, 2.0)], vec![seg("bye", 5.0, 5.5)]],
+            words: vec![
+                vec![seg("hi ", 1.0, 1.4), seg("there", 1.4, 2.0)],
+                vec![seg("bye", 5.0, 5.5)],
+            ],
             credit: None,
         });
         let lines = lines_of(state);
-        assert_eq!(lines[0].words, vec![seg("hi ", 1.0, 1.4), seg("there", 1.4, 2.0)]);
+        assert_eq!(
+            lines[0].words,
+            vec![seg("hi ", 1.0, 1.4), seg("there", 1.4, 2.0)]
+        );
         assert_eq!(lines[1].words, vec![seg("bye", 5.0, 5.5)]);
     }
 
@@ -367,4 +383,3 @@ mod lyric_words_tests {
         assert!(lines[1].words.is_empty());
     }
 }
-

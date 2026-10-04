@@ -161,7 +161,10 @@ mod tests {
         tracker.on_event(&playing(TRACK_A, 1000), t0);
 
         assert_eq!(tracker.progress_ms(t0), 1000);
-        assert_eq!(tracker.progress_ms(t0 + std::time::Duration::from_millis(500)), 1500);
+        assert_eq!(
+            tracker.progress_ms(t0 + std::time::Duration::from_millis(500)),
+            1500
+        );
     }
 
     #[test]

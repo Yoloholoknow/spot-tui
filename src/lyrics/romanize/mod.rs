@@ -30,7 +30,8 @@ fn is_han(c: char) -> bool {
 /// Whether `text` has any Japanese, Chinese or Korean *letters* (punctuation
 /// alone doesn't count).
 pub fn has_cjk(text: &str) -> bool {
-    text.chars().any(|c| is_kana(c) || is_hangul(c) || is_han(c))
+    text.chars()
+        .any(|c| is_kana(c) || is_hangul(c) || is_han(c))
 }
 
 pub fn han_language<S: AsRef<str>>(lines: &[S]) -> HanLanguage {
@@ -49,7 +50,11 @@ pub fn romanize_line(text: &str, han: HanLanguage) -> Option<String> {
     if !has_cjk(text) {
         return None;
     }
-    let mut result = if text.chars().any(is_hangul) { korean::romanize(text) } else { text.to_string() };
+    let mut result = if text.chars().any(is_hangul) {
+        korean::romanize(text)
+    } else {
+        text.to_string()
+    };
     if result.chars().any(|c| is_kana(c) || is_han(c)) {
         result = match han {
             HanLanguage::Japanese => japanese::romanize(&result),
@@ -67,7 +72,12 @@ use crate::lyrics::WordSeg;
 pub fn segment_weights(words: &[WordSeg], han: HanLanguage) -> Vec<usize> {
     words
         .iter()
-        .map(|word| romanize_line(&word.text, han).unwrap_or_else(|| word.text.clone()).chars().count())
+        .map(|word| {
+            romanize_line(&word.text, han)
+                .unwrap_or_else(|| word.text.clone())
+                .chars()
+                .count()
+        })
         .collect()
 }
 
@@ -95,9 +105,17 @@ pub fn remap_words(romanized: &str, words: &[WordSeg], weights: &[usize]) -> Vec
     let (mut cumulative, mut previous) = (0usize, 0usize);
     for (i, word) in words.iter().enumerate() {
         cumulative += if even { 1 } else { weight(i) };
-        let boundary = if i + 1 == words.len() { total } else { ((total * cumulative + sum / 2) / sum).min(total) };
+        let boundary = if i + 1 == words.len() {
+            total
+        } else {
+            ((total * cumulative + sum / 2) / sum).min(total)
+        };
         if boundary > previous {
-            out.push(WordSeg { text: chars[previous..boundary].iter().collect(), start: word.start, end: word.end });
+            out.push(WordSeg {
+                text: chars[previous..boundary].iter().collect(),
+                start: word.start,
+                end: word.end,
+            });
             previous = boundary;
         }
     }
@@ -147,7 +165,12 @@ pub fn romanize_plain_lines(text: &str) -> Vec<Option<RomanLine>> {
     let han = han_language(&lines);
     lines
         .iter()
-        .map(|line| romanize_line(line, han).map(|text| RomanLine { text, words: Vec::new() }))
+        .map(|line| {
+            romanize_line(line, han).map(|text| RomanLine {
+                text,
+                words: Vec::new(),
+            })
+        })
         .collect()
 }
 
@@ -157,13 +180,26 @@ mod tests {
 
     #[test]
     fn any_kana_makes_a_sheets_han_characters_japanese() {
-        assert_eq!(han_language(&["Stay", "\u{3055}\u{3088}\u{306a}\u{3089}", "\u{904b}\u{547d}"]), HanLanguage::Japanese);
-        assert_eq!(han_language(&["\u{30b3}\u{30fc}\u{30d2}\u{30fc}"]), HanLanguage::Japanese);
+        assert_eq!(
+            han_language(&[
+                "Stay",
+                "\u{3055}\u{3088}\u{306a}\u{3089}",
+                "\u{904b}\u{547d}"
+            ]),
+            HanLanguage::Japanese
+        );
+        assert_eq!(
+            han_language(&["\u{30b3}\u{30fc}\u{30d2}\u{30fc}"]),
+            HanLanguage::Japanese
+        );
     }
 
     #[test]
     fn han_without_kana_is_chinese() {
-        assert_eq!(han_language(&["\u{6708}\u{4eae}\u{4ee3}\u{8868}\u{6211}\u{7684}\u{5fc3}"]), HanLanguage::Chinese);
+        assert_eq!(
+            han_language(&["\u{6708}\u{4eae}\u{4ee3}\u{8868}\u{6211}\u{7684}\u{5fc3}"]),
+            HanLanguage::Chinese
+        );
         assert_eq!(han_language::<&str>(&[]), HanLanguage::Chinese);
         assert_eq!(han_language(&["Hello"]), HanLanguage::Chinese);
     }
@@ -181,28 +217,52 @@ mod tests {
 
     #[test]
     fn a_line_with_no_cjk_is_left_native() {
-        assert_eq!(romanize_line("Stay in the middle", HanLanguage::Japanese), None);
+        assert_eq!(
+            romanize_line("Stay in the middle", HanLanguage::Japanese),
+            None
+        );
         assert_eq!(romanize_line("", HanLanguage::Chinese), None);
     }
 
     #[test]
     fn each_language_goes_to_its_own_romanizer() {
-        assert_eq!(romanize_line("\u{c548}\u{b155}\u{d558}\u{c138}\u{c694}", HanLanguage::Chinese).as_deref(), Some("annyeonghaseyo"));
-        assert_eq!(romanize_line("\u{4f60}\u{597d}", HanLanguage::Chinese).as_deref(), Some("n\u{01d0} h\u{01ce}o"));
-        assert_eq!(romanize_line("\u{541b}\u{3068}", HanLanguage::Japanese).as_deref(), Some("kimi to"));
+        assert_eq!(
+            romanize_line(
+                "\u{c548}\u{b155}\u{d558}\u{c138}\u{c694}",
+                HanLanguage::Chinese
+            )
+            .as_deref(),
+            Some("annyeonghaseyo")
+        );
+        assert_eq!(
+            romanize_line("\u{4f60}\u{597d}", HanLanguage::Chinese).as_deref(),
+            Some("n\u{01d0} h\u{01ce}o")
+        );
+        assert_eq!(
+            romanize_line("\u{541b}\u{3068}", HanLanguage::Japanese).as_deref(),
+            Some("kimi to")
+        );
     }
 
     #[test]
     fn the_same_han_characters_read_differently_by_sheet_language() {
-        assert_eq!(romanize_line("\u{904b}\u{547d}", HanLanguage::Japanese).as_deref(), Some("unmei"));
-        assert_eq!(romanize_line("\u{904b}\u{547d}", HanLanguage::Chinese).as_deref(), Some("y\u{00f9}n m\u{00ec}ng"));
+        assert_eq!(
+            romanize_line("\u{904b}\u{547d}", HanLanguage::Japanese).as_deref(),
+            Some("unmei")
+        );
+        assert_eq!(
+            romanize_line("\u{904b}\u{547d}", HanLanguage::Chinese).as_deref(),
+            Some("y\u{00f9}n m\u{00ec}ng")
+        );
     }
 
     #[test]
     fn a_mixed_korean_and_english_line_keeps_the_english() {
-        assert_eq!(romanize_line("Stay \u{b108} with me", HanLanguage::Chinese).as_deref(), Some("Stay neo with me"));
+        assert_eq!(
+            romanize_line("Stay \u{b108} with me", HanLanguage::Chinese).as_deref(),
+            Some("Stay neo with me")
+        );
     }
-
 }
 
 #[cfg(test)]
@@ -211,7 +271,11 @@ mod remap_tests {
     use crate::lyrics::WordSeg;
 
     fn seg(text: &str, start: f64, end: f64) -> WordSeg {
-        WordSeg { text: text.to_string(), start, end }
+        WordSeg {
+            text: text.to_string(),
+            start,
+            end,
+        }
     }
 
     fn joined(words: &[WordSeg]) -> String {
@@ -230,7 +294,11 @@ mod remap_tests {
         let words = vec![seg("a", 0.0, 1.0), seg("b", 1.0, 2.0), seg("c", 2.0, 3.0)];
         for text in ["hitokoto", "x", "wakatta ne", "n\u{01d0} h\u{01ce}o ma"] {
             for weights in [[1, 1, 1], [5, 1, 1], [1, 9, 2], [0, 3, 0]] {
-                assert_eq!(joined(&remap_words(text, &words, &weights)), text, "{text} {weights:?}");
+                assert_eq!(
+                    joined(&remap_words(text, &words, &weights)),
+                    text,
+                    "{text} {weights:?}"
+                );
             }
         }
     }
@@ -239,7 +307,10 @@ mod remap_tests {
     fn rounding_never_loses_or_repeats_a_character() {
         let words = vec![seg("a", 0.0, 1.0), seg("b", 1.0, 2.0), seg("c", 2.0, 3.0)];
         let out = remap_words("abcde", &words, &[1, 1, 1]);
-        assert_eq!(out.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(), vec!["ab", "c", "de"]);
+        assert_eq!(
+            out.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(),
+            vec!["ab", "c", "de"]
+        );
     }
 
     #[test]
@@ -275,12 +346,18 @@ mod remap_tests {
     fn all_zero_weights_fall_back_to_an_even_split() {
         let words = vec![seg("a", 0.0, 1.0), seg("b", 1.0, 2.0)];
         let out = remap_words("abcd", &words, &[0, 0]);
-        assert_eq!(out.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(), vec!["ab", "cd"]);
+        assert_eq!(
+            out.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(),
+            vec!["ab", "cd"]
+        );
     }
 
     #[test]
     fn weights_come_from_each_segment_romanized_on_its_own() {
-        let words = vec![seg("\u{3055}\u{3088}\u{306a}\u{3089} ", 0.0, 1.0), seg("\u{3060}\u{3051}", 1.0, 2.0)];
+        let words = vec![
+            seg("\u{3055}\u{3088}\u{306a}\u{3089} ", 0.0, 1.0),
+            seg("\u{3060}\u{3051}", 1.0, 2.0),
+        ];
         // sayonara (8) vs dake (4), falling back to native length for text with no CJK.
         assert_eq!(segment_weights(&words, HanLanguage::Japanese), vec![8, 4]);
         let latin = vec![seg("hey ", 0.0, 1.0)];
@@ -295,16 +372,27 @@ mod lyric_line_tests {
     use std::time::Duration;
 
     fn line(text: &str, words: Vec<WordSeg>) -> LyricLine {
-        LyricLine { timestamp: Duration::from_secs(1), text: text.to_string(), words }
+        LyricLine {
+            timestamp: Duration::from_secs(1),
+            text: text.to_string(),
+            words,
+        }
     }
 
     fn seg(text: &str, start: f64, end: f64) -> WordSeg {
-        WordSeg { text: text.to_string(), start, end }
+        WordSeg {
+            text: text.to_string(),
+            start,
+            end,
+        }
     }
 
     #[test]
     fn only_lines_with_cjk_get_a_romanization() {
-        let lines = vec![line("\u{3055}\u{3088}\u{306a}\u{3089}", vec![]), line("Stay", vec![])];
+        let lines = vec![
+            line("\u{3055}\u{3088}\u{306a}\u{3089}", vec![]),
+            line("Stay", vec![]),
+        ];
         let out = romanize_lyric_lines(&lines);
         assert_eq!(out[0].as_ref().map(|r| r.text.as_str()), Some("sayonara"));
         assert!(out[1].is_none());
@@ -312,11 +400,24 @@ mod lyric_line_tests {
 
     #[test]
     fn a_line_with_word_timing_gets_re_timed_words_that_re_form_it() {
-        let words = vec![seg("\u{3055}\u{3088}\u{306a}\u{3089} ", 1.0, 2.0), seg("\u{3060}\u{3051}", 2.0, 3.0)];
-        let lines = vec![line("\u{3055}\u{3088}\u{306a}\u{3089} \u{3060}\u{3051}", words)];
+        let words = vec![
+            seg("\u{3055}\u{3088}\u{306a}\u{3089} ", 1.0, 2.0),
+            seg("\u{3060}\u{3051}", 2.0, 3.0),
+        ];
+        let lines = vec![line(
+            "\u{3055}\u{3088}\u{306a}\u{3089} \u{3060}\u{3051}",
+            words,
+        )];
         let roman = romanize_lyric_lines(&lines).remove(0).unwrap();
         assert_eq!(roman.text, "sayonara dake");
-        assert_eq!(roman.words.iter().map(|w| w.text.as_str()).collect::<String>(), roman.text);
+        assert_eq!(
+            roman
+                .words
+                .iter()
+                .map(|w| w.text.as_str())
+                .collect::<String>(),
+            roman.text
+        );
         assert_eq!(roman.words.first().map(|w| w.start), Some(1.0));
         assert_eq!(roman.words.last().map(|w| w.end), Some(3.0));
     }
@@ -332,14 +433,20 @@ mod lyric_line_tests {
     #[test]
     fn the_languages_are_decided_across_the_whole_sheet() {
         // Kana on one line makes the kanji-only line Japanese.
-        let lines = vec![line("\u{3055}\u{3088}\u{306a}\u{3089}", vec![]), line("\u{904b}\u{547d}", vec![])];
+        let lines = vec![
+            line("\u{3055}\u{3088}\u{306a}\u{3089}", vec![]),
+            line("\u{904b}\u{547d}", vec![]),
+        ];
         let out = romanize_lyric_lines(&lines);
         assert_eq!(out[1].as_ref().map(|r| r.text.as_str()), Some("unmei"));
     }
 
     #[test]
     fn a_sheet_has_cjk_when_any_line_does() {
-        assert!(sheet_has_cjk(&[line("Stay", vec![]), line("\u{4f60}\u{597d}", vec![])]));
+        assert!(sheet_has_cjk(&[
+            line("Stay", vec![]),
+            line("\u{4f60}\u{597d}", vec![])
+        ]));
         assert!(!sheet_has_cjk(&[line("Stay", vec![]), line("in", vec![])]));
         assert!(!sheet_has_cjk(&[]));
     }
@@ -351,7 +458,9 @@ mod plain_tests {
 
     #[test]
     fn each_text_line_gets_its_own_entry_and_only_cjk_lines_are_romanized() {
-        let out = romanize_plain_lines("\u{3055}\u{3088}\u{306a}\u{3089}\nStay in the middle\n\u{541b}\u{3068}");
+        let out = romanize_plain_lines(
+            "\u{3055}\u{3088}\u{306a}\u{3089}\nStay in the middle\n\u{541b}\u{3068}",
+        );
         assert_eq!(out.len(), 3);
         assert_eq!(out[0].as_ref().map(|r| r.text.as_str()), Some("sayonara"));
         assert!(out[1].is_none());
@@ -375,7 +484,10 @@ mod plain_tests {
         let out = romanize_plain_lines("\u{3055}\u{3088}\u{306a}\u{3089}\n\u{904b}\u{547d}");
         assert_eq!(out[1].as_ref().map(|r| r.text.as_str()), Some("unmei"));
         let out = romanize_plain_lines("\u{904b}\u{547d}");
-        assert_eq!(out[0].as_ref().map(|r| r.text.as_str()), Some("y\u{00f9}n m\u{00ec}ng"));
+        assert_eq!(
+            out[0].as_ref().map(|r| r.text.as_str()),
+            Some("y\u{00f9}n m\u{00ec}ng")
+        );
     }
 
     #[test]

@@ -1,8 +1,15 @@
 use super::*;
 
-pub(super) fn render_compact(frame: &mut Frame, app: &AppState, images: &mut ImageState, area: Rect) {
+pub(super) fn render_compact(
+    frame: &mut Frame,
+    app: &AppState,
+    images: &mut ImageState,
+    area: Rect,
+) {
     match (&app.track_artist, &app.track_title) {
-        (Some(artist), Some(title)) => render_now_playing_hero(frame, app, images, artist, title, area),
+        (Some(artist), Some(title)) => {
+            render_now_playing_hero(frame, app, images, artist, title, area)
+        }
         _ => render_now_playing_idle(frame, app, area),
     }
 }
@@ -12,13 +19,21 @@ pub(super) fn render_compact(frame: &mut Frame, app: &AppState, images: &mut Ima
 pub(super) fn render_now_playing_idle(frame: &mut Frame, app: &AppState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
         .split(area);
     frame.render_widget(
-        Paragraph::new(header(app, area.width as usize)).style(Style::default().add_modifier(Modifier::BOLD)),
+        Paragraph::new(header(app, area.width as usize))
+            .style(Style::default().add_modifier(Modifier::BOLD)),
         chunks[0],
     );
-    frame.render_widget(Paragraph::new(body_lines(app)).wrap(Wrap { trim: true }), chunks[2]);
+    frame.render_widget(
+        Paragraph::new(body_lines(app)).wrap(Wrap { trim: true }),
+        chunks[2],
+    );
 }
 
 /// Art plus title and transport on one row, with the lyrics given the room below.
@@ -47,10 +62,17 @@ pub(super) fn render_now_playing_hero(
     // them and `render_art` gets a card one row short of square. The 9-row floor is
     // what `meta_chunks` below needs (the bordered gauge row is 3 high); a shorter
     // hero would shrink it the same silent way.
-    let hero_height = (area.height / 2).clamp(9, 13).max(art_height + 2).min(area.height);
+    let hero_height = (area.height / 2)
+        .clamp(9, 13)
+        .max(art_height + 2)
+        .min(area.height);
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(hero_height), Constraint::Length(1), Constraint::Min(1)])
+        .constraints([
+            Constraint::Length(hero_height),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
         .split(area);
 
     let hero_cols = Layout::default()
@@ -73,7 +95,11 @@ pub(super) fn render_now_playing_hero(
         // title's fixed offset drift apart whenever `hero_height` exceeds
         // `art_height + 2`, and the title no longer lines up with the top of the frame.
         let art_area = Layout::default()
-            .constraints([Constraint::Length(1), Constraint::Length(art_height), Constraint::Min(1)])
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(art_height),
+                Constraint::Min(1),
+            ])
             .split(hero_cols[0])[1];
         art_top_row = Some(art_area.y);
         render_art(frame, app, images, artist, album, art_area);
@@ -130,29 +156,52 @@ pub(super) fn render_now_playing_hero(
     );
     if let Some(label) = &app.context_label {
         frame.render_widget(
-            Paragraph::new(truncate_ellipsis(&format!("Playing from {label}"), meta_area.width as usize))
-                .style(Style::default().fg(DIM)),
+            Paragraph::new(truncate_ellipsis(
+                &format!("Playing from {label}"),
+                meta_area.width as usize,
+            ))
+            .style(Style::default().fg(DIM)),
             meta_chunks[3],
         );
     }
     frame.render_widget(
-        Paragraph::new(format!("{} {}   {}", playing_icon(app), time_readout(app), volume_readout(app))),
+        Paragraph::new(format!(
+            "{} {}   {}",
+            playing_icon(app),
+            time_readout(app),
+            volume_readout(app)
+        )),
         meta_chunks[4],
     );
-    let gauge_area = Rect { width: meta_chunks[5].width.min(COMPACT_GAUGE_MAX_WIDTH), ..meta_chunks[5] };
+    let gauge_area = Rect {
+        width: meta_chunks[5].width.min(COMPACT_GAUGE_MAX_WIDTH),
+        ..meta_chunks[5]
+    };
     frame.render_widget(progress_gauge_bordered(app), gauge_area);
 
     frame.render_widget(Block::default().borders(Borders::TOP), outer[1]);
     let lyrics_area = render_lyrics_credit(frame, app, outer[2], Alignment::Left);
     let lines = body_lines(app);
-    let offset = top_anchored_offset(&lines, current_body_line_row(app), lyrics_area.height, lyrics_area.width);
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }).scroll((offset, 0)), lyrics_area);
+    let offset = top_anchored_offset(
+        &lines,
+        current_body_line_row(app),
+        lyrics_area.height,
+        lyrics_area.width,
+    );
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .scroll((offset, 0)),
+        lyrics_area,
+    );
 }
 
 pub(super) fn render_fullscreen(frame: &mut Frame, app: &AppState, images: &mut ImageState) {
     let area = frame.area();
     match (&app.track_artist, &app.track_title) {
-        (Some(artist), Some(title)) => render_fullscreen_hero(frame, app, images, artist, title, area),
+        (Some(artist), Some(title)) => {
+            render_fullscreen_hero(frame, app, images, artist, title, area)
+        }
         _ => render_fullscreen_idle(frame, app, area),
     }
 }
@@ -171,7 +220,9 @@ pub(super) fn render_fullscreen_idle(frame: &mut Frame, app: &AppState, area: Re
         chunks[0],
     );
     frame.render_widget(
-        Paragraph::new(body_lines(app)).alignment(Alignment::Center).wrap(Wrap { trim: true }),
+        Paragraph::new(body_lines(app))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
         chunks[1],
     );
 }
@@ -239,7 +290,9 @@ pub(super) fn render_fullscreen_hero(
         (art_width_candidate, ideal_height.max(1))
     } else {
         let constrained_height = effective_ceiling.max(1);
-        let constrained_width = square_width_cells(constrained_height, cell_size).min(art_width_candidate).max(1);
+        let constrained_width = square_width_cells(constrained_height, cell_size)
+            .min(art_width_candidate)
+            .max(1);
         (constrained_width, constrained_height)
     };
     // Symmetric `Min(1)` spacers centre the block in the pane.
@@ -254,12 +307,19 @@ pub(super) fn render_fullscreen_hero(
             Constraint::Length(1), // spacer
             Constraint::Length(1), // icon + time + vol
             Constraint::Length(3), // gauge (bordered -- needs its own top/bottom rows)
-            Constraint::Min(1), // bottom spacer
+            Constraint::Min(1),    // bottom spacer
         ])
         .split(cols[0]);
 
     let album = app.track_album.as_deref().unwrap_or(title);
-    render_art(frame, app, images, artist, album, capsule_row(side_rows[1], art_width));
+    render_art(
+        frame,
+        app,
+        images,
+        artist,
+        album,
+        capsule_row(side_rows[1], art_width),
+    );
 
     frame.render_widget(
         Paragraph::new(truncate_ellipsis(title, cols[0].width as usize))
@@ -279,25 +339,40 @@ pub(super) fn render_fullscreen_hero(
     );
     if let Some(label) = &app.context_label {
         frame.render_widget(
-            Paragraph::new(truncate_ellipsis(&format!("Playing from {label}"), cols[0].width as usize))
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(DIM)),
+            Paragraph::new(truncate_ellipsis(
+                &format!("Playing from {label}"),
+                cols[0].width as usize,
+            ))
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(DIM)),
             side_rows[5],
         );
     }
     frame.render_widget(
-        Paragraph::new(format!("{} {}   {}", playing_icon(app), time_readout(app), volume_readout(app)))
-            .alignment(Alignment::Center),
+        Paragraph::new(format!(
+            "{} {}   {}",
+            playing_icon(app),
+            time_readout(app),
+            volume_readout(app)
+        ))
+        .alignment(Alignment::Center),
         side_rows[6],
     );
     // The capsule is the same width as the art card, from the same `capsule_row`
     // call, so their left and right edges match by construction.
-    frame.render_widget(progress_gauge_bordered(app), capsule_row(side_rows[7], art_width));
+    frame.render_widget(
+        progress_gauge_bordered(app),
+        capsule_row(side_rows[7], art_width),
+    );
 
     // No divider rule between the two halves -- asked for directly,
     // relying on the whitespace gap alone (lyrics get a left inset
     // below) to separate them rather than a drawn line.
-    let lyrics_area = Rect { x: cols[1].x + 2, width: cols[1].width.saturating_sub(2), ..cols[1] };
+    let lyrics_area = Rect {
+        x: cols[1].x + 2,
+        width: cols[1].width.saturating_sub(2),
+        ..cols[1]
+    };
     render_fullscreen_lyrics(frame, app, lyrics_area, Alignment::Left);
 }
 
@@ -308,18 +383,35 @@ pub(super) fn credit_split(area: Rect, has_credit: bool) -> (Rect, Option<Rect>)
     if !has_credit || area.height < 3 {
         return (area, None);
     }
-    let lyrics = Rect { height: area.height - 1, ..area };
-    let credit = Rect { y: area.y + area.height - 1, height: 1, ..area };
+    let lyrics = Rect {
+        height: area.height - 1,
+        ..area
+    };
+    let credit = Rect {
+        y: area.y + area.height - 1,
+        height: 1,
+        ..area
+    };
     (lyrics, Some(credit))
 }
 
 /// Draws the dim "where these lyrics came from" line (when there is one)
 /// and returns the area left for the lyrics themselves.
-pub(super) fn render_lyrics_credit(frame: &mut Frame, app: &AppState, area: Rect, alignment: Alignment) -> Rect {
+pub(super) fn render_lyrics_credit(
+    frame: &mut Frame,
+    app: &AppState,
+    area: Rect,
+    alignment: Alignment,
+) -> Rect {
     let (lyrics, credit_area) = credit_split(area, app.lyrics_credit.is_some());
     if let (Some(credit_area), Some(credit)) = (credit_area, app.lyrics_credit.as_deref()) {
         let text = truncate_ellipsis(credit, credit_area.width as usize);
-        frame.render_widget(Paragraph::new(text).style(Style::default().fg(DIM)).alignment(alignment), credit_area);
+        frame.render_widget(
+            Paragraph::new(text)
+                .style(Style::default().fg(DIM))
+                .alignment(alignment),
+            credit_area,
+        );
     }
     lyrics
 }
@@ -331,12 +423,24 @@ pub(super) fn render_lyrics_credit(frame: &mut Frame, app: &AppState, area: Rect
 // `top_anchored_offset`, renders in the terminal's own font. Truly larger smooth
 // text would need rasterising lyrics to an image and showing it through a
 // graphics protocol, a separate piece of work.
-pub(super) fn render_fullscreen_lyrics(frame: &mut Frame, app: &AppState, area: Rect, alignment: Alignment) {
+pub(super) fn render_fullscreen_lyrics(
+    frame: &mut Frame,
+    app: &AppState,
+    area: Rect,
+    alignment: Alignment,
+) {
     let area = render_lyrics_credit(frame, app, area, alignment);
-    let (lines, offset) =
-        center_current_line(bold_lines(body_lines(app)), current_body_line_row(app), area.height, area.width);
+    let (lines, offset) = center_current_line(
+        bold_lines(body_lines(app)),
+        current_body_line_row(app),
+        area.height,
+        area.width,
+    );
     frame.render_widget(
-        Paragraph::new(lines).alignment(alignment).wrap(Wrap { trim: true }).scroll((offset, 0)),
+        Paragraph::new(lines)
+            .alignment(alignment)
+            .wrap(Wrap { trim: true })
+            .scroll((offset, 0)),
         area,
     );
 }
@@ -359,10 +463,16 @@ pub(super) fn render_fullscreen_hero_stacked(
 
     // At least 9 rows: `meta_chunks` below needs that many, and a shorter header
     // would silently shrink its content.
-    let header_height = (art_height + 2).max(9).min(area.height.saturating_sub(2).max(1));
+    let header_height = (art_height + 2)
+        .max(9)
+        .min(area.height.saturating_sub(2).max(1));
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(header_height), Constraint::Length(1), Constraint::Min(1)])
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
         .split(area);
 
     let header_cols = Layout::default()
@@ -381,7 +491,11 @@ pub(super) fn render_fullscreen_hero_stacked(
         // `render_now_playing_hero`. Two `Min(1)` spacers do not reliably split the
         // slack evenly, and the title would float above the art card.
         let art_area = Layout::default()
-            .constraints([Constraint::Length(1), Constraint::Length(art_height), Constraint::Min(1)])
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(art_height),
+                Constraint::Min(1),
+            ])
             .split(header_cols[0])[1];
         art_top_row = Some(art_area.y);
         render_art(frame, app, images, artist, album, art_area);
@@ -437,15 +551,23 @@ pub(super) fn render_fullscreen_hero_stacked(
     );
     if let Some(label) = &app.context_label {
         frame.render_widget(
-            Paragraph::new(truncate_ellipsis(&format!("Playing from {label}"), meta_area.width as usize))
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(DIM)),
+            Paragraph::new(truncate_ellipsis(
+                &format!("Playing from {label}"),
+                meta_area.width as usize,
+            ))
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(DIM)),
             meta_chunks[3],
         );
     }
     frame.render_widget(
-        Paragraph::new(format!("{} {}   {}", playing_icon(app), time_readout(app), volume_readout(app)))
-            .alignment(Alignment::Center),
+        Paragraph::new(format!(
+            "{} {}   {}",
+            playing_icon(app),
+            time_readout(app),
+            volume_readout(app)
+        ))
+        .alignment(Alignment::Center),
         meta_chunks[4],
     );
     frame.render_widget(progress_gauge_bordered(app), meta_chunks[5]);
@@ -459,7 +581,12 @@ mod credit_split_tests {
     use super::*;
 
     fn area(height: u16) -> Rect {
-        Rect { x: 4, y: 10, width: 60, height }
+        Rect {
+            x: 4,
+            y: 10,
+            width: 60,
+            height,
+        }
     }
 
     #[test]
@@ -470,8 +597,22 @@ mod credit_split_tests {
     #[test]
     fn a_credit_takes_exactly_the_last_row() {
         let (lyrics, credit) = credit_split(area(20), true);
-        assert_eq!(lyrics, Rect { height: 19, ..area(20) });
-        assert_eq!(credit, Some(Rect { x: 4, y: 29, width: 60, height: 1 }));
+        assert_eq!(
+            lyrics,
+            Rect {
+                height: 19,
+                ..area(20)
+            }
+        );
+        assert_eq!(
+            credit,
+            Some(Rect {
+                x: 4,
+                y: 29,
+                width: 60,
+                height: 1
+            })
+        );
     }
 
     #[test]
@@ -491,4 +632,3 @@ mod credit_split_tests {
         assert!(credit_split(area(3), true).1.is_some());
     }
 }
-

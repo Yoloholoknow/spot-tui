@@ -7,7 +7,12 @@ pub(super) fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
     let height = height.min(area.height);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
-    Rect { x, y, width, height }
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
 }
 
 // Shared overlay dimensions: one width for the two list overlays (picker, quick
@@ -80,7 +85,10 @@ mod wrap_words_tests {
 
     #[test]
     fn fits_on_one_line() {
-        assert_eq!(wrap_words("Quit spot-tui? y/n", 60), vec!["Quit spot-tui? y/n".to_string()]);
+        assert_eq!(
+            wrap_words("Quit spot-tui? y/n", 60),
+            vec!["Quit spot-tui? y/n".to_string()]
+        );
     }
 
     #[test]
@@ -88,13 +96,20 @@ mod wrap_words_tests {
         let text = "aaaa aaaa aaaa aaaa aaaa";
         assert_eq!(
             wrap_words(text, 10),
-            vec!["aaaa aaaa".to_string(), "aaaa aaaa".to_string(), "aaaa".to_string()]
+            vec![
+                "aaaa aaaa".to_string(),
+                "aaaa aaaa".to_string(),
+                "aaaa".to_string()
+            ]
         );
     }
 
     #[test]
     fn a_word_longer_than_the_width_gets_its_own_line_not_split() {
-        assert_eq!(wrap_words("supercalifragilisticexpialidocious", 10), vec!["supercalifragilisticexpialidocious".to_string()]);
+        assert_eq!(
+            wrap_words("supercalifragilisticexpialidocious", 10),
+            vec!["supercalifragilisticexpialidocious".to_string()]
+        );
     }
 
     #[test]
@@ -110,7 +125,11 @@ pub(super) fn render_fetch_error(frame: &mut Frame, area: Rect, message: &str) {
         Paragraph::new(format!("failed to load: {message}"))
             .style(Style::default().fg(DANGER))
             .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(DANGER))),
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(DANGER)),
+            ),
         area,
     );
 }
@@ -121,7 +140,10 @@ pub(super) fn render_fetch_error(frame: &mut Frame, area: Rect, message: &str) {
 /// or nothing styled at all). One dim, lowercase, wordless-except-the-
 /// ellipsis line, matching `render_fetch_error`'s own restraint.
 pub(super) fn render_loading(frame: &mut Frame, area: Rect) {
-    frame.render_widget(Paragraph::new("loading\u{2026}").style(Style::default().fg(DIM)), area);
+    frame.render_widget(
+        Paragraph::new("loading\u{2026}").style(Style::default().fg(DIM)),
+        area,
+    );
 }
 
 /// A designed empty state: a dim headline naming what's absent, then an
@@ -131,10 +153,21 @@ pub(super) fn render_loading(frame: &mut Frame, area: Rect) {
 /// call site. Lowercase throughout, matching the mockup's own copy
 /// convention (`ui.rs`'s existing "no matches"/"nothing here yet" now
 /// route through this instead of being bare unstyled strings).
-pub(super) fn render_empty_state(frame: &mut Frame, area: Rect, headline: &str, hint: Option<&str>) {
-    let mut lines = vec![Line::from(Span::styled(headline.to_string(), Style::default().fg(DIM)))];
+pub(super) fn render_empty_state(
+    frame: &mut Frame,
+    area: Rect,
+    headline: &str,
+    hint: Option<&str>,
+) {
+    let mut lines = vec![Line::from(Span::styled(
+        headline.to_string(),
+        Style::default().fg(DIM),
+    ))];
     if let Some(hint) = hint {
-        lines.push(Line::from(Span::styled(hint.to_string(), Style::default().fg(DIM))));
+        lines.push(Line::from(Span::styled(
+            hint.to_string(),
+            Style::default().fg(DIM),
+        )));
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
 }
@@ -144,8 +177,12 @@ pub(super) fn render_confirm_overlay(frame: &mut Frame, confirm: &PendingConfirm
     // Messages wrap and the box grows to fit: long ones (a duplicate-track
     // warning naming both the track and the playlist) would otherwise run off
     // both edges.
-    let max_width = frame_area.width.saturating_sub(4).clamp(OVERLAY_CONFIRM_MIN_WIDTH, OVERLAY_CONFIRM_MAX_WIDTH);
-    let width = (confirm.message.chars().count() as u16 + 4).clamp(OVERLAY_CONFIRM_MIN_WIDTH, max_width);
+    let max_width = frame_area
+        .width
+        .saturating_sub(4)
+        .clamp(OVERLAY_CONFIRM_MIN_WIDTH, OVERLAY_CONFIRM_MAX_WIDTH);
+    let width =
+        (confirm.message.chars().count() as u16 + 4).clamp(OVERLAY_CONFIRM_MIN_WIDTH, max_width);
     let inner_width = width.saturating_sub(OVERLAY_CHROME_X);
     let height = (wrapped_line_count(&confirm.message, inner_width) + 2).min(frame_area.height);
     let area = centered_rect(frame_area, width, height);
@@ -189,7 +226,10 @@ mod confirm_overlay_tests {
 
     #[test]
     fn a_word_longer_than_the_width_still_counts_as_one_line() {
-        assert_eq!(wrapped_line_count("supercalifragilisticexpialidocious", 10), 1);
+        assert_eq!(
+            wrapped_line_count("supercalifragilisticexpialidocious", 10),
+            1
+        );
     }
 
     #[test]
@@ -207,7 +247,9 @@ pub(super) fn playlist_has_track(
     playlist_uri: &str,
     track_uri: &str,
 ) -> bool {
-    membership.get(playlist_uri).is_some_and(|tracks| tracks.contains(track_uri))
+    membership
+        .get(playlist_uri)
+        .is_some_and(|tracks| tracks.contains(track_uri))
 }
 
 #[cfg(test)]
@@ -255,9 +297,14 @@ pub(super) fn filter_overlay_body(frame: &mut Frame, title: &str, filter: &ListF
         .title(title.to_string());
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let chunks =
-        Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(1)]).split(inner);
-    frame.render_widget(Paragraph::new(format!("/{}", cursor_text(&filter.query, filter.cursor))), chunks[0]);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(format!("/{}", cursor_text(&filter.query, filter.cursor))),
+        chunks[0],
+    );
     chunks[1]
 }
 
@@ -278,11 +325,19 @@ pub(super) fn render_playlist_picker_overlay(
             render_fetch_error(frame, body, e);
         }
         Fetch::Ready(items) if items.is_empty() => {
-            render_empty_state(frame, body, "no playlists yet", Some("press c to create one"));
+            render_empty_state(
+                frame,
+                body,
+                "no playlists yet",
+                Some("press c to create one"),
+            );
         }
         Fetch::Ready(items) => {
-            let ordered =
-                pinned_first(filtered_sorted(items, &picker.filter, &label), &app.pinned_playlists, |p| p.uri.as_str());
+            let ordered = pinned_first(
+                filtered_sorted(items, &picker.filter, &label),
+                &app.pinned_playlists,
+                |p| p.uri.as_str(),
+            );
             // Two fixed marker columns, never overlapping: pin first
             // (unchanged), membership second. The membership marker only
             // ever makes a *positive* claim -- "known absent" and "never
@@ -294,9 +349,17 @@ pub(super) fn render_playlist_picker_overlay(
             // pin-marker-vs-selection clash already fixed once this
             // session by making selection win).
             let pin_label = |p: &crate::api::library::PlaylistSummary| {
-                let pin = if app.pinned_playlists.contains(&p.uri) { "*" } else { " " };
+                let pin = if app.pinned_playlists.contains(&p.uri) {
+                    "*"
+                } else {
+                    " "
+                };
                 let member =
-                    if playlist_has_track(&app.playlist_membership, &p.uri, &picker.track_uri) { "\u{2713}" } else { " " };
+                    if playlist_has_track(&app.playlist_membership, &p.uri, &picker.track_uri) {
+                        "\u{2713}"
+                    } else {
+                        " "
+                    };
                 format!("{pin}{member} {}", label(p))
             };
             render_display_list(
@@ -315,11 +378,23 @@ pub(super) fn render_playlist_picker_overlay(
 /// The quick-jump palette. Shares `filter_overlay_body` with the playlist
 /// picker, over the pool `quick_jump_entries` rebuilds from live `AppState`
 /// each frame, so a fetch landing while it is open shows up at once.
-pub(super) fn render_quick_jump_overlay(frame: &mut Frame, app: &AppState, qj: &QuickJump, list_state: &mut ListState) {
+pub(super) fn render_quick_jump_overlay(
+    frame: &mut Frame,
+    app: &AppState,
+    qj: &QuickJump,
+    list_state: &mut ListState,
+) {
     let body = filter_overlay_body(frame, "Quick jump", &qj.filter);
     let entries = quick_jump_entries(app, &qj.filter);
     let label = |e: &QuickJumpEntry| e.label.clone();
     let display = filtered_sorted(&entries, &qj.filter, &label);
-    render_display_list(frame, body, &display, qj.selected, &label, qj.filter.query.is_empty(), list_state);
+    render_display_list(
+        frame,
+        body,
+        &display,
+        qj.selected,
+        &label,
+        qj.filter.query.is_empty(),
+        list_state,
+    );
 }
-

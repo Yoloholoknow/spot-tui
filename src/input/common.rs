@@ -1,9 +1,9 @@
 //! Keys shared by (almost) every screen. Reached only when the focused
 //! screen's own handler did not consume the key.
 
-use super::{shift, KeyCtx};
-use crate::player::{mute_toggle, seek_target_ms, SEEK_STEP_MS};
+use super::{KeyCtx, shift};
 use crate::api::library::PlaylistSummary;
+use crate::player::{SEEK_STEP_MS, mute_toggle, seek_target_ms};
 use crate::state::{ConfirmAction, PendingConfirm, Screen, TextPrompt, TextPromptAction};
 use crate::terminal::tmux_toggle_zoom;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -38,7 +38,11 @@ pub fn handle(ctx: &mut KeyCtx<'_>, key: KeyEvent) {
 }
 
 pub fn new_playlist_prompt(ctx: &mut KeyCtx<'_>) {
-    ctx.app.text_prompt = Some(TextPrompt::new("New playlist name", "", TextPromptAction::CreatePlaylist));
+    ctx.app.text_prompt = Some(TextPrompt::new(
+        "New playlist name",
+        "",
+        TextPromptAction::CreatePlaylist,
+    ));
 }
 
 pub fn toggle_mute(ctx: &mut KeyCtx<'_>) {
@@ -70,8 +74,11 @@ pub fn seek(ctx: &mut KeyCtx<'_>, direction: i64) {
 }
 
 pub fn rename_prompt(ctx: &mut KeyCtx<'_>, playlist: PlaylistSummary) {
-    ctx.app.text_prompt =
-        Some(TextPrompt::new("Rename playlist", playlist.name.clone(), TextPromptAction::RenamePlaylist(playlist)));
+    ctx.app.text_prompt = Some(TextPrompt::new(
+        "Rename playlist",
+        playlist.name.clone(),
+        TextPromptAction::RenamePlaylist(playlist),
+    ));
 }
 
 /// Always confirms: deleting a playlist is hard to reverse.

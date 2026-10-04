@@ -2,13 +2,13 @@
 // rspotify has no remove or reorder call for the queue; the official app cannot
 // pluck an item back out either, so this is a platform gap.
 
+use rspotify::AuthCodeSpotify;
 use rspotify::clients::OAuthClient;
 use rspotify::model::{PlayableId, PlayableItem, TrackId};
 use rspotify::prelude::Id;
-use rspotify::AuthCodeSpotify;
 
-use super::{describe_client_error, ensure_fresh};
 use super::search::TrackResult;
+use super::{describe_client_error, ensure_fresh};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueueSummary {
@@ -26,7 +26,10 @@ fn playable_to_track(item: PlayableItem) -> Option<TrackResult> {
                 uri: t.id.map(|id| id.uri()).unwrap_or_default(),
                 title: t.name,
                 artist: first_artist.map(|a| a.name.clone()).unwrap_or_default(),
-                artist_uri: first_artist.and_then(|a| a.id.clone()).map(|id| id.uri()).unwrap_or_default(),
+                artist_uri: first_artist
+                    .and_then(|a| a.id.clone())
+                    .map(|id| id.uri())
+                    .unwrap_or_default(),
                 album_uri: t.album.id.clone().map(|id| id.uri()).unwrap_or_default(),
                 album: t.album.name,
             })
@@ -40,7 +43,9 @@ fn playable_to_track(item: PlayableItem) -> Option<TrackResult> {
         PlayableItem::Unknown(raw) => match lenient_track_from_raw(&raw) {
             Some(track) => Some(track),
             None => {
-                log::warn!("queue item did not parse as Track, Episode, or a lenient fallback, dropped: {raw}");
+                log::warn!(
+                    "queue item did not parse as Track, Episode, or a lenient fallback, dropped: {raw}"
+                );
                 None
             }
         },
@@ -81,7 +86,14 @@ fn lenient_track_from_raw(raw: &serde_json::Value) -> Option<TrackResult> {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    Some(TrackResult { uri, title, artist, album, artist_uri, album_uri })
+    Some(TrackResult {
+        uri,
+        title,
+        artist,
+        album,
+        artist_uri,
+        album_uri,
+    })
 }
 
 /// Appends to the playback queue (played next, before the context resumes), on the
@@ -91,10 +103,15 @@ fn lenient_track_from_raw(raw: &serde_json::Value) -> Option<TrackResult> {
 /// reason from the body.
 pub async fn add_to_queue(client: &AuthCodeSpotify, track_uri: &str) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before add_to_queue failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before add_to_queue failed, trying with existing token anyway: {e}"
+        );
     }
     let track = TrackId::from_id_or_uri(track_uri).map_err(|e| e.to_string())?;
-    match client.add_item_to_queue(PlayableId::Track(track), None).await {
+    match client
+        .add_item_to_queue(PlayableId::Track(track), None)
+        .await
+    {
         Ok(()) => Ok(()),
         Err(e) => Err(describe_client_error(e).await),
     }
@@ -102,12 +119,21 @@ pub async fn add_to_queue(client: &AuthCodeSpotify, track_uri: &str) -> Result<(
 
 pub async fn current_queue(client: &AuthCodeSpotify) -> Result<QueueSummary, String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before current_queue failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before current_queue failed, trying with existing token anyway: {e}"
+        );
     }
-    let raw = client.current_user_queue().await.map_err(|e| e.to_string())?;
+    let raw = client
+        .current_user_queue()
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(QueueSummary {
         currently_playing: raw.currently_playing.and_then(playable_to_track),
-        queue: raw.queue.into_iter().filter_map(playable_to_track).collect(),
+        queue: raw
+            .queue
+            .into_iter()
+            .filter_map(playable_to_track)
+            .collect(),
     })
 }
 

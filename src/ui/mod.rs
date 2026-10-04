@@ -12,21 +12,23 @@ mod theme;
 
 use self::art::*;
 use self::help::*;
+pub use self::lyrics_view::word_sweep_active;
 use self::lyrics_view::*;
 use self::now_playing::*;
 use self::overlays::*;
 use self::playbar::*;
 use self::screens::*;
 use self::theme::*;
-pub use self::lyrics_view::word_sweep_active;
 
 use crate::api::search::TrackResult;
 use crate::state::*;
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Padding, Paragraph, Wrap};
-use ratatui::Frame;
+use ratatui::widgets::{
+    Block, Borders, Clear, Gauge, List, ListItem, ListState, Padding, Paragraph, Wrap,
+};
 use std::time::Duration;
 
 /// Persisted scroll offsets, one per list. Kept across frames because a fresh
@@ -98,7 +100,10 @@ pub const STARTUP_RETRANSMIT_DELAY: std::time::Duration = std::time::Duration::f
 /// eviction is rare.
 pub const SIZED_COVER_CACHE_CAP: usize = 4;
 
-pub const STARTUP_SPINNER: [char; 10] = ['\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}', '\u{2827}', '\u{2807}', '\u{280F}'];
+pub const STARTUP_SPINNER: [char; 10] = [
+    '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}', '\u{2827}',
+    '\u{2807}', '\u{280F}',
+];
 
 /// Drawn while the first connect resolves (several seconds: AP resolution, auth,
 /// first track load). It also holds off the first frame with real album art:
@@ -109,10 +114,17 @@ pub fn render_startup(frame: &mut Frame, tick: usize) {
     let spinner = STARTUP_SPINNER[tick % STARTUP_SPINNER.len()];
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
         .split(area);
     frame.render_widget(
-        Paragraph::new("spot-tui").alignment(Alignment::Center).style(Style::default().add_modifier(Modifier::BOLD).fg(ACCENT)),
+        Paragraph::new("spot-tui")
+            .alignment(Alignment::Center)
+            .style(Style::default().add_modifier(Modifier::BOLD).fg(ACCENT)),
         rows[1],
     );
     frame.render_widget(
@@ -123,17 +135,31 @@ pub fn render_startup(frame: &mut Frame, tick: usize) {
     );
 }
 
-pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState, images: &mut ImageState) {
+pub fn render(
+    frame: &mut Frame,
+    app: &AppState,
+    scroll: &mut ScrollState,
+    images: &mut ImageState,
+) {
     if app.fullscreen && *app.nav.top() == Screen::NowPlaying {
         render_fullscreen(frame, app, images);
-        render_overlays(frame, app, &mut scroll.playlist_picker, &mut scroll.quick_jump);
+        render_overlays(
+            frame,
+            app,
+            &mut scroll.playlist_picker,
+            &mut scroll.quick_jump,
+        );
         return;
     }
 
     let area = frame.area();
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(2), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(2),
+            Constraint::Length(1),
+        ])
         .split(area);
     let (body_area, playbar_area, status_area) = (outer[0], outer[1], outer[2]);
 
@@ -177,7 +203,9 @@ pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState, image
                 selected: app.library.saved_albums_selected,
             },
             &mut scroll.saved_albums,
-            |a: &crate::api::library::SavedAlbumSummary| format!("{} \u{2014} {}", a.name, a.artist),
+            |a: &crate::api::library::SavedAlbumSummary| {
+                format!("{} \u{2014} {}", a.name, a.artist)
+            },
         ),
         Screen::FollowedArtists => render_list_screen(
             frame,
@@ -191,17 +219,28 @@ pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState, image
             &mut scroll.followed_artists,
             |a: &crate::api::library::FollowedArtist| a.name.clone(),
         ),
-        Screen::YourPlaylists => render_your_playlists(frame, app, &mut scroll.playlists, main_area),
-        Screen::PlaylistDetail => render_playlist_detail(frame, app, &mut scroll.playlist_detail, main_area),
+        Screen::YourPlaylists => {
+            render_your_playlists(frame, app, &mut scroll.playlists, main_area)
+        }
+        Screen::PlaylistDetail => {
+            render_playlist_detail(frame, app, &mut scroll.playlist_detail, main_area)
+        }
         Screen::Help => render_help(frame, main_area, &mut scroll.help),
         Screen::Queue => render_queue(frame, app, &mut scroll.queue, main_area),
         Screen::Devices => render_devices(frame, app, &mut scroll.devices, main_area),
-        Screen::ArtistDetail => render_artist_detail(frame, app, &mut scroll.artist_detail, main_area),
+        Screen::ArtistDetail => {
+            render_artist_detail(frame, app, &mut scroll.artist_detail, main_area)
+        }
         Screen::AlbumDetail => render_album_detail(frame, app, &mut scroll.album_detail, main_area),
     }
     render_playbar(frame, app, playbar_area);
     render_status(frame, app, status_area);
-    render_overlays(frame, app, &mut scroll.playlist_picker, &mut scroll.quick_jump);
+    render_overlays(
+        frame,
+        app,
+        &mut scroll.playlist_picker,
+        &mut scroll.quick_jump,
+    );
 }
 
 /// Draws the active overlay, if any, over everything else this frame (fullscreen
@@ -222,4 +261,3 @@ pub fn render_overlays(
         render_quick_jump_overlay(frame, app, qj, quick_jump_list_state);
     }
 }
-

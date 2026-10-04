@@ -1,7 +1,7 @@
 //! Help, Queue, Devices, Artist Detail and Album Detail.
 
 use super::lists::move_selection;
-use super::{shift, tracks, KeyCtx};
+use super::{KeyCtx, shift, tracks};
 use crate::player::play_context;
 use crate::state::{Fetch, Screen};
 use crossterm::event::{KeyCode, KeyEvent};
@@ -81,7 +81,9 @@ pub fn artist_detail(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
         }
         KeyCode::Esc | KeyCode::Left => ctx.app.nav.escape(),
         KeyCode::Up | KeyCode::Down => {
-            let Some(state) = &mut ctx.app.artist_detail else { return true };
+            let Some(state) = &mut ctx.app.artist_detail else {
+                return true;
+            };
             let len = match &state.detail {
                 Fetch::Ready(artist) => artist.albums.len(),
                 _ => 0,
@@ -90,10 +92,16 @@ pub fn artist_detail(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
         }
         // Navigation only: opening an album plays nothing.
         KeyCode::Enter | KeyCode::Right => {
-            let uri = ctx.app.artist_detail.as_ref().and_then(|state| match &state.detail {
-                Fetch::Ready(artist) => artist.albums.get(state.selected).map(|a| a.uri.clone()),
-                _ => None,
-            });
+            let uri = ctx
+                .app
+                .artist_detail
+                .as_ref()
+                .and_then(|state| match &state.detail {
+                    Fetch::Ready(artist) => {
+                        artist.albums.get(state.selected).map(|a| a.uri.clone())
+                    }
+                    _ => None,
+                });
             if let Some(uri) = uri {
                 ctx.svc.open_album_detail(ctx.app, uri);
             }
@@ -113,17 +121,23 @@ pub fn album_detail(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
         }
         // `v` here is the album's own artist, not the selected track's.
         KeyCode::Char('v') => {
-            let uri = ctx.app.album_detail.as_ref().and_then(|state| match &state.detail {
-                Fetch::Ready(album) => Some(album.artist_uri.clone()),
-                _ => None,
-            });
+            let uri = ctx
+                .app
+                .album_detail
+                .as_ref()
+                .and_then(|state| match &state.detail {
+                    Fetch::Ready(album) => Some(album.artist_uri.clone()),
+                    _ => None,
+                });
             if let Some(uri) = uri {
                 ctx.svc.open_artist_detail(ctx.app, uri);
             }
         }
         KeyCode::Esc | KeyCode::Left => ctx.app.nav.escape(),
         KeyCode::Up | KeyCode::Down => {
-            let Some(state) = &mut ctx.app.album_detail else { return true };
+            let Some(state) = &mut ctx.app.album_detail else {
+                return true;
+            };
             let len = match &state.detail {
                 Fetch::Ready(album) => album.tracks.len(),
                 _ => 0,
@@ -132,11 +146,14 @@ pub fn album_detail(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
         }
         // Enter, not Right: it plays and jumps to Now Playing.
         KeyCode::Enter => {
-            let Some(state) = &ctx.app.album_detail else { return true };
+            let Some(state) = &ctx.app.album_detail else {
+                return true;
+            };
             if let Fetch::Ready(album) = &state.detail
                 && state.selected < album.tracks.len()
             {
-                let (uri, name, index) = (album.uri.clone(), album.name.clone(), state.selected as u32);
+                let (uri, name, index) =
+                    (album.uri.clone(), album.name.clone(), state.selected as u32);
                 play_context(ctx.app, ctx.spirc, uri, Some(index), name);
             }
         }

@@ -69,7 +69,10 @@ mod tests {
     use super::*;
 
     fn editing(query: &str) -> ListFilter {
-        let mut filter = ListFilter { query: query.to_string(), ..Default::default() };
+        let mut filter = ListFilter {
+            query: query.to_string(),
+            ..Default::default()
+        };
         filter.start_editing();
         filter
     }
@@ -121,7 +124,11 @@ mod tests {
 
     #[test]
     fn esc_clears_an_applied_filter_before_the_screen_can_leave() {
-        let mut filter = ListFilter { query: "abc".into(), cursor: 3, ..Default::default() };
+        let mut filter = ListFilter {
+            query: "abc".into(),
+            cursor: 3,
+            ..Default::default()
+        };
         let mut selected = 4;
         assert!(filter_hotkeys(&mut filter, &mut selected, KeyCode::Esc));
         assert!(filter.query.is_empty());
@@ -139,9 +146,17 @@ mod tests {
     fn slash_starts_editing_and_o_toggles_sort() {
         let mut filter = ListFilter::default();
         let mut selected = 0;
-        assert!(filter_hotkeys(&mut filter, &mut selected, KeyCode::Char('/')));
+        assert!(filter_hotkeys(
+            &mut filter,
+            &mut selected,
+            KeyCode::Char('/')
+        ));
         assert!(filter.editing);
-        assert!(filter_hotkeys(&mut filter, &mut selected, KeyCode::Char('o')));
+        assert!(filter_hotkeys(
+            &mut filter,
+            &mut selected,
+            KeyCode::Char('o')
+        ));
         assert!(filter.sort_alpha);
     }
 

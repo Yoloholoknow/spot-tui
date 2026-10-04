@@ -3,9 +3,9 @@
 // a device reclaim itself; there is no public `Spirc` method to push playback to
 // a different device.
 
+use rspotify::AuthCodeSpotify;
 use rspotify::clients::OAuthClient;
 use rspotify::model::Device;
-use rspotify::AuthCodeSpotify;
 
 use super::ensure_fresh;
 
@@ -33,7 +33,9 @@ fn to_summary(d: Device) -> Option<DeviceSummary> {
 
 pub async fn list_devices(client: &AuthCodeSpotify) -> Result<Vec<DeviceSummary>, String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before list_devices failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before list_devices failed, trying with existing token anyway: {e}"
+        );
     }
     let devices = client.device().await.map_err(|e| e.to_string())?;
     Ok(devices.into_iter().filter_map(to_summary).collect())
@@ -43,7 +45,9 @@ pub async fn list_devices(client: &AuthCodeSpotify) -> Result<Vec<DeviceSummary>
 /// docs for `transfer_playback`): "move my playback over", not "also start it".
 pub async fn transfer_to(client: &AuthCodeSpotify, device_id: &str) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before transfer_to failed, trying with existing token anyway: {e}");
+        log::warn!(
+            "token refresh before transfer_to failed, trying with existing token anyway: {e}"
+        );
     }
     client
         .transfer_playback(device_id, Some(false))

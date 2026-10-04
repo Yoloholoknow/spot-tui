@@ -19,7 +19,11 @@ pub fn agent() -> ureq::Agent {
 /// Reads at most `max` bytes. A longer body is an error, not a truncation.
 pub fn read_limited(response: ureq::Response, max: u64) -> Result<Vec<u8>, String> {
     let mut body = Vec::new();
-    response.into_reader().take(max + 1).read_to_end(&mut body).map_err(|e| e.to_string())?;
+    response
+        .into_reader()
+        .take(max + 1)
+        .read_to_end(&mut body)
+        .map_err(|e| e.to_string())?;
     if body.len() as u64 > max {
         return Err(format!("response larger than {max} bytes"));
     }

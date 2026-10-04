@@ -86,7 +86,6 @@ pub struct AppState {
     pub status: Option<(String, bool)>,
 }
 
-
 pub fn track_label(t: &TrackResult) -> String {
     format!("{} \u{2014} {}", t.artist, t.title)
 }
@@ -156,21 +155,27 @@ impl AppState {
 
     pub fn liked_display(&self) -> Vec<(usize, &TrackResult)> {
         match &self.library.liked_songs {
-            Fetch::Ready(items) => filtered_sorted(items, &self.library.liked_songs_filter, &track_label),
+            Fetch::Ready(items) => {
+                filtered_sorted(items, &self.library.liked_songs_filter, &track_label)
+            }
             _ => Vec::new(),
         }
     }
 
     pub fn saved_albums_display(&self) -> Vec<(usize, &SavedAlbumSummary)> {
         match &self.library.saved_albums {
-            Fetch::Ready(items) => filtered_sorted(items, &self.library.saved_albums_filter, &album_label),
+            Fetch::Ready(items) => {
+                filtered_sorted(items, &self.library.saved_albums_filter, &album_label)
+            }
             _ => Vec::new(),
         }
     }
 
     pub fn followed_artists_display(&self) -> Vec<(usize, &FollowedArtist)> {
         match &self.library.followed_artists {
-            Fetch::Ready(items) => filtered_sorted(items, &self.library.followed_artists_filter, &artist_label),
+            Fetch::Ready(items) => {
+                filtered_sorted(items, &self.library.followed_artists_filter, &artist_label)
+            }
             _ => Vec::new(),
         }
     }
@@ -190,7 +195,9 @@ impl AppState {
     /// Pinned tracks first, except during move mode, which needs display
     /// position to equal array position (see `PlaylistDetailState::move_mode`).
     pub fn playlist_detail_display(&self) -> Vec<(usize, &TrackResult)> {
-        let Some(pd) = &self.playlist_detail else { return Vec::new() };
+        let Some(pd) = &self.playlist_detail else {
+            return Vec::new();
+        };
         match &pd.tracks {
             Fetch::Ready(items) => {
                 let natural = filtered_sorted(items, &pd.filter, &track_label);
@@ -208,10 +215,15 @@ impl AppState {
     /// that lists tracks.
     pub fn selected_track(&self) -> Option<TrackResult> {
         match self.nav.top() {
-            Screen::LikedSongs => self.liked_display().get(self.library.liked_songs_selected).map(|&(_, t)| t.clone()),
+            Screen::LikedSongs => self
+                .liked_display()
+                .get(self.library.liked_songs_selected)
+                .map(|&(_, t)| t.clone()),
             Screen::PlaylistDetail => {
                 let selected = self.playlist_detail.as_ref()?.selected;
-                self.playlist_detail_display().get(selected).map(|&(_, t)| t.clone())
+                self.playlist_detail_display()
+                    .get(selected)
+                    .map(|&(_, t)| t.clone())
             }
             Screen::Search => self.search.results.get(self.search.selected).cloned(),
             Screen::Queue => match &self.queue.fetch {
@@ -231,19 +243,29 @@ impl AppState {
 
     /// The playlists the add-to-playlist picker shows, pinned first.
     pub fn picker_display(&self) -> Vec<(usize, &PlaylistSummary)> {
-        let (Some(picker), Fetch::Ready(items)) = (&self.playlist_picker, &self.library.playlists) else {
+        let (Some(picker), Fetch::Ready(items)) = (&self.playlist_picker, &self.library.playlists)
+        else {
             return Vec::new();
         };
         let label = |p: &PlaylistSummary| p.name.clone();
-        pinned_first(filtered_sorted(items, &picker.filter, &label), &self.pinned_playlists, |p| p.uri.as_str())
+        pinned_first(
+            filtered_sorted(items, &picker.filter, &label),
+            &self.pinned_playlists,
+            |p| p.uri.as_str(),
+        )
     }
 
     /// The entries the quick-jump palette currently shows.
     pub fn quick_jump_matches(&self) -> Vec<QuickJumpEntry> {
-        let Some(qj) = &self.quick_jump else { return Vec::new() };
+        let Some(qj) = &self.quick_jump else {
+            return Vec::new();
+        };
         let entries = quick_jump_entries(self, &qj.filter);
         let label = |e: &QuickJumpEntry| e.label.clone();
-        filtered_sorted(&entries, &qj.filter, &label).into_iter().map(|(_, e)| e.clone()).collect()
+        filtered_sorted(&entries, &qj.filter, &label)
+            .into_iter()
+            .map(|(_, e)| e.clone())
+            .collect()
     }
 }
 
@@ -263,10 +285,18 @@ mod tests {
     }
 
     fn app_on_playlist(tracks: Vec<TrackResult>, pinned: &[&str]) -> AppState {
-        let mut app =
-            AppState::new(false, HashSet::new(), pinned.iter().map(|s| s.to_string()).collect(), 0);
+        let mut app = AppState::new(
+            false,
+            HashSet::new(),
+            pinned.iter().map(|s| s.to_string()).collect(),
+            0,
+        );
         app.playlist_detail = Some(PlaylistDetailState {
-            playlist: PlaylistSummary { uri: "p".into(), name: "p".into(), track_count: tracks.len() as u32 },
+            playlist: PlaylistSummary {
+                uri: "p".into(),
+                name: "p".into(),
+                track_count: tracks.len() as u32,
+            },
             tracks: Fetch::Ready(tracks),
             selected: 0,
             filter: ListFilter::default(),
@@ -278,22 +308,39 @@ mod tests {
 
     #[test]
     fn pinned_tracks_come_first_in_the_playlist_display() {
-        let app = app_on_playlist(vec![track("a", "A"), track("b", "B"), track("c", "C")], &["c"]);
-        let order: Vec<_> = app.playlist_detail_display().iter().map(|&(i, _)| i).collect();
+        let app = app_on_playlist(
+            vec![track("a", "A"), track("b", "B"), track("c", "C")],
+            &["c"],
+        );
+        let order: Vec<_> = app
+            .playlist_detail_display()
+            .iter()
+            .map(|&(i, _)| i)
+            .collect();
         assert_eq!(order, vec![2, 0, 1]);
     }
 
     #[test]
     fn move_mode_keeps_array_order_even_with_a_pin() {
-        let mut app = app_on_playlist(vec![track("a", "A"), track("b", "B"), track("c", "C")], &["c"]);
+        let mut app = app_on_playlist(
+            vec![track("a", "A"), track("b", "B"), track("c", "C")],
+            &["c"],
+        );
         app.playlist_detail.as_mut().unwrap().move_mode = Some(0);
-        let order: Vec<_> = app.playlist_detail_display().iter().map(|&(i, _)| i).collect();
+        let order: Vec<_> = app
+            .playlist_detail_display()
+            .iter()
+            .map(|&(i, _)| i)
+            .collect();
         assert_eq!(order, vec![0, 1, 2]);
     }
 
     #[test]
     fn the_selected_track_is_the_display_row_not_the_array_index() {
-        let mut app = app_on_playlist(vec![track("a", "A"), track("b", "B"), track("c", "C")], &["c"]);
+        let mut app = app_on_playlist(
+            vec![track("a", "A"), track("b", "B"), track("c", "C")],
+            &["c"],
+        );
         app.playlist_detail.as_mut().unwrap().selected = 0;
         assert_eq!(app.selected_track().unwrap().uri, "c");
     }

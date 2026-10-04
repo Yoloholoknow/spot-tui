@@ -3,7 +3,10 @@
 
 use crate::paths;
 use crate::state::{AppState, RepeatMode, Screen, ShuffleMode};
-use librespot_connect::{ConnectConfig, LoadContextOptions, LoadRequest, LoadRequestOptions, Options, PlayingTrack, Spirc};
+use librespot_connect::{
+    ConnectConfig, LoadContextOptions, LoadRequest, LoadRequestOptions, Options, PlayingTrack,
+    Spirc,
+};
 use librespot_core::cache::Cache;
 use librespot_core::config::{DeviceType, SessionConfig};
 use librespot_core::session::Session;
@@ -62,8 +65,13 @@ pub async fn connect() -> Result<Connection, ConnectError> {
     // a directory of their own: librespot writes a file literally named
     // `volume` there, which collides with ncspot's `volume/` directory.
     let own_cache = paths::cache_dir().join("librespot");
-    let cache = Cache::new(Some(&paths::ncspot_librespot_cache()), Some(&own_cache), Some(&own_cache), None)
-        .map_err(|e| e.to_string())?;
+    let cache = Cache::new(
+        Some(&paths::ncspot_librespot_cache()),
+        Some(&own_cache),
+        Some(&own_cache),
+        None,
+    )
+    .map_err(|e| e.to_string())?;
     let credentials = cache.credentials().ok_or(ConnectError::NoCredentials)?;
 
     let session = Session::new(SessionConfig::default(), Some(cache));
@@ -71,8 +79,12 @@ pub async fn connect() -> Result<Connection, ConnectError> {
     let mixer = mixer_fn(MixerConfig::default()).map_err(|e| e.to_string())?;
     let backend = audio_backend::find(None).ok_or("no default audio backend")?;
     let soft_volume = mixer.get_soft_volume();
-    let player =
-        Player::new(PlayerConfig::default(), session.clone(), soft_volume, move || backend(None, AudioFormat::default()));
+    let player = Player::new(
+        PlayerConfig::default(),
+        session.clone(),
+        soft_volume,
+        move || backend(None, AudioFormat::default()),
+    );
     let events = player.get_player_event_channel();
 
     let config = ConnectConfig {
@@ -86,10 +98,16 @@ pub async fn connect() -> Result<Connection, ConnectError> {
     };
     // `Spirc::new` consumes the session; keep a handle for lyrics lookups.
     let lyrics_session = session.clone();
-    let (spirc, spirc_task) =
-        Spirc::new(config, session, credentials, player, mixer).await.map_err(|e| e.to_string())?;
+    let (spirc, spirc_task) = Spirc::new(config, session, credentials, player, mixer)
+        .await
+        .map_err(|e| e.to_string())?;
 
-    Ok(Connection { spirc, task: tokio::spawn(spirc_task), events, session: lyrics_session })
+    Ok(Connection {
+        spirc,
+        task: tokio::spawn(spirc_task),
+        events,
+        session: lyrics_session,
+    })
 }
 
 /// Clamped at both ends: a negative position is nonsensical, and librespot
@@ -116,18 +134,34 @@ pub fn mute_toggle(current: u16, remembered: &mut Option<u16>) -> u16 {
 /// librespot resets shuffle and repeat on every `load` unless the request
 /// carries explicit options, and emits no event when it does. Every load
 /// therefore hands the current values back in, as Spotify's own clients do.
-pub fn carry_modes(shuffle: bool, repeat: RepeatMode, mut opts: LoadRequestOptions) -> LoadRequestOptions {
+pub fn carry_modes(
+    shuffle: bool,
+    repeat: RepeatMode,
+    mut opts: LoadRequestOptions,
+) -> LoadRequestOptions {
     let (repeat_context, repeat_track) = repeat.flags();
-    opts.context_options =
-        Some(LoadContextOptions::Options(Options { shuffle, repeat: repeat_context, repeat_track }));
+    opts.context_options = Some(LoadContextOptions::Options(Options {
+        shuffle,
+        repeat: repeat_context,
+        repeat_track,
+    }));
     opts
 }
 
 /// Starts playback of `context_uri` (a track, album or playlist), optionally
 /// at `start_index` within it, and shows Now Playing. `label` names where it
 /// was started from; it is display-only and survives `n`/`p` skips.
-pub fn play_context(app: &mut AppState, spirc: &Spirc, context_uri: String, start_index: Option<u32>, label: String) {
-    let opts = LoadRequestOptions { playing_track: start_index.map(PlayingTrack::Index), ..Default::default() };
+pub fn play_context(
+    app: &mut AppState,
+    spirc: &Spirc,
+    context_uri: String,
+    start_index: Option<u32>,
+    label: String,
+) {
+    let opts = LoadRequestOptions {
+        playing_track: start_index.map(PlayingTrack::Index),
+        ..Default::default()
+    };
     let opts = carry_modes(app.shuffle, app.repeat, opts);
     // `activate` must precede `load`: Spirc ignores Load while inactive.
     let _ = spirc.activate();
@@ -164,7 +198,10 @@ pub fn cycle_shuffle(app: &mut AppState, spirc: &Spirc) {
 pub fn cycle_repeat(app: &mut AppState, spirc: &Spirc) {
     let next = app.repeat.next();
     let (context, track) = next.flags();
-    match spirc.repeat(context).and_then(|()| spirc.repeat_track(track)) {
+    match spirc
+        .repeat(context)
+        .and_then(|()| spirc.repeat_track(track))
+    {
         Ok(()) => {
             app.repeat = next;
             app.status = Some((format!("repeat {}", next.status_label()), false));
@@ -200,7 +237,6 @@ mod seek_target_tests {
         assert_eq!(seek_target_ms(297_000, 5_000, 300_000), 300_000);
     }
 }
-
 
 #[cfg(test)]
 mod mute_toggle_tests {
@@ -254,7 +290,6 @@ mod mute_toggle_tests {
     }
 }
 
-
 /// Guards the vendored librespot patch (see `[patch.crates-io]` in
 /// Cargo.toml): upstream's `SetOptionsCommand` drops the `modes` map, which
 /// is how the official app sets smart shuffle. If a librespot upgrade swaps
@@ -278,7 +313,10 @@ mod smart_shuffle_patch_tests {
     }
 
     fn parse(json: &str) -> librespot_core::dealer::protocol::SetOptionsCommand {
-        match serde_json::from_str::<Request>(json).expect("valid request").command {
+        match serde_json::from_str::<Request>(json)
+            .expect("valid request")
+            .command
+        {
             Command::SetOptions(o) => o,
             other => panic!("expected set_options, got {other:?}"),
         }
@@ -286,17 +324,25 @@ mod smart_shuffle_patch_tests {
 
     #[test]
     fn smart_shuffle_mode_survives_deserialization() {
-        let cmd = parse(&set_options_json(r#"{"context_enhancement":"RECOMMENDATION"}"#));
+        let cmd = parse(&set_options_json(
+            r#"{"context_enhancement":"RECOMMENDATION"}"#,
+        ));
         assert_eq!(cmd.shuffling_context, Some(true));
         let modes = cmd.modes.expect("modes must not be dropped");
-        assert_eq!(modes.get("context_enhancement").map(String::as_str), Some("RECOMMENDATION"));
+        assert_eq!(
+            modes.get("context_enhancement").map(String::as_str),
+            Some("RECOMMENDATION")
+        );
     }
 
     #[test]
     fn plain_shuffle_mode_is_none_not_recommendation() {
         let cmd = parse(&set_options_json(r#"{"context_enhancement":"NONE"}"#));
         let modes = cmd.modes.expect("modes must not be dropped");
-        assert_eq!(modes.get("context_enhancement").map(String::as_str), Some("NONE"));
+        assert_eq!(
+            modes.get("context_enhancement").map(String::as_str),
+            Some("NONE")
+        );
     }
 
     #[test]
@@ -307,7 +353,6 @@ mod smart_shuffle_patch_tests {
         assert_eq!(cmd.shuffling_context, Some(true));
     }
 }
-
 
 #[cfg(test)]
 mod carry_modes_tests {
@@ -341,10 +386,13 @@ mod carry_modes_tests {
 
     #[test]
     fn the_rest_of_the_load_request_is_untouched() {
-        let opts = LoadRequestOptions { start_playing: true, seek_to: 42, ..Default::default() };
+        let opts = LoadRequestOptions {
+            start_playing: true,
+            seek_to: 42,
+            ..Default::default()
+        };
         let out = carry_modes(true, RepeatMode::Off, opts);
         assert!(out.start_playing);
         assert_eq!(out.seek_to, 42);
     }
 }
-

@@ -1,17 +1,19 @@
 //! The Playlist Detail screen, including its move (reorder) mode.
 
 use super::lists::{edit_filter, filter_hotkeys, move_selection};
-use super::{common, shift, tracks, KeyCtx};
+use super::{KeyCtx, common, shift, tracks};
 use crate::pins;
 use crate::player::play_context;
 use crate::state::{
-    move_item_down, move_item_to, move_item_up, AppState, ConfirmAction, Fetch, PendingConfirm, TextPrompt,
-    TextPromptAction,
+    AppState, ConfirmAction, Fetch, PendingConfirm, TextPrompt, TextPromptAction, move_item_down,
+    move_item_to, move_item_up,
 };
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub fn handle(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
-    let Some(pd) = &mut ctx.app.playlist_detail else { return false };
+    let Some(pd) = &mut ctx.app.playlist_detail else {
+        return false;
+    };
     if edit_filter(&mut pd.filter, &mut pd.selected, key.code) {
         return true;
     }
@@ -64,8 +66,12 @@ pub fn handle(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
 /// position in the unfiltered playlist (which `filtered_sorted` carries), not
 /// its display row.
 fn play_from_selected(ctx: &mut KeyCtx<'_>) {
-    let Some(pd) = &ctx.app.playlist_detail else { return };
-    let Some(&(original_index, _)) = ctx.app.playlist_detail_display().get(pd.selected) else { return };
+    let Some(pd) = &ctx.app.playlist_detail else {
+        return;
+    };
+    let Some(&(original_index, _)) = ctx.app.playlist_detail_display().get(pd.selected) else {
+        return;
+    };
     let (uri, name) = (pd.playlist.uri.clone(), pd.playlist.name.clone());
     play_context(ctx.app, ctx.spirc, uri, Some(original_index as u32), name);
 }
@@ -74,7 +80,9 @@ fn play_from_selected(ctx: &mut KeyCtx<'_>) {
 /// `Enter` confirms with one `reorder_track` for the net displacement, `Esc`
 /// walks it back to where it started, `g` jumps to a typed position.
 fn handle_move_mode(ctx: &mut KeyCtx<'_>, code: KeyCode) {
-    let Some(pd) = &mut ctx.app.playlist_detail else { return };
+    let Some(pd) = &mut ctx.app.playlist_detail else {
+        return;
+    };
     match code {
         KeyCode::Up => {
             if let Fetch::Ready(items) = &mut pd.tracks {
@@ -126,9 +134,15 @@ fn handle_move_mode(ctx: &mut KeyCtx<'_>, code: KeyCode) {
 /// row in the normal pinned-first display, so the highlight stays on the same
 /// track when a pin is active.
 fn resume_normal_selection(app: &mut AppState) {
-    let Some(pd) = &app.playlist_detail else { return };
+    let Some(pd) = &app.playlist_detail else {
+        return;
+    };
     let real_index = pd.selected;
-    let row = app.playlist_detail_display().iter().position(|&(i, _)| i == real_index).unwrap_or(real_index);
+    let row = app
+        .playlist_detail_display()
+        .iter()
+        .position(|&(i, _)| i == real_index)
+        .unwrap_or(real_index);
     if let Some(pd) = &mut app.playlist_detail {
         pd.selected = row;
     }
@@ -153,8 +167,13 @@ fn enter_move_mode(app: &mut AppState) {
     }
     // `selected` is a display row; move mode treats it as a raw index, so
     // convert first or a pin would make it move the wrong track.
-    let Some(pd) = &app.playlist_detail else { return };
-    let real_index = app.playlist_detail_display().get(pd.selected).map(|&(i, _)| i);
+    let Some(pd) = &app.playlist_detail else {
+        return;
+    };
+    let real_index = app
+        .playlist_detail_display()
+        .get(pd.selected)
+        .map(|&(i, _)| i);
     if let (Some(real_index), Some(pd)) = (real_index, &mut app.playlist_detail) {
         pd.selected = real_index;
         pd.move_mode = Some(real_index);
@@ -166,8 +185,12 @@ fn enter_move_mode(app: &mut AppState) {
 /// inconsistently), so the prompt says so rather than surprising the user
 /// with a bigger deletion than they asked for.
 fn confirm_remove_track(app: &mut AppState) {
-    let (Some(track), Some(pd)) = (app.selected_track(), &app.playlist_detail) else { return };
-    let Fetch::Ready(items) = &pd.tracks else { return };
+    let (Some(track), Some(pd)) = (app.selected_track(), &app.playlist_detail) else {
+        return;
+    };
+    let Fetch::Ready(items) = &pd.tracks else {
+        return;
+    };
     let occurrences = items.iter().filter(|t| t.uri == track.uri).count();
     let message = if occurrences > 1 {
         format!(
@@ -175,8 +198,15 @@ fn confirm_remove_track(app: &mut AppState) {
             track.artist, track.title
         )
     } else {
-        format!("Remove \"{} \u{2014} {}\" from this playlist? y/n", track.artist, track.title)
+        format!(
+            "Remove \"{} \u{2014} {}\" from this playlist? y/n",
+            track.artist, track.title
+        )
     };
-    let action = ConfirmAction::RemoveTrack { playlist_uri: pd.playlist.uri.clone(), track_uri: track.uri, occurrences };
+    let action = ConfirmAction::RemoveTrack {
+        playlist_uri: pd.playlist.uri.clone(),
+        track_uri: track.uri,
+        occurrences,
+    };
     app.pending_confirm = Some(PendingConfirm { message, action });
 }

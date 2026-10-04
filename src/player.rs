@@ -26,16 +26,45 @@ pub struct Connection {
     pub session: Session,
 }
 
+/// Why a connect attempt failed. `NoCredentials` needs the user to act; every
+/// other failure is treated as transient and retried.
+#[derive(Debug, PartialEq)]
+pub enum ConnectError {
+    NoCredentials,
+    Other(String),
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoCredentials => f.write_str("no cached credentials found in ncspot's cache"),
+            Self::Other(e) => f.write_str(e),
+        }
+    }
+}
+
+impl From<String> for ConnectError {
+    fn from(e: String) -> Self {
+        Self::Other(e)
+    }
+}
+
+impl From<&str> for ConnectError {
+    fn from(e: &str) -> Self {
+        Self::Other(e.to_string())
+    }
+}
+
 /// Full librespot bootstrap. Returns `Err` instead of panicking so a failed
 /// attempt can back off and retry rather than crash.
-pub async fn connect() -> Result<Connection, String> {
+pub async fn connect() -> Result<Connection, ConnectError> {
     // Login credentials come from ncspot's cache. Volume and audio cache get
     // a directory of their own: librespot writes a file literally named
     // `volume` there, which collides with ncspot's `volume/` directory.
     let own_cache = paths::cache_dir().join("librespot");
     let cache = Cache::new(Some(&paths::ncspot_librespot_cache()), Some(&own_cache), Some(&own_cache), None)
         .map_err(|e| e.to_string())?;
-    let credentials = cache.credentials().ok_or("no cached credentials found in ncspot's cache")?;
+    let credentials = cache.credentials().ok_or(ConnectError::NoCredentials)?;
 
     let session = Session::new(SessionConfig::default(), Some(cache));
     let mixer_fn = mixer::find(None).ok_or("no default mixer available")?;

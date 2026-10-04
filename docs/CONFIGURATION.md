@@ -20,12 +20,8 @@ cache dir so the next run logs in again.
 
 ## `config.toml`
 
-Looked up in this order, first match wins:
-
-1. `spot-tui/config.toml` in the platform config directory
-   (macOS: `~/Library/Application Support/spot-tui/`, Linux: `~/.config/spot-tui/`)
-2. `ncspot-lyrics/config.toml` in the same parent directory. This is the app's
-   earlier name and is still read so an existing file keeps working.
+Looked up at `spot-tui/config.toml` in the platform config directory
+(macOS: `~/Library/Application Support/spot-tui/`, Linux: `~/.config/spot-tui/`).
 
 A file that fails to parse is ignored with a warning in the log. Unknown keys
 are ignored too.

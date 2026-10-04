@@ -1,7 +1,6 @@
 // `config.toml`, optional: every field has a default, so a missing or partial file
 // is fine. Looked up as `spot-tui/config.toml` under the platform config dir
-// (macOS `~/Library/Application Support`, Linux `~/.config`), falling back to the
-// older `ncspot-lyrics/` directory (see `paths::config_files`). It can hold a
+// (macOS `~/Library/Application Support`, Linux `~/.config`). It can hold a
 // secret API key, so keep it private (`chmod 600`).
 
 use serde::Deserialize;
@@ -105,9 +104,7 @@ impl Config {
 }
 
 pub fn load() -> Config {
-    let Some(raw) = crate::paths::config_files()
-        .iter()
-        .find_map(|path| std::fs::read_to_string(path).ok())
+    let Some(raw) = crate::paths::config_file().and_then(|path| std::fs::read_to_string(path).ok())
     else {
         return Config::default();
     };

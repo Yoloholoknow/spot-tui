@@ -18,6 +18,7 @@ src/
   main.rs            entry: --help/--version, logging, hands off to runtime
   runtime.rs         the main loop: connect/reconnect, per-frame work, key dispatch
   player.rs          librespot connection and the playback controls
+  media.rs           macOS Now Playing and media keys (souvlaki); runs the app off the main thread
   position.rs        playback position as a state machine fed by player events
   covers.rs          album-art fetching, and prefetching the next track's
   terminal.rs        raw mode, alternate screen, graphics-protocol detection

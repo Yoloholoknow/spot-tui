@@ -68,6 +68,9 @@ pub struct Config {
     /// Start with lyrics romanized (Japanese, Chinese, Korean shown in Latin
     /// letters). `t` toggles it at any time; this only sets where it starts.
     pub romanize_lyrics: bool,
+    /// Publish the current track to macOS Now Playing and accept media keys
+    /// (macOS only; ignored elsewhere).
+    pub media_controls: bool,
 }
 
 impl Default for Config {
@@ -77,6 +80,7 @@ impl Default for Config {
             spicy_lyrics_key: None,
             spotify_client_id: None,
             romanize_lyrics: false,
+            media_controls: true,
         }
     }
 }
@@ -136,6 +140,14 @@ mod tests {
         assert!(!cfg.romanize_lyrics);
         let cfg: Config = toml::from_str("romanize_lyrics = true").unwrap();
         assert!(cfg.romanize_lyrics);
+    }
+
+    #[test]
+    fn media_controls_default_on_and_can_be_disabled() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.media_controls);
+        let cfg: Config = toml::from_str("media_controls = false").unwrap();
+        assert!(!cfg.media_controls);
     }
 
     #[test]

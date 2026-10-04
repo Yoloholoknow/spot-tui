@@ -9,7 +9,8 @@ use crate::lyrics::pipeline::{LyricsPipeline, TrackMeta};
 use crate::lyrics::romanizer::Romanizer;
 use crate::lyrics::spicy::SpicyClient;
 use crate::lyrics::{CachedLyrics, LyricLine, current_line_index};
-use crate::player::{self, ConnectError, Connection};
+use crate::media::{MediaCommand, MediaSession};
+use crate::player::{self, ConnectError, Connection, seek_target_ms};
 use crate::position::PositionTracker;
 use crate::services::{ServiceReceivers, Services};
 use crate::state::{AppState, LyricsState, RepeatMode, Screen};
@@ -115,6 +116,8 @@ struct Runtime {
     images: ui::ImageState,
     scroll: ui::ScrollState,
     tracker: PositionTracker,
+    /// macOS Now Playing and media keys; `None` when disabled or unavailable.
+    media: Option<MediaSession>,
 
     svc: Services,
     service_rx: ServiceReceivers,
@@ -176,6 +179,12 @@ pub async fn run() -> std::io::Result<()> {
     let (cover_tx, cover_rx) = mpsc::channel();
     let (prefetch_tx, prefetch_rx) = mpsc::channel();
 
+    let media = if cfg.media_controls {
+        MediaSession::new()
+    } else {
+        None
+    };
+
     let mut rt = Runtime {
         terminal,
         app: AppState::new(
@@ -191,6 +200,7 @@ pub async fn run() -> std::io::Result<()> {
         },
         scroll: ui::ScrollState::default(),
         tracker: PositionTracker::new(),
+        media,
         svc,
         service_rx,
         client_rx,
@@ -368,6 +378,9 @@ impl Runtime {
     /// Forgets everything about the previous account, so a sign-in as someone
     /// else never shows the last user's library, queue or lyrics.
     fn reset_account_state(&mut self) {
+        if let Some(media) = &mut self.media {
+            media.clear();
+        }
         // Results still in flight would otherwise land in the fresh state.
         self.drain_results();
         self.app = AppState::new(
@@ -433,6 +446,9 @@ impl Runtime {
     }
 
     fn show_disconnected(&mut self) -> std::io::Result<()> {
+        if let Some(media) = &mut self.media {
+            media.clear();
+        }
         self.app.track_title = None;
         self.app.track_artist = None;
         self.app.track_album = None;
@@ -463,6 +479,7 @@ impl Runtime {
             }
 
             self.drain_player_events(conn);
+            self.drain_media_commands(conn);
             self.start_due_lyrics_fetch(conn);
             self.poll_client_ready();
             self.poll_queue();
@@ -516,7 +533,19 @@ impl Runtime {
     /// was among them.
     fn drain_player_events(&mut self, conn: &mut Connection) -> bool {
         let mut track_changed = false;
+        let mut playback_changed = false;
         while let Ok(event) = conn.events.try_recv() {
+            playback_changed |= matches!(
+                event,
+                PlayerEvent::TrackChanged { .. }
+                    | PlayerEvent::Playing { .. }
+                    | PlayerEvent::Paused { .. }
+                    | PlayerEvent::Loading { .. }
+                    | PlayerEvent::Stopped { .. }
+                    | PlayerEvent::EndOfTrack { .. }
+                    | PlayerEvent::Seeked { .. }
+                    | PlayerEvent::PositionCorrection { .. }
+            );
             match &event {
                 PlayerEvent::VolumeChanged { volume } => self.app.volume = *volume,
                 PlayerEvent::ShuffleChanged { shuffle } => self.app.shuffle = *shuffle,
@@ -531,10 +560,47 @@ impl Runtime {
             }
             self.tracker.on_event(&event, Instant::now());
         }
+        if playback_changed {
+            self.sync_media_playback();
+        }
         // No player event carries smart shuffle, so read it from librespot's
         // connect state on every pass. Shuffle off always wins.
         self.app.smart_shuffle = self.app.shuffle && librespot_connect::smart_shuffle_active();
         track_changed
+    }
+
+    /// Tells the OS the play state and position. Sent on state changes only:
+    /// the system advances the elapsed time on its own between updates.
+    fn sync_media_playback(&mut self) {
+        if let Some(media) = &mut self.media {
+            let progress = Duration::from_millis(self.tracker.progress_ms(Instant::now()) as u64);
+            media.set_playback(self.tracker.is_playing(), progress);
+        }
+    }
+
+    /// Applies play/pause/skip/seek requests from media keys and Now Playing.
+    fn drain_media_commands(&mut self, conn: &Connection) {
+        let Some(media) = &self.media else {
+            return;
+        };
+        let duration_ms = self.app.duration.as_millis() as i64;
+        while let Some(command) = media.try_recv() {
+            let spirc = &conn.spirc;
+            let progress_ms = self.tracker.progress_ms(Instant::now()) as i64;
+            let _ = match command {
+                MediaCommand::Play => spirc.play(),
+                MediaCommand::Pause => spirc.pause(),
+                MediaCommand::Toggle => spirc.play_pause(),
+                MediaCommand::Next => spirc.next(),
+                MediaCommand::Previous => spirc.prev(),
+                MediaCommand::SeekTo(ms) => {
+                    spirc.set_position_ms(seek_target_ms(ms as i64, 0, duration_ms))
+                }
+                MediaCommand::SeekBy(delta) => {
+                    spirc.set_position_ms(seek_target_ms(progress_ms, delta, duration_ms))
+                }
+            };
+        }
     }
 
     fn on_track_changed(&mut self, conn: &Connection, item: &librespot_metadata::audio::AudioItem) {
@@ -550,6 +616,16 @@ impl Runtime {
             _ => (String::new(), None),
         };
         let uri = item.track_id.to_string();
+
+        if let Some(media) = &mut self.media {
+            media.set_track(
+                &item.name,
+                (!artist.is_empty()).then_some(artist.as_str()),
+                album.as_deref(),
+                Duration::from_millis(item.duration_ms as u64),
+                item.covers.first().map(|c| c.url.as_str()),
+            );
+        }
 
         let app = &mut self.app;
         app.track_title = Some(item.name.clone());

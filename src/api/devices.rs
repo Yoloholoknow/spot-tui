@@ -1,10 +1,7 @@
-//! Connect devices (Phase 8): list them, transfer playback to one.
-//! `device()`/`transfer_playback()`, not `Spirc::transfer` -- Phase 0's
-//! spike (`spike.rs::spike_devices_and_transfer`) already established why:
-//! `Spirc::transfer()` only lets a device reclaim *itself*, there is no
-//! public `Spirc` method to push playback to a *different* device. This
-//! is the same mechanism that spike proved works live (confirmed by the
-//! user's own account: "it redirects audio to my alexa echo dot").
+// Connect devices: list them, transfer playback to one. Uses
+// `device()`/`transfer_playback()` rather than `Spirc::transfer`, which only lets
+// a device reclaim itself; there is no public `Spirc` method to push playback to
+// a different device.
 
 use rspotify::clients::OAuthClient;
 use rspotify::model::Device;
@@ -42,10 +39,8 @@ pub async fn list_devices(client: &AuthCodeSpotify) -> Result<Vec<DeviceSummary>
     Ok(devices.into_iter().filter_map(to_summary).collect())
 }
 
-/// `play: false` keeps whatever play/pause state the session already had
-/// (per rspotify's own doc comment on `transfer_playback`'s `play` arg) --
-/// the least surprising choice for "just move my playback over," not
-/// "also force it to start playing."
+/// `play: false` keeps the session's existing play/pause state (per rspotify's
+/// docs for `transfer_playback`): "move my playback over", not "also start it".
 pub async fn transfer_to(client: &AuthCodeSpotify, device_id: &str) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
         log::warn!("token refresh before transfer_to failed, trying with existing token anyway: {e}");

@@ -1,12 +1,6 @@
-//! Artist Detail (Phase 9): the artist's own info plus a list of their
-//! albums, read-only, play-from-here (opening an album). No top-tracks
-//! section -- `artist_top_tracks` is marked deprecated in rspotify 0.16.1
-//! ("Spotify has removed this endpoint"), so it's not something this
-//! phase is choosing to skip, it's not available to build against at
-//! all. No follow/unfollow toggle either -- that's a real, still-viable
-//! mutation (`library_add`/`library_remove` with `LibraryId::Artist`,
-//! same pattern Phase 5 already uses for playlists), just explicitly out
-//! of scope for this phase's own stated "read-only" line in the plan.
+// Artist Detail: the artist's info and albums. No top-tracks section:
+// `artist_top_tracks` is deprecated in rspotify 0.16 ("Spotify has removed this
+// endpoint"). Following is `library::follow_artist`.
 
 use rspotify::clients::BaseClient;
 use rspotify::model::{AlbumType, ArtistId};
@@ -16,13 +10,9 @@ use rspotify::AuthCodeSpotify;
 use super::ensure_fresh;
 use super::library::SavedAlbumSummary;
 
-// Confirmed live via the real Spotify error body ("Invalid limit"): Dev
-// Mode apps cap this endpoint below 50, same restriction (and same error
-// message) `api::search` already hit and worked around. 10 is the one
-// value already confirmed safe for *a* Dev-Mode-capped catalog endpoint
-// in this app (search) -- not verified specifically for this endpoint,
-// but a conservative starting point: too low costs an extra round trip
-// per page, too high is a guaranteed 400.
+// Dev Mode apps cap this endpoint below 50 ("Invalid limit"), as with search. 10
+// is the value known to work for a Dev-Mode catalogue endpoint; not verified for
+// this one specifically, but too low costs a round trip and too high is a 400.
 const PAGE_LIMIT: u32 = 10;
 const MAX_ITEMS: u32 = 2000;
 
@@ -48,13 +38,9 @@ pub async fn get_artist_detail(client: &AuthCodeSpotify, artist_uri: &str) -> Re
         }
     };
 
-    // Explicit include_groups, not [] -- rspotify's own doc comment claims
-    // an empty list means "all types," but that assumption predates
-    // Spotify's Feb-2026 API consolidation. Reported live as still 400ing
-    // even with this change, so it wasn't the (or the whole) root cause --
-    // kept anyway since it's not wrong, just insufficient on its own;
-    // describe_client_error below is what actually surfaces Spotify's real
-    // reason once reproduced again.
+    // Explicit `include_groups`: rspotify documents an empty list as "all types", but
+    // that predates Spotify's Feb 2026 API consolidation. This alone did not cure the
+    // 400s; `describe_client_error` surfaces the real reason.
     let include_groups = [AlbumType::Album, AlbumType::Single, AlbumType::Compilation, AlbumType::AppearsOn];
     let mut albums = Vec::new();
     let mut offset: u32 = 0;
@@ -81,10 +67,8 @@ pub async fn get_artist_detail(client: &AuthCodeSpotify, artist_uri: &str) -> Re
         offset += PAGE_LIMIT;
     }
 
-    // genres is deprecated upstream ("may not exist in the response") but
-    // still has #[serde(default)], so it deserializes safely (as empty)
-    // rather than failing the way the queue endpoint's missing
-    // external_ids did -- shown when present, harmlessly absent otherwise.
+    // `genres` is deprecated upstream and may be absent. `#[serde(default)]` makes it
+    // deserialize as empty instead of failing.
     #[allow(deprecated)]
     let genres = artist.genres;
     Ok(ArtistDetail { uri: artist.id.uri(), name: artist.name, genres, albums })

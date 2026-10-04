@@ -1,8 +1,5 @@
-//! Album Detail (Phase 9): the album's own tracks, read-only,
-//! play-from-here. No save/unsave-album toggle -- a real, viable
-//! mutation (`library_add`/`library_remove` with `LibraryId::Album`,
-//! same pattern Phase 5 already uses for playlists), just out of scope
-//! for this phase's own stated "read-only" line in the plan.
+// Album Detail: the album's own tracks. Read-only; saving the album is
+// `library::save_album`.
 
 use rspotify::clients::BaseClient;
 use rspotify::model::AlbumId;
@@ -12,13 +9,9 @@ use rspotify::AuthCodeSpotify;
 use super::ensure_fresh;
 use super::search::TrackResult;
 
-// Reduced preemptively, not from a live report on this specific endpoint
-// -- `album_track_manual` is the same category of catalog-browse
-// endpoint as `api::artist`'s `artist_albums_manual`, which was
-// confirmed live to 400 with "Invalid limit" at 50 under Dev Mode. A
-// full album almost always has more than 10 tracks, so shipping this at
-// 50 would have failed on the very next real test. See `api::artist`'s
-// own comment on why 10 specifically.
+// Dev Mode apps cap catalogue endpoints below 50 ("Invalid limit" 400). 10 is the
+// value known to work for search and is used here too; too low costs a round trip
+// per page, too high is a guaranteed 400.
 const PAGE_LIMIT: u32 = 10;
 const MAX_ITEMS: u32 = 2000;
 
@@ -50,11 +43,8 @@ pub async fn get_album_detail(client: &AuthCodeSpotify, album_uri: &str) -> Resu
     let album_uri_resolved = album.id.uri();
     let album_name = album.name;
 
-    // Deliberately re-paginates from scratch via album_track_manual rather
-    // than also using the first page FullAlbum already embeds -- simpler
-    // than stitching two pagination sources together. At PAGE_LIMIT=10
-    // (see its own comment) most real albums need 2+ pages, unlike when
-    // this was written against a since-disproven limit of 50.
+    // Paginates from scratch via `album_track_manual` instead of stitching onto the
+    // first page `FullAlbum` embeds. At 10 per page most albums need 2+ pages.
     let mut tracks = Vec::new();
     let mut offset: u32 = 0;
     loop {

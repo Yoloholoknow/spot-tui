@@ -1,9 +1,8 @@
-//! `config.toml` in the platform config directory -- optional; every field
-//! has a default so a missing or partial file is fine. macOS:
-//! `~/Library/Application Support/ncspot-lyrics/config.toml`; Linux:
-//! `~/.config/ncspot-lyrics/config.toml` (whatever `directories` reports for
-//! the "ncspot-lyrics" app). The file can hold a secret API key, so keep it
-//! private (`chmod 600`).
+// `config.toml`, optional: every field has a default, so a missing or partial file
+// is fine. Looked up as `spot-tui/config.toml` under the platform config dir
+// (macOS `~/Library/Application Support`, Linux `~/.config`), falling back to the
+// older `ncspot-lyrics/` directory (see `paths::config_files`). It can hold a
+// secret API key, so keep it private (`chmod 600`).
 
 use serde::Deserialize;
 use std::fmt;
@@ -50,19 +49,13 @@ pub fn resolve_key(config_value: Option<&ApiKey>, env_value: Option<&str>) -> Op
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// `q` asks "Quit spot-tui? y/n" first, same overlay every other
-    /// destructive action already confirms through, rather than exiting
-    /// immediately. Reported live as wanted, with an escape hatch for
-    /// anyone who'd rather have the old immediate-quit behavior back --
-    /// set `confirm_quit = false` in this file. Never applies to `q`
-    /// typed into Search's query box (it isn't a quit key there at all)
-    /// or to Ctrl+C, which stays an immediate, unconfirmed quit -- a
-    /// harder interrupt than a soft quit key, by terminal convention.
+    /// `Shift+Q` asks "Quit spot-tui? y/n" first, like every other destructive action;
+    /// set `confirm_quit = false` for an immediate quit. Never applies to text typed
+    /// into a field, or to Ctrl+C, which always quits at once.
     pub confirm_quit: bool,
-    /// Key for Spicy Lyrics' developer API (`sl_sk_...`, a secret key). Kept
-    /// here, outside the repo, and never logged. Optional: without one the
-    /// lyrics chain simply skips that source. `SPICY_LYRICS_API_KEY` in the
-    /// environment overrides it. Treat this file as private (`chmod 600`).
+    /// Key for Spicy Lyrics' developer API (`sl_sk_...`, secret). Kept outside the
+    /// repo and never logged. Optional: without one that source is skipped.
+    /// `SPICY_LYRICS_API_KEY` in the environment overrides it.
     pub spicy_lyrics_key: Option<ApiKey>,
     /// Start with lyrics romanized (Japanese, Chinese, Korean shown in Latin
     /// letters). `t` toggles it at any time; this only sets where it starts.
@@ -83,14 +76,13 @@ impl Config {
 }
 
 pub fn load() -> Config {
-    let Some(dirs) = directories::ProjectDirs::from("", "", "ncspot-lyrics") else {
+    let Some(raw) = crate::paths::config_files().iter().find_map(|path| std::fs::read_to_string(path).ok()) else {
         return Config::default();
     };
-    let path = dirs.config_dir().join("config.toml");
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return Config::default();
-    };
-    toml::from_str(&raw).unwrap_or_default()
+    toml::from_str(&raw).unwrap_or_else(|e| {
+        log::warn!("ignoring config.toml, it did not parse: {e}");
+        Config::default()
+    })
 }
 
 #[cfg(test)]

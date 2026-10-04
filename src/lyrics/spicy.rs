@@ -1,10 +1,9 @@
-//! Spicy Lyrics' official developer API (`GET /v1/lyrics/{trackId}`), the
-//! primary lyrics source when a key is configured (Phase 26).
-//!
-//! Everything in here that doesn't touch the network is pure and unit
-//! tested against trimmed copies of real responses (captured live, kept
-//! inline below), because the response is a union whose branches are easy
-//! to get subtly wrong.
+// Spicy Lyrics' official developer API (`GET /v1/lyrics/{trackId}`), the primary
+// lyrics source when a key is configured.
+//
+// Everything that doesn't touch the network is pure and unit tested against
+// trimmed copies of real responses (kept inline below), because the response is
+// a union whose branches are easy to get subtly wrong.
 
 use crate::lyrics::WordSeg;
 use serde_json::Value;
@@ -879,7 +878,7 @@ mod spicy_live {
                 })
                 .collect();
             let started = std::time::Instant::now();
-            let romanized = crate::romanize::romanize_lyric_lines(&sheet);
+            let romanized = crate::lyrics::romanize::romanize_lyric_lines(&sheet);
             let took = started.elapsed();
             let with_text = romanized.iter().flatten().count();
             println!("=== {name}: {} lines, {with_text} romanized, {took:?}", sheet.len());

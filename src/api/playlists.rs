@@ -1,16 +1,9 @@
-//! Playlist mutation (Phase 5): create, rename, delete, add/remove a
-//! track. Read paths (`your_playlists`, `playlist_tracks`) stay in
-//! `api::library` -- this module is only the write side, split out
-//! because "read a list" and "mutate one item" are different enough
-//! concerns to earn their own file, matching the `api/` split's own
-//! stated intent.
-//!
-//! Every function here returns `Result<_, String>`, not `ClientResult`,
-//! for the same reason `api::library::playlist_tracks` does: converting
-//! a caller-supplied URI via `PlaylistId`/`TrackId::from_id_or_uri` can
-//! fail on bad input, a distinct failure mode `ClientError` has no
-//! variant for, and every caller already stringifies errors immediately
-//! anyway.
+// Playlist writes: create, rename, delete, add and remove a track, reorder.
+// Reads live in `api::library`.
+//
+// Functions return `Result<_, String>` because converting a caller-supplied URI
+// via `PlaylistId`/`TrackId::from_id_or_uri` can fail on bad input, which
+// `ClientError` has no variant for.
 
 use rspotify::clients::OAuthClient;
 use rspotify::model::{LibraryId, PlayableId, PlaylistId, TrackId};
@@ -28,10 +21,8 @@ fn track_id(track_uri: &str) -> Result<TrackId<'_>, String> {
     TrackId::from_id_or_uri(track_uri).map_err(|e| e.to_string())
 }
 
-/// `user_playlist_create`'s user-id parameter is vestigial post-Feb-2026
-/// (the request actually posts to `me/playlists`, ignoring it server-side)
-/// but the method still requires a type-correct one -- `me()` is the same
-/// call `spike.rs`'s own playlist-reorder spike already uses to get one.
+/// `user_playlist_create`'s user-id parameter is vestigial since Feb 2026 (the
+/// request posts to `me/playlists`) but still has to be type-correct, hence `me()`.
 pub async fn create_playlist(client: &AuthCodeSpotify, name: &str) -> Result<PlaylistSummary, String> {
     if let Err(e) = ensure_fresh(client).await {
         log::warn!("token refresh before create_playlist failed, trying with existing token anyway: {e}");
@@ -51,14 +42,10 @@ pub async fn create_playlist(client: &AuthCodeSpotify, name: &str) -> Result<Pla
     })
 }
 
-/// Name-only -- no description/visibility editing in this phase.
-///
-/// `playlist_change_detail`'s parameter order is `(name, public,
-/// description, collaborative)`, the *opposite* order of
-/// `user_playlist_create`'s `(name, public, collaborative, description)`.
-/// Both call sites are worth double-checking against rspotify's actual
-/// signature before touching either -- transposing these compiles fine
-/// (all four are `Option`) and silently sends the wrong thing.
+/// Name only. Note `playlist_change_detail` takes `(name, public, description,
+/// collaborative)`, the opposite order of `user_playlist_create`'s
+/// `(name, public, collaborative, description)`; transposing them compiles (all
+/// `Option`) and silently sends the wrong thing.
 pub async fn rename_playlist(client: &AuthCodeSpotify, playlist_uri: &str, new_name: &str) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
         log::warn!("token refresh before rename_playlist failed, trying with existing token anyway: {e}");
@@ -71,11 +58,9 @@ pub async fn rename_playlist(client: &AuthCodeSpotify, playlist_uri: &str, new_n
     Ok(())
 }
 
-/// "Delete a playlist you own" is modeled by the Spotify Web API as
-/// unfollowing it -- as of rspotify 0.16's Feb-2026-consolidation,
-/// through the Library API (`library_remove`), not the now-deprecated
-/// `playlist_unfollow`. Needs `user-library-modify`, already in `SCOPES`
-/// for save/unsave-track -- no re-login required.
+/// Deleting a playlist you own is unfollowing it, which since Feb 2026 goes
+/// through the Library API (`library_remove`) rather than the deprecated
+/// `playlist_unfollow`. Needs `user-library-modify`, already in `SCOPES`.
 pub async fn delete_playlist(client: &AuthCodeSpotify, playlist_uri: &str) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
         log::warn!("token refresh before delete_playlist failed, trying with existing token anyway: {e}");
@@ -103,19 +88,13 @@ pub async fn add_track(client: &AuthCodeSpotify, playlist_uri: &str, track_uri: 
     Ok(())
 }
 
-/// Removes every occurrence of `track_uri` in the playlist, not just the
-/// selected position -- confirmed, unfixable-as-shipped platform
-/// limitation, not an unproven corner being cut. rspotify also exposes a
-/// position-scoped variant (`playlist_remove_specific_occurrences_of_items`);
-/// spiked for real (`spike::run_spike_remove_specific_occurrence`) against a
-/// live 2x-duplicate playlist rather than trusted on faith, and it's worse
-/// than this one: without an explicit `snapshot_id` it removed both
-/// occurrences anyway (positions silently ignored), and with one it removed
-/// neither (silent no-op). Non-deterministic behavior on a destructive call
-/// is not a viable alternative. The caller (`main.rs`'s `d` handler on
-/// Playlist Detail) is responsible for warning the user when the selected
-/// track has duplicates before calling this, since this function has no way
-/// to only take one.
+/// Removes every occurrence of `track_uri`, not just the selected one: a platform
+/// limitation. rspotify's position-scoped variant
+/// (`playlist_remove_specific_occurrences_of_items`) was tried against a real
+/// playlist holding a track twice and was worse: without a `snapshot_id` it
+/// removed both copies anyway, and with one it removed neither (a silent no-op).
+/// Non-deterministic behaviour on a destructive call is no alternative, so the
+/// Playlist Detail `d` handler warns the user when the track has duplicates.
 pub async fn remove_track(client: &AuthCodeSpotify, playlist_uri: &str, track_uri: &str) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
         log::warn!("token refresh before remove_track failed, trying with existing token anyway: {e}");
@@ -129,38 +108,14 @@ pub async fn remove_track(client: &AuthCodeSpotify, playlist_uri: &str, track_ur
     Ok(())
 }
 
-/// `insert_before`'s asymmetry, confirmed live against a real playlist in
-/// Phase 0's spike (`spike.rs`): it is *not* simply `to_index`. Moving
-/// down (`to_index > from_index`) needs `to_index + 1`; moving up needs
-/// `to_index` with no `+1`. Passing the caller's intended target straight
-/// through as `insert_before` is the off-by-one that failed on the first
-/// spike attempt -- pulled out as its own pure function specifically so
-/// that exact regression stays covered by a test, not just a comment.
+/// `insert_before` is not simply `to_index`: moving down needs `to_index + 1`,
+/// moving up needs `to_index`. Passing the target straight through is an
+/// off-by-one. A pure function so the regression stays under test.
 fn insert_before_for_move(from_index: usize, to_index: usize) -> usize {
     if to_index > from_index {
         to_index + 1
     } else {
         to_index
-    }
-}
-
-#[cfg(test)]
-mod reorder_tests {
-    use super::*;
-
-    #[test]
-    fn moving_down_needs_target_plus_one() {
-        assert_eq!(insert_before_for_move(0, 2), 3);
-    }
-
-    #[test]
-    fn moving_up_needs_target_with_no_plus_one() {
-        assert_eq!(insert_before_for_move(2, 0), 0);
-    }
-
-    #[test]
-    fn no_net_movement_is_a_harmless_identity_call() {
-        assert_eq!(insert_before_for_move(1, 1), 1);
     }
 }
 
@@ -182,4 +137,24 @@ pub async fn reorder_track(
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod reorder_tests {
+    use super::*;
+
+    #[test]
+    fn moving_down_needs_target_plus_one() {
+        assert_eq!(insert_before_for_move(0, 2), 3);
+    }
+
+    #[test]
+    fn moving_up_needs_target_with_no_plus_one() {
+        assert_eq!(insert_before_for_move(2, 0), 0);
+    }
+
+    #[test]
+    fn no_net_movement_is_a_harmless_identity_call() {
+        assert_eq!(insert_before_for_move(1, 1), 1);
+    }
 }

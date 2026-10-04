@@ -1,0 +1,52 @@
+//! The Now Playing screen. "The selected track" here means the track that is
+//! playing, not a list row.
+
+use super::{common, is_shift_char, KeyCtx};
+use crate::services::TrackView;
+use crate::state::Screen;
+use crossterm::event::{KeyCode, KeyEvent};
+
+pub fn handle(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => ctx.app.nav.escape(),
+        KeyCode::Char('/') => {
+            ctx.app.nav.push(Screen::Search);
+            ctx.app.search.clear();
+        }
+        // Shift+L / Shift+V before plain `v`: a terminal that reports Shift+V
+        // as lowercase plus a modifier would otherwise never reach it.
+        KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'L', 'l') => {
+            if let Some(uri) = playing_uri(ctx) {
+                ctx.svc.like_track(ctx.app, uri);
+            }
+        }
+        KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'V', 'v') => open_track_view(ctx, TrackView::Artist),
+        KeyCode::Char('v') => open_track_view(ctx, TrackView::Album),
+        KeyCode::Char('a') => {
+            if let Some(uri) = playing_uri(ctx) {
+                super::tracks::open_picker(ctx, uri);
+            }
+        }
+        KeyCode::Up => {
+            let _ = ctx.spirc.volume_up();
+        }
+        KeyCode::Down => {
+            let _ = ctx.spirc.volume_down();
+        }
+        KeyCode::Left => common::seek(ctx, -1),
+        KeyCode::Right => common::seek(ctx, 1),
+        _ => return false,
+    }
+    true
+}
+
+fn playing_uri(ctx: &KeyCtx<'_>) -> Option<String> {
+    ctx.tracker.current_track_id().map(str::to_string)
+}
+
+fn open_track_view(ctx: &mut KeyCtx<'_>, view: TrackView) {
+    match playing_uri(ctx) {
+        Some(uri) => ctx.svc.open_track_view(ctx.app, &uri, view),
+        None => ctx.app.status = Some(("nothing playing".to_string(), true)),
+    }
+}

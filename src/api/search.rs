@@ -1,6 +1,5 @@
-//! Standalone search+play (Tier 1 of the roadmap): no other Spotify
-//! client should be required to start something. Client/token bootstrap
-//! lives in the parent `api` module; this is the search-specific surface.
+//! Track search, so something can be found and played without any other
+//! Spotify client. Client and token bootstrap live in the parent `api` module.
 
 use rspotify::model::SearchType;
 use rspotify::prelude::*;
@@ -14,22 +13,16 @@ pub struct TrackResult {
     pub title: String,
     pub artist: String,
     pub album: String,
-    /// Added for Phase 9 (Artist/Album Detail) -- `#[serde(default)]` so
-    /// a search-cache entry written before this field existed still
-    /// deserializes (as empty strings) instead of being treated as
-    /// corrupt and discarded outright; the 1-hour cache TTL means a
-    /// stale-shaped entry ages out on its own regardless.
+    /// `#[serde(default)]` so a search-cache entry written before this field existed
+    /// still deserializes (as empty strings) instead of being discarded.
     #[serde(default)]
     pub artist_uri: String,
     #[serde(default)]
     pub album_uri: String,
 }
 
-/// Tier 4: search/metadata response caching. Directly reduces Web API
-/// call volume, which is the axis Spotify actually rate-limits on
-/// (confirmed this session -- the 429s and the 400 were both on
-/// api.spotify.com, never on audio streaming). Same TTL'd-JSON-on-disk
-/// pattern `lyrics.rs` already uses for lrclib.
+/// Search response cache. Spotify rate-limits on Web API call volume, so repeated
+/// searches are served from a TTL'd JSON file on disk, as lrclib lookups are.
 const SEARCH_CACHE_TTL_SECS: u64 = 60 * 60;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -39,9 +32,7 @@ struct SearchCacheEntry {
 }
 
 fn search_cache_dir() -> std::path::PathBuf {
-    directories::ProjectDirs::from("", "", "spot-tui")
-        .map(|d| d.cache_dir().join("search"))
-        .unwrap_or_else(|| std::env::temp_dir().join("spot-tui-search-cache"))
+    crate::paths::cache_dir().join("search")
 }
 
 /// Normalizes case/whitespace so trivially-different typings of the same
@@ -235,10 +226,9 @@ mod relevance_tests {
 }
 
 async fn run_query(client: &AuthCodeSpotify, query: &str, limit: u32) -> ClientResult<Vec<TrackResult>> {
-    // Dev Mode apps cap this at 10 (down from 50 as of Spotify's Feb 2026
-    // migration); confirmed live -- anything higher is a 400 "Invalid
-    // limit". Clamped here too, not just at the call site, so this can't
-    // silently regress if another caller passes a bigger number later.
+    // Dev Mode apps cap this at 10 (down from 50 since Spotify's Feb 2026
+    // migration); anything higher is a 400 "Invalid limit". Clamped here as
+    // well as at the call site so another caller can't regress it.
     let result = client
         .search(query, SearchType::Track, None, None, Some(limit.min(10)), None)
         .await?;

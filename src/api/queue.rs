@@ -1,11 +1,6 @@
-//! The Connect queue (Phase 7): what's currently playing plus what's up
-//! next, and `add_to_queue` for appending a new track to it. There is no
-//! remove or reorder endpoint anywhere in rspotify's `OAuthClient` for
-//! the queue at all (confirmed by reading its full method list),
-//! matching the official app's own inability to manually reorder or
-//! pluck a single item back out of the queue once it's there -- that
-//! part is a real platform gap, not something deferred by choice, the
-//! same category as Liked Songs having no reorder capability at all.
+// The Connect queue: what is playing and what is up next, plus `add_to_queue`.
+// rspotify has no remove or reorder call for the queue; the official app cannot
+// pluck an item back out either, so this is a platform gap.
 
 use rspotify::clients::OAuthClient;
 use rspotify::model::{PlayableId, PlayableItem, TrackId};
@@ -21,9 +16,8 @@ pub struct QueueSummary {
     pub queue: Vec<TrackResult>,
 }
 
-/// Episodes are silently skipped, same as everywhere else in this
-/// codebase -- podcasts are an explicit non-goal (see the design-scope
-/// plan), and `TrackResult` has no shape for one anyway.
+/// Episodes are skipped, as everywhere else: podcasts are out of scope and
+/// `TrackResult` has no shape for one.
 fn playable_to_track(item: PlayableItem) -> Option<TrackResult> {
     match item {
         PlayableItem::Track(t) => {
@@ -38,16 +32,11 @@ fn playable_to_track(item: PlayableItem) -> Option<TrackResult> {
             })
         }
         PlayableItem::Episode(_) => None,
-        // Confirmed live root cause of "queued items don't show up": rspotify's
-        // `FullTrack` (used by `#[serde(untagged)]`'s Track arm) requires
-        // `external_ids`, a field the queue endpoint's track objects simply don't
-        // include -- every other track-returning endpoint does, so this is a real
-        // inconsistency in Spotify's own API surface, not a bug in this app or in
-        // how rspotify models a track in general. The untagged enum's Track/Episode
-        // arms both fail (Episode for the obvious shape reason) and it falls back
-        // to this raw-JSON catch-all (see ramsayleung/rspotify#525). Every field
-        // `TrackResult` actually needs is present in that raw JSON regardless --
-        // extracted leniently here instead of discarding a perfectly good track.
+        // The queue endpoint's track objects lack `external_ids`, which rspotify's
+        // `FullTrack` requires (every other endpoint includes it). The untagged enum's
+        // Track and Episode arms both fail and it falls back to the raw-JSON catch-all
+        // (ramsayleung/rspotify#525). Every field `TrackResult` needs is present in that
+        // JSON, so it is extracted leniently instead of discarding the track.
         PlayableItem::Unknown(raw) => match lenient_track_from_raw(&raw) {
             Some(track) => Some(track),
             None => {
@@ -95,14 +84,11 @@ fn lenient_track_from_raw(raw: &serde_json::Value) -> Option<TrackResult> {
     Some(TrackResult { uri, title, artist, album, artist_uri, album_uri })
 }
 
-/// Appends `track_uri` to the user's playback queue (played after
-/// whatever's currently up, before the surrounding context resumes).
-/// Targets the user's active device (`device_id: None`) -- spot-tui
-/// itself is a Connect device and reclaims active state on launch, so
-/// that's normally this app. The most likely real failure is no active
-/// device at all (or a non-Premium account), which Spotify reports as a
-/// bare 404/403 -- `describe_client_error` surfaces the actual reason
-/// from the response body rather than a status code alone.
+/// Appends to the playback queue (played next, before the context resumes), on the
+/// active device (`device_id: None`), normally this app since it reclaims active
+/// state on launch. The likeliest failure is no active device or a non-Premium
+/// account, reported as a bare 404/403; `describe_client_error` surfaces the
+/// reason from the body.
 pub async fn add_to_queue(client: &AuthCodeSpotify, track_uri: &str) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
         log::warn!("token refresh before add_to_queue failed, trying with existing token anyway: {e}");
@@ -114,6 +100,17 @@ pub async fn add_to_queue(client: &AuthCodeSpotify, track_uri: &str) -> Result<(
     }
 }
 
+pub async fn current_queue(client: &AuthCodeSpotify) -> Result<QueueSummary, String> {
+    if let Err(e) = ensure_fresh(client).await {
+        log::warn!("token refresh before current_queue failed, trying with existing token anyway: {e}");
+    }
+    let raw = client.current_user_queue().await.map_err(|e| e.to_string())?;
+    Ok(QueueSummary {
+        currently_playing: raw.currently_playing.and_then(playable_to_track),
+        queue: raw.queue.into_iter().filter_map(playable_to_track).collect(),
+    })
+}
+
 #[cfg(test)]
 mod lenient_parse_tests {
     use super::*;
@@ -121,9 +118,8 @@ mod lenient_parse_tests {
 
     #[test]
     fn extracts_a_track_missing_external_ids() {
-        // Real shape confirmed live from /v1/me/player/queue -- no
-        // external_ids field, which is exactly what makes FullTrack's
-        // strict deserialization fail and land here in the first place.
+        // The real shape from /v1/me/player/queue: no external_ids, which is
+        // what makes FullTrack's strict deserialization fail and land here.
         let raw = json!({
             "album": {"name": "Some Album", "uri": "spotify:album:xyz"},
             "artists": [{"name": "Some Artist", "uri": "spotify:artist:xyz"}],
@@ -160,15 +156,4 @@ mod lenient_parse_tests {
         let raw = json!({"type": "track", "name": "No URI Here"});
         assert_eq!(lenient_track_from_raw(&raw), None);
     }
-}
-
-pub async fn current_queue(client: &AuthCodeSpotify) -> Result<QueueSummary, String> {
-    if let Err(e) = ensure_fresh(client).await {
-        log::warn!("token refresh before current_queue failed, trying with existing token anyway: {e}");
-    }
-    let raw = client.current_user_queue().await.map_err(|e| e.to_string())?;
-    Ok(QueueSummary {
-        currently_playing: raw.currently_playing.and_then(playable_to_track),
-        queue: raw.queue.into_iter().filter_map(playable_to_track).collect(),
-    })
 }

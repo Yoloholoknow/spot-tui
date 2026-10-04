@@ -289,8 +289,18 @@ impl Runtime {
                     // late reconnect could write the credentials back.
                     conn.session.shutdown();
                     conn.task.abort();
+                    // `abort` only requests the stop; wait until the task is
+                    // really gone so nothing can touch the credentials after
+                    // they are deleted.
+                    let _ = (&mut conn.task).await;
                     drop(conn);
                     auth::sign_out();
+                    if auth::is_signed_in() {
+                        // Something rewrote a login anyway: delete it again,
+                        // or the next pass would reconnect without asking.
+                        log::warn!("a stored login reappeared after sign-out, removing it again");
+                        auth::sign_out();
+                    }
                     self.reset_account_state();
                     note = Some("Signed out.".to_string());
                 }

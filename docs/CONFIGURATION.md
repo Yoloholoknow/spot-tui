@@ -36,12 +36,14 @@ The file can hold a secret API key, so keep it private: `chmod 600`.
 | `spotify_client_id` | none, **required** | Client ID of your own Spotify developer app (see above). |
 | `confirm_quit` | `true` | `Shift+Q` asks "Quit spot-tui? y/n" first. Set `false` to quit immediately. `Ctrl+C` always quits at once. |
 | `romanize_lyrics` | `false` | Start with Japanese, Chinese and Korean lyrics shown in Latin letters. `t` toggles it at any time; this only sets the starting state. |
+| `media_controls` | `true` | macOS only: show the current track in Now Playing (Control Center, Boring Notch) and accept media keys. Set `false` to turn it off. |
 | `spicy_lyrics_key` | none | Key for the Spicy Lyrics developer API (`sl_sk_...`). Enables word-by-word synced lyrics from that source. Without it the source is skipped. |
 
 ```toml
 spotify_client_id = "your_client_id"
 confirm_quit = true
 romanize_lyrics = false
+media_controls = true
 spicy_lyrics_key = "sl_sk_..."
 ```
 

@@ -36,6 +36,11 @@ unicode-normalization = "0.1"
 ureq = { version = "2", features = ["json"] }
 wana_kana = "5"
 
+# macOS Now Playing and media keys; see src/media.rs.
+[target.'cfg(target_os = "macos")'.dependencies]
+souvlaki = "0.8.3"
+objc = "0.2"
+
 # Dependency patches; see docs/VENDORING.md for the why and for how to re-apply
 # the vendored changes on a librespot upgrade.
 #

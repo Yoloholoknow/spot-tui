@@ -9,6 +9,7 @@ mod covers;
 mod http;
 mod input;
 mod lyrics;
+mod media;
 mod paths;
 mod pins;
 mod player;
@@ -55,8 +56,7 @@ fn init_logging() {
     .init();
 }
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
+fn main() -> std::io::Result<()> {
     match std::env::args().nth(1).as_deref() {
         None => {}
         Some("-h" | "--help") => {
@@ -73,5 +73,7 @@ async fn main() -> std::io::Result<()> {
         }
     }
     init_logging();
-    runtime::run().await
+    // The app runs on a worker thread so the main thread can service macOS
+    // media-key callbacks; see `media::run_on_main_thread`.
+    media::run_on_main_thread(|| tokio::runtime::Runtime::new()?.block_on(runtime::run()))
 }

@@ -4,8 +4,6 @@ use directories::ProjectDirs;
 use std::path::PathBuf;
 
 const APP: &str = "spot-tui";
-/// The app's earlier name; its config directory is still read as a fallback.
-const LEGACY_CONFIG_APP: &str = "ncspot-lyrics";
 
 pub fn home() -> PathBuf {
     std::env::var("HOME")
@@ -20,13 +18,9 @@ pub fn cache_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("spot-tui-cache"))
 }
 
-/// `config.toml` locations, most preferred first.
-pub fn config_files() -> Vec<PathBuf> {
-    [APP, LEGACY_CONFIG_APP]
-        .iter()
-        .filter_map(|app| ProjectDirs::from("", "", app))
-        .map(|d| d.config_dir().join("config.toml"))
-        .collect()
+/// `config.toml` location, if the platform has a config directory.
+pub fn config_file() -> Option<PathBuf> {
+    ProjectDirs::from("", "", APP).map(|d| d.config_dir().join("config.toml"))
 }
 
 /// macOS convention for app logs, distinct from the cache dir.

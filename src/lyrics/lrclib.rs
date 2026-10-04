@@ -31,7 +31,7 @@ pub fn best_search_candidate(
         .min_by(|a, b| {
             let da = (a.duration - target_duration_secs).abs();
             let db = (b.duration - target_duration_secs).abs();
-            da.partial_cmp(&db).unwrap()
+            da.total_cmp(&db)
         })
 }
 

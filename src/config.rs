@@ -1,7 +1,6 @@
 // `config.toml`, optional: every field has a default, so a missing or partial file
 // is fine. Looked up as `spot-tui/config.toml` under the platform config dir
-// (macOS `~/Library/Application Support`, Linux `~/.config`), falling back to the
-// older `ncspot-lyrics/` directory (see `paths::config_files`). It can hold a
+// (macOS `~/Library/Application Support`, Linux `~/.config`). It can hold a
 // secret API key, so keep it private (`chmod 600`).
 
 use serde::Deserialize;
@@ -34,6 +33,9 @@ impl fmt::Debug for ApiKey {
 /// Env var that overrides `spicy_lyrics_key` from the config file.
 pub const SPICY_LYRICS_KEY_ENV: &str = "SPICY_LYRICS_API_KEY";
 
+/// Env var that overrides `spotify_client_id` from the config file.
+pub const SPOTIFY_CLIENT_ID_ENV: &str = "SPOT_TUI_CLIENT_ID";
+
 /// The key to use: the environment wins over the config file, both are
 /// trimmed, and a blank value counts as unset -- `SPICY_LYRICS_API_KEY=`
 /// (set but empty) is a common shell accident and must not shadow a good
@@ -59,6 +61,10 @@ pub struct Config {
     /// repo and never logged. Optional: without one that source is skipped.
     /// `SPICY_LYRICS_API_KEY` in the environment overrides it.
     pub spicy_lyrics_key: Option<ApiKey>,
+    /// Client ID of your own Spotify developer app, used for the Web API login
+    /// (library, playlists, queue, devices). Required; see docs/CONFIGURATION.md.
+    /// A client ID is public, not a secret. `SPOT_TUI_CLIENT_ID` overrides it.
+    pub spotify_client_id: Option<String>,
     /// Start with lyrics romanized (Japanese, Chinese, Korean shown in Latin
     /// letters). `t` toggles it at any time; this only sets where it starts.
     pub romanize_lyrics: bool,
@@ -69,6 +75,7 @@ impl Default for Config {
         Self {
             confirm_quit: true,
             spicy_lyrics_key: None,
+            spotify_client_id: None,
             romanize_lyrics: false,
         }
     }
@@ -84,10 +91,20 @@ impl Config {
     }
 }
 
+impl Config {
+    /// The Spotify client ID in effect (environment first, then the file).
+    pub fn spotify_client_id(&self) -> Option<String> {
+        let from_file = self.spotify_client_id.as_deref().map(ApiKey::new);
+        resolve_key(
+            from_file.as_ref(),
+            std::env::var(SPOTIFY_CLIENT_ID_ENV).ok().as_deref(),
+        )
+        .map(|k| k.expose().to_owned())
+    }
+}
+
 pub fn load() -> Config {
-    let Some(raw) = crate::paths::config_files()
-        .iter()
-        .find_map(|path| std::fs::read_to_string(path).ok())
+    let Some(raw) = crate::paths::config_file().and_then(|path| std::fs::read_to_string(path).ok())
     else {
         return Config::default();
     };
@@ -185,6 +202,19 @@ mod tests {
     fn no_usable_key_anywhere_is_none() {
         assert!(resolve_key(None, None).is_none());
         assert!(resolve_key(Some(&ApiKey::new("  ")), Some("")).is_none());
+    }
+
+    #[test]
+    fn spotify_client_id_comes_from_the_file_and_is_trimmed() {
+        let cfg: Config = toml::from_str(r#"spotify_client_id = "  abc123 ""#).unwrap();
+        assert_eq!(cfg.spotify_client_id.as_deref(), Some("  abc123 "));
+        assert_eq!(cfg.spotify_client_id(), Some("abc123".to_owned()));
+    }
+
+    #[test]
+    fn spotify_client_id_defaults_to_none() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.spotify_client_id.is_none());
     }
 
     // `context_lines` was removed once Now Playing started showing the

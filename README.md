@@ -14,7 +14,7 @@ to any other device.
   survive loading a new playlist or album.
 - **Lyrics:** a full-sheet view that follows the song, with word-by-word
   highlighting where the source provides it. Sources are tried in order: Spicy
-  Lyrics (optional, needs a key), Spotify's own, YouTube Music, then lrclib.
+  Lyrics (optional, needs a key), Spotify's own, YouTube Music, lrclib, then NetEase Cloud Music (an unofficial API, tried only when the others have nothing).
 - **Romanized lyrics:** Japanese, Chinese and Korean lyrics in Latin letters
   (`t`), with the word highlight kept in step.
 - **Album art** in terminals that support a graphics protocol (Kitty and iTerm2

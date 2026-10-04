@@ -54,7 +54,7 @@ src/
 
   lyrics/            one module per source, plus shared pieces
     pipeline.rs        the source chain and the lrclib thread
-    spicy.rs, spotify.rs, ytmusic.rs, lrclib.rs   the four sources
+    spicy.rs, spotify.rs, ytmusic.rs, lrclib.rs, netease.rs   the five sources
     cache.rs, lrc.rs   on-disk cache; LRC parsing
     romanizer.rs       off-thread romanization jobs
     romanize/          Japanese, Chinese, Korean -> Latin
@@ -138,7 +138,7 @@ the plain letter because some terminals report Shift+L as `l` plus a modifier.
 | Spotify rejects the stored login (revoked, password changed) | The stored login is deleted and the sign-in screen shows with a note. It is not retried, since retrying cannot help. |
 | Web API token refresh fails while signed in | Search and library show a clear error; playback and lyrics are unaffected. Sign out and in again to recover. |
 | Web API call fails | The result carries the error text, shown in the status line or in place of the list. Spotify's response body is logged, not just the status. |
-| A lyrics source fails or has nothing | Falls through to the next source; lrclib is last and can answer not-found. Not-found is cached for 7 days. |
+| A lyrics source fails or has nothing | Falls through to the next source; NetEase is the last resort, after lrclib, and only synced hits are cached for it. lrclib's not-found is cached for 7 days. Untimed Spicy text is shown as plain lyrics if nothing else is found. |
 | Cover or lyrics response is huge or hangs | Capped and timed out (`http.rs`), then treated as a miss. |
 | Graphics protocol unsupported | A text placeholder replaces album art. |
 | A write is rejected or lags | Counts and membership are updated locally on success, because Spotify reads can lag writes; a failed reorder refetches to undo the optimistic move. |

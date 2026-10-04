@@ -1,2 +1,7 @@
 /target
 .DS_Store
+.claude/local/
+.claude/*.local.md
+graphify-out/
+.codegraph/
+graphify-out-full/

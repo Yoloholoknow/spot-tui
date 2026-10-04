@@ -1,30 +1,15 @@
 use super::*;
 
-/// The one deliberate accent color (progress bar fill + current lyric
-/// line). Everything else stays default/dim -- restraint per
-/// fable-ui-design: one bold moment, not color everywhere. Indexed
-/// (not RGB) so it renders correctly over plain tmux-256color, not just
-/// true-color terminals.
+/// The one accent color (progress fill, current lyric line); everything else is
+/// default or dim. Indexed rather than RGB so it renders over tmux-256color.
 pub(super) const ACCENT: Color = Color::Indexed(35); // a spotify-adjacent green
-/// Confirm-overlay severity tier for a heads-up that's easy to undo
-/// (e.g. adding a duplicate track) -- distinct from `Color::Red`
-/// (irreversible: delete playlist, remove track) so the border color
-/// alone signals how carefully to read the message before answering,
-/// instead of every confirm using the same red regardless of stakes.
+/// Amber: a confirmation that is easy to undo (e.g. adding a duplicate), as
+/// distinct from `DANGER`, so the border alone signals the stakes.
 pub(super) const WARN: Color = Color::Indexed(214); // amber, same 256-color-safe reasoning as ACCENT
-/// Irreversible/failed -- the severity tier above WARN. Named rather than
-/// a new value: this is the exact `Color::Red` the error box, the Danger
-/// confirm tier, and the status line already used literally, so naming
-/// it changes zero pixels and makes the next call site that needs it
-/// obvious rather than another bare `Color::Red`.
+/// Red: irreversible or failed (delete, remove, error box, status errors).
 pub(super) const DANGER: Color = Color::Red;
-/// Secondary/dim text: captions, meta facts beside a title, empty-state
-/// copy. `Color::DarkGray`, matching the dozen call sites that already
-/// reach for it literally. Deliberately not a second, dimmer tone
-/// matching the mockup's `--text-dim`/`--text-faint` split -- both
-/// terminal equivalents are theme-remapped colors (in many palettes
-/// they'd be indistinguishable or inverted), so this ports the
-/// hierarchy (primary vs. secondary), not the literal two-step scale.
+/// Secondary text: captions, metadata beside a title, empty states. A single
+/// tone, since terminal palettes remap dark grays unpredictably.
 pub(super) const DIM: Color = Color::DarkGray;
 
 /// `mm:ss`, minutes uncapped (a >59min track just shows e.g. "61:05"
@@ -34,13 +19,9 @@ pub(super) fn format_mmss(d: Duration) -> String {
     format!("{}:{:02}", total_secs / 60, total_secs % 60)
 }
 
-/// Truncates to at most `max` characters, appending an ellipsis if
-/// anything was cut. Operates on chars, not bytes, so it's safe on
-/// multi-byte UTF-8 (this library has CJK titles). Note: this counts
-/// characters, not terminal display columns -- a CJK title truncated to
-/// `max` chars can still render wider than `max` columns, since each such
-/// glyph is double-width. Acceptable approximation for a header line;
-/// revisit with `unicode-width` if it ever looks wrong in practice.
+/// Truncates to `max` characters, adding an ellipsis if anything was cut. Counts
+/// chars, not display columns, so wide (CJK) text can still overrun; fine for a
+/// header, revisit with `unicode-width` if it matters.
 pub(super) fn truncate_ellipsis(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -53,12 +34,8 @@ pub(super) fn truncate_ellipsis(s: &str, max: usize) -> String {
     out
 }
 
-/// Accent when this pane currently has focus, dim otherwise -- always
-/// present (never fully absent) so nothing changes size or jumps when
-/// `Tab` toggles which pane it is. Only one pane is ever accented at a
-/// time: the sidebar's vertical divider previously changing color was
-/// easy to miss as the sole focus cue; this gives Main pane an equally
-/// visible signal of its own, reported live as missing entirely.
+/// Accent when the pane has focus, dim otherwise. Always drawn, so nothing
+/// resizes when `Tab` moves focus.
 pub(super) fn focus_border_style(active: bool) -> Style {
     if active {
         Style::default().fg(ACCENT)

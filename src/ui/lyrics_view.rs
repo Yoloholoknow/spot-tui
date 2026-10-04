@@ -35,21 +35,11 @@ pub(super) fn plain_display_lines(
 
 pub(super) fn body_lines(app: &AppState) -> Vec<Line<'static>> {
     match &app.lyrics {
-        // `header()` (this screen's title line, and the persistent
-        // playback bar's idle text) already carries the "press / to
-        // search" instruction -- this used to repeat the identical
-        // sentence here too, so an idle Now Playing screen showed it
-        // twice in the same frame. This says something lyrics-area-
-        // appropriate instead, matching the tone of the other
-        // non-synced states below (e.g. `SessionEnded`'s own distinct
-        // line) rather than duplicating the header's.
+        // `header()` and the playbar's idle text already say "press / to search", so
+        // this says something specific to the lyrics area instead of repeating it.
         LyricsState::Idle => vec![Line::from("nothing playing yet")],
-        // Was "restart spot-tui to reconnect" -- stale from before Tier 4's
-        // auto-reconnect existed. The 'outer loop (main.rs) retries forever
-        // with capped exponential backoff and never gives up on its own, so
-        // telling the user to restart was simply wrong the whole time this
-        // screen has been reachable: the fix is already in progress the
-        // moment this message shows.
+        // The app reconnects on its own with backoff, so this only reports that it is
+        // happening.
         LyricsState::SessionEnded => vec![
             Line::from("session disconnected -- reconnecting\u{2026}"),
             Line::from("no need to restart, this usually clears in a few seconds"),
@@ -65,17 +55,10 @@ pub(super) fn body_lines(app: &AppState) -> Vec<Line<'static>> {
                     .map(Line::from),
             )
             .collect(),
-        // Shows the whole sheet, not a windowed few lines around the
-        // current one -- matches official Spotify's own default lyrics
-        // view. `render_now_playing_hero`/`render_fullscreen_hero` are
-        // responsible for scrolling the viewport to keep the current
-        // line visible (see `center_current_line`); this function just
-        // decides what every line looks like, not which ones show.
-        // A blank line follows every real one -- ratatui packs lines
-        // edge to edge by default, which read as cramped next to the
-        // reference's generous line height. Each real line occupies 2
-        // rendered rows now, so `current_body_line_row` doubles the
-        // current-line index to match when it centers the viewport.
+        // Shows the whole sheet, like Spotify's own lyrics view; the hero renderers scroll
+        // the viewport to keep the current line visible (`center_current_line`). A blank
+        // line follows every real one for line height, so each real line occupies two
+        // rows and `current_body_line_row` doubles the current-line index.
         LyricsState::Synced(lines) => {
             if lines.is_empty() {
                 return vec![Line::from("no lyrics found")];
@@ -112,11 +95,9 @@ pub(super) fn body_lines(app: &AppState) -> Vec<Line<'static>> {
     }
 }
 
-/// The 4-tier fade by distance from the current line -- `Color::DarkGray`
-/// alone read as ~1.4:1 contrast against this app's near-black
-/// background, functionally unreadable for a screen built to show the
-/// whole sheet, not just the current line. Used by every `body_lines`
-/// caller, compact and fullscreen alike, so they can't drift apart.
+/// A four-tier fade by distance from the current line. `DarkGray` alone is about
+/// 1.4:1 against a near-black background, unreadable when the whole sheet is
+/// shown. Shared by every `body_lines` caller so compact and fullscreen agree.
 pub(super) fn lyric_tier_color(distance: usize) -> Color {
     match distance {
         0 => ACCENT,
@@ -186,12 +167,9 @@ pub fn word_sweep_active(lyrics: &LyricsState, current_line: Option<usize>, play
     }
 }
 
-/// Only `Synced` has a real "current line" to center on -- every other
-/// `LyricsState` (idle/instrumental/not-found/plain/loading) has no
-/// notion of a current line at all, so they always render from the top.
-/// `*2`: `body_lines` interleaves a blank spacer after every real line,
-/// so the current line's actual row in the rendered `Vec` is twice its
-/// index into the raw synced-lyrics data.
+/// Only `Synced` has a current line to centre on; every other state renders from
+/// the top. The index is doubled because `body_lines` interleaves a blank spacer
+/// after every real line.
 pub(super) fn current_body_line_row(app: &AppState) -> Option<usize> {
     match &app.lyrics {
         LyricsState::Synced(lines) if !lines.is_empty() => Some(app.current_line.unwrap_or(0) * 2),
@@ -199,29 +177,18 @@ pub(super) fn current_body_line_row(app: &AppState) -> Option<usize> {
     }
 }
 
-/// A `Line`'s real on-screen height once `Paragraph`'s own `Wrap` gets to
-/// it -- 1 for a blank spacer (nothing to wrap), otherwise the same
-/// greedy word-wrap `wrapped_line_count` already uses to size the
-/// confirm overlay. Needed because `Paragraph::scroll`'s `y` counts
-/// *wrapped* rows, not logical `Line`s (confirmed by reading
-/// `ratatui-widgets`' `Paragraph::render_paragraph`: "the scroll offset
-/// is applied after the text is wrapped") -- a centering formula that
-/// assumes 1 row per `Line` silently drifts further off-center every
-/// time an earlier line actually wraps to more than one row, which is
-/// exactly what a long lyric line in a narrower pane does. Reported
-/// live as the current line reading progressively lower down the screen
-/// the further into the song it got -- each additional wrapped line
-/// above it added rows this function wasn't accounting for.
+/// A line's on-screen height after `Paragraph`'s `Wrap`: 1 for a blank spacer,
+/// otherwise the same greedy wrap as `wrapped_line_count`. `Paragraph::scroll`
+/// counts wrapped rows, not logical lines, so a centring formula assuming one row
+/// per line drifts further off-centre with every earlier line that wraps.
 pub(super) fn line_row_height(line: &Line<'static>, width: u16) -> usize {
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
     if text.trim().is_empty() { 1 } else { wrapped_line_count(&text, width) as usize }
 }
 
-/// The current line's own vertical middle, in real wrapped-row units
-/// (`line_row_height`), counting from the top of `lines` -- shared by
-/// both `center_current_line` (fullscreen) and `top_anchored_offset`
-/// (compact), so they can't drift apart on the wrap-awareness fix even
-/// though they anchor to different screen positions.
+/// The current line's vertical middle in wrapped rows, shared by
+/// `center_current_line` (fullscreen) and `top_anchored_offset` (compact) so both
+/// stay wrap-aware.
 pub(super) fn anchor_row_of(lines: &[Line<'static>], current_row: usize, width: u16) -> usize {
     let heights: Vec<usize> = lines.iter().map(|l| line_row_height(l, width)).collect();
     let rows_before_current: usize = heights[..current_row.min(heights.len())].iter().sum();
@@ -233,22 +200,12 @@ pub(super) fn total_row_height(lines: &[Line<'static>], width: u16) -> usize {
     lines.iter().map(|l| line_row_height(l, width)).sum()
 }
 
-/// Pads `lines` with `viewport_height / 2` blank rows above and below,
-/// and returns the scroll offset that puts the current line's own
-/// vertical middle at the exact vertical middle of the viewport --
-/// measured in real wrapped rows (`anchor_row_of`), not logical `Line`
-/// count, so it stays correct however many of the preceding lines
-/// happen to wrap. A plain clamped scroll offset (`ideal =
-/// current.saturating_sub(half); ideal.min(total - viewport)`) can't
-/// center at either edge of the sheet either -- there's no real content
-/// to scroll into above line 0 or below the last line, so a song's
-/// opening (or closing) line rendered pinned to the top (or bottom)
-/// instead of centered, also reported live. Padding with real blank
-/// rows gives the offset somewhere to scroll into even there, so the
-/// current line centers unconditionally, including a song's first and
-/// last line and a current line that itself wraps to more than one row.
-/// Fullscreen only -- see `top_anchored_offset` for the compact view,
-/// which was explicitly asked *not* to center this way.
+/// Pads `lines` with `viewport_height / 2` blank rows above and below and returns
+/// the scroll offset that puts the current line's middle at the viewport's middle,
+/// measured in wrapped rows. A plain clamped offset cannot centre near either end
+/// of the sheet (nothing to scroll into above line 0), so the first and last
+/// lines would sit pinned to the edge. Padding lets every line centre. Fullscreen
+/// only; the compact view uses `top_anchored_offset`.
 pub(super) fn center_current_line(
     lines: Vec<Line<'static>>,
     current_row: Option<usize>,
@@ -256,13 +213,9 @@ pub(super) fn center_current_line(
     width: u16,
 ) -> (Vec<Line<'static>>, u16) {
     let Some(current_row) = current_row else {
-        // No current line to anchor on -- this is a short status message
-        // (Loading/"fetching lyrics...", Idle, Instrumental, NotFound,
-        // SessionEnded), not a lyric sheet. It still renders through this
-        // same fullscreen paragraph, so it needs the same vertical-center
-        // treatment real lyrics get here, rather than sitting pinned to
-        // the pane's top edge -- reported live ("loading lyrics text is
-        // so high - center it like the actual lyrics").
+        // No current line: a short status message (loading, idle, instrumental, not
+        // found), not a sheet. It is vertically centred like real lyrics rather than
+        // pinned to the top edge.
         let total_rows = total_row_height(&lines, width);
         let pad_top = (viewport_height as usize).saturating_sub(total_rows) / 2;
         let mut padded = Vec::with_capacity(lines.len() + pad_top);
@@ -285,18 +238,11 @@ pub(super) fn center_current_line(
     (padded, offset)
 }
 
-/// The compact (non-fullscreen) Now Playing view's lyrics scroll: keeps
-/// a couple of already-seen lines visible above the current one instead
-/// of forcing it to the vertical middle the way `center_current_line`
-/// does -- explicitly asked for over centering ("in now playing have it
-/// at the top, not middle"), since centering there ate a large, fixed
-/// share of an already-small pane with blank padding on every render,
-/// which is what made the actually-rendered lyric text read as smaller
-/// even though nothing about its size had changed. No padding here:
-/// unlike the fullscreen view, "settle at the top" (song start) and
-/// "settle at the bottom" (song end, once there's more sheet than fits)
-/// are both already correct, ordinary scrolling behavior, the same as
-/// every other list in this app -- there's nothing to fabricate.
+/// The compact view's lyrics scroll: keeps a couple of already-sung lines above
+/// the current one instead of centring it, since centring spends a large share of
+/// a small pane on blank padding and makes the text read smaller. Unlike the
+/// fullscreen view, settling at the top (song start) and bottom (song end) is
+/// ordinary scrolling, so nothing needs padding.
 pub(super) fn top_anchored_offset(lines: &[Line<'static>], current_row: Option<usize>, viewport_height: u16, width: u16) -> u16 {
     const TOP_MARGIN: usize = 2;
     let Some(current_row) = current_row else { return 0 };

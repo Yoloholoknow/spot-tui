@@ -29,22 +29,12 @@ use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, 
 use ratatui::Frame;
 use std::time::Duration;
 
-/// Persisted scroll offsets, one per list, threaded through `render`
-/// alongside `&AppState` rather than living inside it. Rebuilding a fresh
-/// `ListState` every frame (offset always 0) was the original, buggy
-/// approach: ratatui's own "keep selection visible" clamp then re-pins
-/// the highlight to the bottom edge of the viewport on *every* render
-/// once you've scrolled past one screenful, regardless of which
-/// direction you're actually moving -- reported live as "stays at the
-/// bottom even when scrolling up." Persisting `ListState.offset` across
-/// frames lets ratatui's real algorithm work as designed: the viewport
-/// only moves once the selection would leave it, not on every keystroke.
-/// A separate top-level struct (not new fields nested inside `AppState`)
-/// because rendering needs to mutate exactly one of these at a time while
-/// reading many *other* fields of `AppState` immutably in the same call --
-/// nesting them inside `AppState` itself would fight the borrow checker
-/// over a mutable borrow of one field colliding with an immutable borrow
-/// of its parent struct.
+/// Persisted scroll offsets, one per list. Kept across frames because a fresh
+/// `ListState` each frame (offset 0) makes ratatui re-pin the highlight to the
+/// bottom edge on every render once the list is longer than the screen;
+/// persisting the offset lets the viewport move only when the selection leaves
+/// it. A separate struct from `AppState` so rendering can mutate one of these
+/// while reading other `AppState` fields, which one struct would not allow.
 #[derive(Default)]
 pub struct ScrollState {
     pub sidebar: ListState,
@@ -60,114 +50,60 @@ pub struct ScrollState {
     pub devices: ListState,
     pub artist_detail: ListState,
     pub album_detail: ListState,
-    /// Help's scroll offset in rendered rows -- a plain `u16` for
-    /// `Paragraph::scroll`, not a `ListState`: Help is a reference the
-    /// user scans, not a list they navigate item by item (the mockup's
-    /// own reasoning for giving it a two-column layout with no
-    /// per-row selection at all). Clamped inside `render_help` against
-    /// the real rendered height, so the key handler in `main.rs` can
-    /// increment/decrement blindly without knowing the content size.
+    /// Help's scroll offset in rendered rows, a plain `u16` for `Paragraph::scroll`:
+    /// Help is read, not navigated item by item. Clamped inside `render_help` against
+    /// the real height, so key handlers can change it blindly.
     pub help: u16,
 }
 
-/// Real album art via a terminal graphics protocol, threaded through
-/// `render` the same way `ScrollState` is and for the same reason: it's
-/// mutable render-side cache, not application state, and nesting it
-/// inside `AppState` would fight the borrow checker the same way
-/// `ScrollState`'s own doc comment already explains.
+/// Album art state, threaded through `render` like `ScrollState` (it is mutable
+/// render-side cache, not application state).
 ///
-/// `picker` is populated once at startup (`main.rs`) if the terminal's
-/// capability query (possibly overridden -- see that call site) reports
-/// a real graphics protocol; `None` means "no real protocol available or
-/// detection failed," in which case `render_art` always uses the hashed
-/// placeholder and never touches the fields below at all.
+/// `picker` is set once at startup; `None` means no graphics protocol is
+/// available, and `render_art` then only draws the placeholder.
 ///
-/// `cover_image` holds the currently-playing track's *decoded* cover
-/// (cheap to keep, no network/decode cost to reuse) plus the track uri
-/// it belongs to, set once per track (`main.rs`, off the render path).
-/// `sized_covers` is a small cache of already resize-encoded
-/// `StatefulProtocol`s, one per distinct `(track uri, width, height)`
-/// this app has actually rendered at -- built lazily in `render_art`,
-/// not eagerly. This two-level design (decode once, encode once per
-/// size) exists because a single shared `StatefulProtocol` re-encodes,
-/// and on Kitty fully *re-transmits*, the whole image every time its
-/// render `Rect`'s cell size changes (confirmed by reading
-/// `ratatui-image`'s own Kitty protocol source) -- since the compact
-/// hero and the fullscreen layouts use different art sizes by design,
-/// a single shared protocol meant every `f` toggle forced a full
-/// re-transmit, reported live as visible lag and display corruption
-/// under rapid toggling. Caching one encoded protocol per size actually
-/// seen means toggling between a stable, already-visited set of sizes
-/// (the normal case) never re-triggers that cost after the first visit
-/// to each size.
+/// `cover_image` is the playing track's decoded cover with its URI.
+/// `sized_covers` caches the protocol-encoded image per `(uri, width, height)`,
+/// built lazily by `render_art`. A single shared protocol would re-encode and,
+/// on Kitty, fully retransmit the image whenever its render size changed, and the
+/// compact and fullscreen layouts use different sizes, so every `f` toggle lagged
+/// and could corrupt the display. One entry per size seen avoids that after the
+/// first visit to each.
 #[derive(Default)]
 pub struct ImageState {
     pub picker: Option<ratatui_image::picker::Picker>,
     pub cover_image: Option<(String, image::DynamicImage)>,
     pub sized_covers: Vec<(String, u16, u16, ratatui_image::protocol::StatefulProtocol)>,
-    /// One-shot, whole-process-lifetime retransmit: armed the first time
-    /// this run builds any sized cover at all (in practice, the boot
-    /// track's cover), fired once `STARTUP_RETRANSMIT_DELAY` later by
-    /// clearing the entire cache so the very next render misses and
-    /// rebuilds+retransmits fresh -- exactly what manually skipping a
-    /// track and back already does to "fix" a blank cover, just
-    /// automatic. A near-identical mechanism was tried once before this
-    /// session at a 700ms delay and reverted: that gap was still short
-    /// enough to land while Ghostty's own kitty image-compositing state
-    /// from the *first* transmission was still settling, and a second
-    /// full transmission landing in that window corrupted every
-    /// subsequent cover for the rest of the session (the same trigger
-    /// Phase 18 already found once, for a different cause). Reattempted
-    /// here at a real multi-second delay specifically because that's
-    /// the property that makes a *manual* skip-then-back safe -- by the
-    /// time a human notices and acts, real seconds have passed, not
-    /// milliseconds. The exact minimum safe gap isn't independently
-    /// confirmed; this is a live experiment against real hardware, not
-    /// a proven fix -- if blank art recurs, the delay needs widening
-    /// further; if pixelation/corruption recurs instead, the gap is
-    /// still too short and this needs reverting again.
+    /// One-shot retransmit: armed when the first sized cover is built, fired
+    /// `STARTUP_RETRANSMIT_DELAY` later by clearing the cache so the next render
+    /// re-encodes and retransmits. This does automatically what skipping a track and
+    /// back does by hand to fix a blank first cover. The delay is a judgment call, not
+    /// a proven-safe value: 700 ms was tried and corrupted every later cover in
+    /// Ghostty, which was still settling the first transmission. If blank art
+    /// returns, widen it; if corruption returns, it is still too short.
     pub startup_retransmit_at: Option<std::time::Instant>,
     pub startup_retransmit_done: bool,
-    /// The "soft load next track" prefetch's decoded cover, keyed by the
-    /// uri it belongs to -- separate from `cover_image` (the *currently
-    /// showing* slot) so a background prefetch can never clobber or race
-    /// with what's on screen right now. `main.rs` moves this into
-    /// `cover_image` once the real track-changed event actually arrives
-    /// for the matching uri, instead of starting a fresh fetch.
+    /// The prefetched next track's decoded cover, keyed by its URI. Separate from
+    /// `cover_image` so a background prefetch can never replace what is on screen.
+    /// Moved into `cover_image` when that track actually starts.
     pub prewarmed_cover: Option<(String, image::DynamicImage)>,
 }
 
-/// How long to wait, after this process's very first cover-art
-/// transmission, before automatically clearing the cache and
-/// retransmitting once -- see `ImageState::startup_retransmit_at`'s own
-/// doc comment for why this specific value is a judgment call, not a
-/// derived or confirmed-safe number.
+/// Delay between the first cover transmission and the one-shot retransmit; see
+/// `ImageState::startup_retransmit_at`.
 pub const STARTUP_RETRANSMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(2000);
 
-/// How many distinct `(track, size)` encoded protocols `ImageState`
-/// keeps at once -- comfortably more than the handful of distinct art
-/// sizes one session realistically produces (compact, fullscreen
-/// two-pane, fullscreen narrow-stacked), so eviction is rare in
-/// practice, not a tight budget being constantly hit.
+/// How many `(track, size)` encoded protocols `ImageState` keeps: more than the
+/// handful of sizes a session produces (compact, fullscreen, stacked), so
+/// eviction is rare.
 pub const SIZED_COVER_CACHE_CAP: usize = 4;
 
 pub const STARTUP_SPINNER: [char; 10] = ['\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}', '\u{2827}', '\u{2807}', '\u{280F}'];
 
-/// The very first thing drawn on a cold start, while `connect_spirc()` is
-/// still resolving in the background -- previously this window was a
-/// blank alternate-screen with zero feedback (the whole render loop was
-/// blocked behind `connect_spirc().await`, which takes several real
-/// seconds: AP resolution, auth, first track load). Reported live as a
-/// separate, related bug: the very first album-art render after a cold
-/// start would show completely blank (skipping to another track and back
-/// fixed it), most likely a real terminal-side race -- Ghostty's own
-/// kitty-graphics subsystem not yet ready for the first image placement
-/// immediately after entering the alternate screen. Showing this
-/// animation for a guaranteed minimum duration (`main.rs`'s
-/// `STARTUP_MIN_VISIBLE`) turns an unexplained blank wait into a
-/// deliberate, visible one, and gives that subsystem a real window to
-/// finish initializing before the first real frame (with real album art)
-/// ever gets drawn.
+/// Drawn while the first connect resolves (several seconds: AP resolution, auth,
+/// first track load). It also holds off the first frame with real album art:
+/// drawn too early after entering the alternate screen, Ghostty's kitty-graphics
+/// subsystem is not ready and the first cover renders blank.
 pub fn render_startup(frame: &mut Frame, tick: usize) {
     let area = frame.area();
     let spinner = STARTUP_SPINNER[tick % STARTUP_SPINNER.len()];
@@ -268,10 +204,8 @@ pub fn render(frame: &mut Frame, app: &AppState, scroll: &mut ScrollState, image
     render_overlays(frame, app, &mut scroll.playlist_picker, &mut scroll.quick_jump);
 }
 
-/// Draws whichever overlay is active (at most one in practice -- see the
-/// field order comment on `AppState`) centered on top of whatever's
-/// already been drawn this frame, fullscreen included. Called last
-/// specifically so it paints over everything else.
+/// Draws the active overlay, if any, over everything else this frame (fullscreen
+/// included), so it is called last.
 pub fn render_overlays(
     frame: &mut Frame,
     app: &AppState,

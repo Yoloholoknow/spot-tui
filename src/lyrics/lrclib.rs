@@ -243,14 +243,14 @@ mod client_tests {
 
     #[test]
     fn cache_read_returns_none_when_file_absent() {
-        let dir = std::env::temp_dir().join(format!("ncspot-lyrics-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("spot-tui-test-{}", std::process::id()));
         assert!(read_cache(&dir, "spotify:track:missing", 1_000_000).is_none());
     }
 
     #[test]
     fn cache_round_trips_write_then_read() {
         let dir = std::env::temp_dir().join(format!(
-            "ncspot-lyrics-test-roundtrip-{}",
+            "spot-tui-test-roundtrip-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -267,7 +267,7 @@ mod client_tests {
 
     #[test]
     fn negative_cache_expires_after_ttl() {
-        let dir = std::env::temp_dir().join(format!("ncspot-lyrics-test-ttl-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("spot-tui-test-ttl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write_cache(&dir, "spotify:track:y", &CachedLyrics::NotFound, 1_000_000).unwrap();
 
@@ -291,7 +291,7 @@ mod client_tests {
     #[test]
     fn integration_fetches_real_synced_lyrics_from_lrclib() {
         let dir = std::env::temp_dir().join(format!(
-            "ncspot-lyrics-test-integration-{}",
+            "spot-tui-test-integration-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -318,7 +318,7 @@ mod client_tests {
     #[test]
     fn integration_second_fetch_is_cache_only_no_network() {
         let dir = std::env::temp_dir().join(format!(
-            "ncspot-lyrics-test-cachehit-{}",
+            "spot-tui-test-cachehit-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);

@@ -1,26 +1,15 @@
 use super::*;
 
-/// Fixed key column, in cells -- the one place this screen deliberately
-/// breaks the app's spacing grid, same exception the mockup's own 108px
-/// `.help-key` column makes and for the same reason: an aligned key
-/// column is what makes a dense reference actually scannable.
+/// Fixed key column width: an aligned key column makes a dense reference
+/// scannable, so this is the one place that breaks the spacing grid.
 pub(super) const HELP_KEY_WIDTH: usize = 14;
-/// Below this main-area width, Help renders as a single scrolling
-/// column instead of two -- two columns need roughly a 118-column
-/// terminal once the 22-column sidebar is accounted for, and unlike the
-/// browser mockup (no narrow case to worry about), this app has to
-/// handle a genuinely narrow terminal without the content becoming
-/// unreadable.
+/// Below this main-area width Help is one scrolling column instead of two: two
+/// columns need roughly 118 terminal columns once the sidebar is counted.
 pub(super) const HELP_TWO_COLUMN_MIN_WIDTH: u16 = 96;
 
-/// Keep this in sync as new keys get wired -- Phase 4's whole point was
-/// moving Help to right after this session's current point in the build
-/// rather than writing it once at the end from a settled keybind table,
-/// so each later phase's own "done" should include updating this.
-/// `Search` is deliberately excluded from opening Help via `?` (it's the
-/// one screen where every printable character, `?` included, has to
-/// reach the query box), which is also why the reference below doesn't
-/// claim `?` works "from literally anywhere."
+/// Keep in sync with the key handlers in `input/`. Search is excluded from
+/// opening Help with `?` (every printable key must reach the query box), so
+/// the reference does not claim `?` works everywhere.
 pub(super) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
     (
         "Global",
@@ -248,13 +237,11 @@ pub(super) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
-/// One section's rendered lines: an ACCENT+BOLD title, then one row per
-/// binding with the key padded to `HELP_KEY_WIDTH` and the description
-/// in `DIM`, hand-wrapped (not `Paragraph`'s own `Wrap`) with a hanging
-/// indent so continuation lines stay under the description column
-/// instead of resetting to column 0. Hand-wrapping is also what makes
-/// the rendered height exactly `lines.len()`, which is what makes the
-/// scroll clamp in `render_help` correct.
+/// One section's lines: an accent bold title, then a row per binding with the key
+/// padded to `HELP_KEY_WIDTH` and the description dim. Wrapped by hand with a
+/// hanging indent so continuation lines stay under the description, which also
+/// makes the rendered height exactly `lines.len()`, which the scroll clamp in
+/// `render_help` relies on.
 pub(super) fn help_section_lines(title: &str, rows: &[(&str, &str)], width: usize) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
         title.to_string(),
@@ -278,12 +265,10 @@ pub(super) fn help_section_lines(title: &str, rows: &[(&str, &str)], width: usiz
     lines
 }
 
-/// Index of the first section that starts column 2, chosen so the two
-/// columns come out as close to equal real rendered height as possible
-/// -- sections range from 2 to 10 rows each, so the mockup's own
-/// `ceil(section_count / 2)` split (an even *section* count) is not an
-/// even *height* split. Pure and greedy: keep adding sections to column
-/// 1 until doing so would reach or pass half the total height.
+/// Index of the first section in column 2, chosen so the columns have as equal a
+/// rendered height as possible (sections run 2 to 10 rows, so an even section
+/// count is not an even height). Greedy: fill column 1 until adding a section
+/// would reach half the total height.
 pub(super) fn help_column_split(section_heights: &[usize]) -> usize {
     let total: usize = section_heights.iter().sum();
     let target = total / 2;

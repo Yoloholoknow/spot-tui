@@ -43,10 +43,10 @@ pub struct LyricLine {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind")]
 pub enum CachedLyrics {
-    /// `credit` is the "where these came from" line shown under the lyrics
-    /// (Phase 26: Spicy Lyrics asks for its uploaders to be credited). It is
-    /// optional in the file so cache entries written before it existed still
-    /// load, and omitted when absent so other sources' files are unchanged.
+    /// `credit` is the "where these came from" line shown under the lyrics (Spicy
+    /// Lyrics asks for its uploaders to be credited). Optional in the file so older
+    /// cache entries still load, and omitted when absent so other sources' files are
+    /// unchanged.
     Synced {
         lines: Vec<(f64, String)>,
         /// Word timing, parallel to `lines` (one entry per line), for

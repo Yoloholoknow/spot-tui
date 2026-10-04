@@ -1,11 +1,7 @@
-//! Next-track prefetch (soft-load): fetching enough metadata for a track
-//! that hasn't started playing yet -- `librespot`'s own `PlayerEvent`
-//! only carries this for the track that's *actually* loaded, so a track
-//! merely sitting next in the queue needs one Web API call to learn its
-//! artist/title/album/cover ahead of time.
-//!
-//! Also `get_track_ids` (`v`/`Shift+V` on Now Playing): the playing track's
-//! artist/album ids, which librespot's `AudioItem` doesn't carry (names only).
+// Track metadata: for the next-track prefetch, which needs artist, title, album
+// and cover for a track that has not started (librespot's `PlayerEvent` carries
+// them only for the loaded one), and `get_track_ids` (Now Playing's
+// `v`/`Shift+V`), since librespot's `AudioItem` has names only.
 
 use rspotify::clients::BaseClient;
 use rspotify::model::TrackId;

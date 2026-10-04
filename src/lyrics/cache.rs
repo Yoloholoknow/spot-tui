@@ -73,7 +73,7 @@ mod spicy_cache_tests {
     use super::*;
 
     fn fresh_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("ncspot-lyrics-test-spicy-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("spot-tui-test-spicy-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -182,7 +182,7 @@ mod spicy_cache_tests {
 
     #[test]
     fn spicy_results_live_under_their_own_key() {
-        // The Phase 26 entries (line-level only, already on disk) sit under the
+        // Older line-level-only entries already on disk sit under the
         // plain track uri. A different key means they are ignored and simply
         // refreshed -- "missing words" can't be read as "stale", because an
         // Apple Music line sync legitimately has none.

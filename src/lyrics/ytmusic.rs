@@ -1,41 +1,29 @@
-//! YouTube Music as a fourth lyrics source (Phase 22). Draws from
-//! LyricFind's catalog -- a different licensing backer than Spotify's own
-//! (historically Musixmatch), so it has genuine potential to cover tracks
-//! neither Spotify-direct nor lrclib have, not just duplicate them.
-//!
-//! This is YouTube's own internal "innertube" API -- the literal JSON its
-//! web player renders from, not a small documented REST surface. The
-//! exact response shapes below are transcribed from reading `ytmusicapi`
-//! (the reference Python library) source directly, not guessed, but this
-//! session has no outbound network path to music.youtube.com itself to
-//! confirm them against a live call -- expect at least one round of
-//! real-log-driven fixes once this is actually run, the same posture
-//! this codebase already took with Spotify-direct and Spicy Lyrics.
-//! Every navigation step below is defensive (`Option`-returning, never a
-//! panic) so an unexpected shape degrades to a clean fallthrough to the
-//! next lyrics source, never a crash or a hang.
+// YouTube Music as a lyrics source. It draws on LyricFind's catalogue, a
+// different licensing backer than Spotify's, so it can cover tracks neither
+// Spotify nor lrclib have.
+//
+// This is YouTube's internal "innertube" API, not a documented REST surface. The
+// response shapes are transcribed from `ytmusicapi`'s source and have not been
+// checked against live responses, so expect fixes from real logs. Every
+// navigation step is defensive (`Option`, never a panic) so an unexpected shape
+// falls through to the next source instead of crashing or hanging.
 
 use crate::lyrics::CachedLyrics;
 use serde_json::Value;
 use std::time::Duration;
 
 const YT_BASE: &str = "https://music.youtube.com/youtubei/v1";
-// A plausible, stable WEB_REMIX client version -- ytmusicapi itself
-// hardcodes a fixed string here rather than tracking YouTube's real
-// release calendar; this endpoint has not been observed to reject a
-// slightly-stale version string.
+// A fixed WEB_REMIX client version, as `ytmusicapi` hardcodes; a slightly stale
+// one has not been seen to be rejected.
 const YT_CONTEXT_WEB_VERSION: &str = "1.20250101.01.00";
 const YT_CONTEXT_MOBILE_VERSION: &str = "7.21.50";
 // The "Songs" search filter param, reverse-engineered and hardcoded by
 // `ytmusicapi` itself (its own `filtered_param1 + params("songs") +
 // param3` constants) -- opaque but stable.
 const YT_SEARCH_SONGS_PARAM: &str = "EgWKAQIIAWoMEA4QChADEAQQCRAF";
-// How far a candidate's duration may drift from the track's own known
-// duration and still be considered the same song -- guards against a
-// same-titled cover/remix/different-artist match. A judgment call, not a
-// value confirmed against real search results; revisit if live testing
-// shows false positives (too loose) or the intended track never matching
-// (too strict).
+// How far a candidate's duration may drift from the track's and still count as the
+// same song, which rejects covers, remixes and same-titled songs. A judgment call:
+// loosen if the right track never matches, tighten on false positives.
 const DURATION_TOLERANCE_SECS: f64 = 5.0;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -44,11 +32,9 @@ enum NavStep<'a> {
     Idx(usize),
 }
 
-/// A small, defensive get-by-key-or-index chain over `serde_json::Value`,
-/// mirroring `ytmusicapi`'s own `nav(..., is_optional=True)` -- any single
-/// missing key or out-of-range index returns `None` instead of panicking,
-/// so a real shape drift in YouTube's own internal JSON degrades to a
-/// clean fallthrough rather than crashing this app.
+/// A defensive get-by-key-or-index chain over `serde_json::Value`, like
+/// `ytmusicapi`'s `nav(..., is_optional=True)`: a missing key or index is `None`,
+/// never a panic, so a shape change in YouTube's JSON degrades to a fallthrough.
 fn nav<'a>(value: &'a Value, path: &[NavStep]) -> Option<&'a Value> {
     let mut cur = value;
     for step in path {
@@ -60,10 +46,8 @@ fn nav<'a>(value: &'a Value, path: &[NavStep]) -> Option<&'a Value> {
     Some(cur)
 }
 
-/// Parses a `mm:ss` or `h:mm:ss` duration string (how YouTube Music's
-/// search results render a track's length as plain text) into seconds.
-/// `None` for anything that isn't cleanly 2-3 all-digit colon-separated
-/// parts, rather than guessing.
+/// Parses a `mm:ss` or `h:mm:ss` duration (how search results render length) into
+/// seconds; `None` unless it is cleanly 2-3 all-digit parts.
 fn parse_mmss(s: &str) -> Option<f64> {
     let parts: Vec<&str> = s.trim().split(':').collect();
     if parts.len() < 2 || parts.len() > 3 {
@@ -86,27 +70,16 @@ struct YtSongCandidate {
     duration_secs: f64,
 }
 
-/// Picks the *first* candidate (in YouTube's own search-ranked order)
-/// whose duration is within `tolerance_secs` of `target_duration_secs` --
-/// not the globally closest-by-duration candidate across the whole
-/// result set. Real bug found live (a track's lyrics came back for a
-/// completely different song, "neon skies"): picking by duration
-/// proximity alone treats every candidate as equally likely to be the
-/// right song and discards YouTube's own relevance ranking (title/artist/
-/// channel match against the text query) entirely -- a same-titled or
-/// even unrelated video whose runtime happens to land a hair closer to
-/// the target can outrank the actual correct, top-ranked hit. Duration
-/// stays as a real filter (rejects a cover/remix/wrong version even if it
-/// search-ranks first), just no longer the primary sort key -- the first
-/// tolerance-passing result in ranked order wins. Only `video_id` and
-/// duration are extracted from search results at all: title/artist text
-/// would need YouTube's own heuristic "flex column run" classification
-/// (real, genuine complexity flagged in this phase's design), but
-/// matching by duration alone against a query already built from the
-/// real artist+title doesn't need it.
-/// Returns the winning candidate's rank alongside it -- purely for
-/// diagnostics (logging exactly which position in YouTube's own ranked
-/// results actually won), not used to change the decision itself.
+/// Picks the first candidate, in YouTube's own ranked order, whose duration is within
+/// `tolerance_secs` of the target, not the one closest by duration. Choosing by
+/// duration alone discards YouTube's relevance ranking, and an unrelated video
+/// whose length lands a hair closer can beat the correct top hit (this returned
+/// the wrong song's lyrics once). Duration stays as a filter, not the sort key.
+/// Only `video_id` and duration are read from results: title and artist would need
+/// `ytmusicapi`'s heuristic column classification, and the query is already built
+/// from the real artist and title.
+///
+/// Returns the winner's rank too, for logging only.
 fn best_song_candidate(
     candidates: &[YtSongCandidate],
     target_duration_secs: f64,
@@ -136,13 +109,9 @@ const VIDEO_ID_PATH: &[NavStep] = &[
     NavStep::Key("videoId"),
 ];
 
-/// A row's duration is buried among several "flex column" text runs
-/// (title, artist, album, view count, duration -- YouTube's own web
-/// player renders these as one bullet-separated line, "Song • Artist •
-/// Album • 3:45"). Rather than classifying which run is which (the real
-/// heuristic complexity `ytmusicapi` itself has to do), this just scans
-/// every run for the one that parses as `mm:ss` -- the only field this
-/// app actually needs from a row.
+/// A row's duration sits among several text runs (title, artist, album, views,
+/// duration; rendered as "Song • Artist • Album • 3:45"). Rather than classify the
+/// runs, this scans for the one that parses as `mm:ss`, the only field needed.
 fn parse_song_row(mrlir: &Value) -> Option<YtSongCandidate> {
     let video_id = nav(mrlir, VIDEO_ID_PATH)?.as_str()?.to_string();
     let flex_columns = mrlir.get("flexColumns")?.as_array()?;
@@ -219,14 +188,10 @@ fn parse_lyrics_browse_id(response: &Value) -> Option<String> {
     None
 }
 
-/// Depth-first search for the first array field literally named
-/// `timedLyricsData` anywhere in the response. The exact nesting under
-/// YouTube Music's timed-lyrics wrapper (`elementRenderer`/
-/// `timedLyricsModel`, per community documentation) isn't independently
-/// confirmed against a live response -- searching by field name rather
-/// than assuming one exact path hedges against getting an intermediate
-/// key wrong, while still degrading to `None` (fallthrough) rather than
-/// guessing at a shape this session can't verify.
+/// Depth-first search for the first array named `timedLyricsData`. The nesting
+/// around it (`elementRenderer`/`timedLyricsModel`, per community docs) is not
+/// confirmed against a live response, so searching by name hedges against a wrong
+/// intermediate key and still degrades to `None`.
 fn find_timed_lyrics_array(value: &Value) -> Option<&Vec<Value>> {
     if let Value::Object(map) = value {
         if let Some(Value::Array(arr)) = map.get("timedLyricsData") {
@@ -247,11 +212,9 @@ fn find_timed_lyrics_array(value: &Value) -> Option<&Vec<Value>> {
     None
 }
 
-/// A timed-lyrics entry's exact field names are, likewise, not confirmed
-/// against a live response -- tries several plausible variants for both
-/// the text and the start-time fields (a string or a number either way,
-/// Spotify's own internal API already showed this pattern of numbers
-/// serialized as strings) rather than committing to one guess.
+/// The entry's field names are likewise unconfirmed, so several plausible variants
+/// are tried for the text and start time, each as a string or a number (Spotify's
+/// internal API also serialises numbers as strings).
 fn parse_timed_line(entry: &Value) -> Option<(f64, String)> {
     let text = entry
         .get("lyricLine")
@@ -327,12 +290,8 @@ fn timed_lyrics_blocking(browse_id: &str) -> Result<Option<Vec<(f64, String)>>, 
     });
     let response = yt_post(&agent, "browse", body)?;
     let lines = find_timed_lines(&response);
-    // Real gap found live: this exact miss fires with zero visibility into
-    // *why* -- a wrong field-name guess and "this browseId genuinely has
-    // no timed lyrics" both look identical from the caller's side. Log the
-    // response's real top-level shape (truncated -- these bodies can be
-    // large) so the next miss is fixable from the log instead of another
-    // guess at field names that may already be correct.
+    // Log the response's top-level shape (truncated; bodies can be large) on a miss:
+    // a wrong field-name guess and "genuinely no timed lyrics" otherwise look alike.
     if lines.is_none() {
         let dump = serde_json::to_string(&response).unwrap_or_default();
         let truncated = if dump.len() > 2000 { &dump[..2000] } else { &dump[..] };
@@ -341,15 +300,10 @@ fn timed_lyrics_blocking(browse_id: &str) -> Result<Option<Vec<(f64, String)>>, 
     Ok(lines)
 }
 
-/// YouTube Music as a lyrics source -- tried after Spotify-direct fails,
-/// before lrclib (see `main.rs`'s pending-fetch chain): a real
-/// timed-lyrics source like Spotify, drawing from a different catalog
-/// (LyricFind), not a last-resort community tier the way lrclib is.
-/// `None` at any step means "let the next source have a try," never a
-/// hard error -- every branch logs via `log::info!` (this app's
-/// env_logger filter drops `debug!` from its own code, confirmed the
-/// hard way twice already this session) so the next real run gives exact
-/// evidence to fix against rather than another guess.
+/// YouTube Music as a lyrics source: tried after Spotify and before lrclib (see
+/// `lyrics::pipeline`). `None` at any step means "let the next source try". Every
+/// branch logs at `info!`, since the log filter drops `debug!` from this app's own
+/// code.
 pub async fn ytmusic_lyrics(artist: &str, title: &str, duration_secs: f64) -> Option<CachedLyrics> {
     let query = format!("{artist} {title}");
     log::info!("ytmusic_lyrics: searching {query:?} (target duration {duration_secs:.1}s)");
@@ -365,12 +319,8 @@ pub async fn ytmusic_lyrics(artist: &str, title: &str, duration_secs: f64) -> Op
             return None;
         }
     };
-    // Full candidate dump, in the real rank order YouTube returned them --
-    // this is exactly the evidence a "wrong song matched" report needs:
-    // whether the right video was even in the result set at all, and if
-    // so, at what rank (a real bug found live picked a same-titled wrong
-    // song purely on duration proximity; this log line is what would have
-    // shown that immediately instead of needing a second live round).
+    // Full candidate dump in YouTube's rank order: the evidence a "wrong song
+    // matched" report needs (was the right video in the results, and at what rank).
     for (i, c) in candidates.iter().enumerate() {
         log::info!("ytmusic_lyrics: candidate[{i}] video_id={} duration={:.1}s", c.video_id, c.duration_secs);
     }

@@ -180,9 +180,8 @@ mod nav_tests {
 
     #[test]
     fn escape_from_a_pushed_screen_pops_and_focuses_sidebar_in_one_step() {
-        // Confirmed live: requiring a *second*, separate Esc just to
-        // reach the Sidebar after already backing out to the root felt
-        // like one press too many. One Esc should do both.
+        // One Esc both pops and hands focus to the sidebar; a second press
+        // just to reach it felt like one too many.
         let mut nav = Nav::new();
         nav.push(Screen::Search);
         nav.focus = Focus::Main;
@@ -217,11 +216,9 @@ mod nav_tests {
 
     #[test]
     fn goto_collapses_any_drill_down_depth_but_keeps_now_playing_at_the_root() {
-        // NowPlaying must never be evicted from the stack -- it's the
-        // permanent root Esc can always land on. A `goto` that replaced
-        // the whole stack (the original, buggy implementation) made Esc
-        // a permanent no-op after any sidebar-triggered navigation: real
-        // bug, reported live ("esc doesn't work, stuck in search").
+        // NowPlaying must never be evicted: it is the root Esc lands on. A
+        // `goto` that replaced the whole stack left Esc a permanent no-op
+        // after any sidebar navigation.
         let mut nav = Nav::new();
         nav.push(Screen::Search);
         nav.push(Screen::Search);

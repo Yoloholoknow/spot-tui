@@ -1,12 +1,6 @@
-//! Position state machine.
-//!
-//! Simpler contract than ncspot's IPC (see the ncspot-lyrics project this
-//! was ported from): librespot's own `PlayerEvent::Playing`/`Paused` carry
-//! `position_ms: u32` directly -- an explicit absolute value, confirmed
-//! against live captured events, no backdated-timestamp trick to reverse
-//! engineer. Still a two-state model (each event replaces state wholesale,
-//! nothing ever adds) since that discipline is what caught the real bug
-//! last time and there's no reason to trust an additive model by default.
+// Playback position as a two-state machine (paused at a position, or playing
+// since an instant). librespot's `PlayerEvent`s carry the absolute `position_ms`,
+// so every event replaces the state wholesale and nothing ever accumulates.
 
 use librespot_playback::player::PlayerEvent;
 use std::time::Instant;
@@ -243,14 +237,10 @@ mod tests {
 
     #[test]
     fn seek_while_playing_resets_the_position_anchor_without_stopping_playback() {
-        // Real bug, reported live: pressing `p` mid-track restarts the
-        // current track (Spotify Connect's own "prev restarts the track
-        // if you're a few seconds in" behavior) via a seek to 0, not a
-        // fresh `Playing` event -- librespot emits `Seeked`, which this
-        // tracker previously ignored entirely (fell into `_ => {}`),
-        // leaving the stale wall-clock anchor ticking forward as if
-        // nothing happened. Only fixed itself on pause, which *is* a
-        // handled event and forcibly resyncs.
+        // `p` mid-track restarts the track (Connect's "prev restarts if you are
+        // a few seconds in") via a seek to 0, and librespot emits `Seeked`, not
+        // a fresh `Playing`. Ignoring `Seeked` left the old wall-clock anchor
+        // ticking as if nothing happened until the next pause.
         let t0 = Instant::now();
         let mut tracker = PositionTracker::new();
         tracker.on_event(&playing(TRACK_A, 150_000), t0);

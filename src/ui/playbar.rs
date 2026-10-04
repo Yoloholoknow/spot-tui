@@ -26,12 +26,9 @@ pub(super) fn render_playbar(frame: &mut Frame, app: &AppState, area: Rect) {
 }
 
 pub(super) fn render_status(frame: &mut Frame, app: &AppState, area: Rect) {
-    // Move mode's key hints live here, not in the header row (which is
-    // `Constraint::Length(1)` with no wrap, so the old placement was
-    // already silently truncated on a narrow terminal) -- checked before
-    // `app.status` since both `Enter`/`Esc` in move mode already call
-    // `pd.move_mode.take()` before dispatching a reorder, so no mutation
-    // result can ever land while this branch would also be showing.
+    // Move mode's key hints live here, not in the one-line header, which does not
+    // wrap. Checked before `app.status`: Enter and Esc clear move mode before any
+    // mutation is dispatched, so no result can land while this is showing.
     if *app.nav.top() == Screen::PlaylistDetail
         && app.playlist_detail.as_ref().is_some_and(|pd| pd.move_mode.is_some())
     {
@@ -47,9 +44,8 @@ pub(super) fn render_status(frame: &mut Frame, app: &AppState, area: Rect) {
         );
         return;
     }
-    // A Phase 5 mutation's result (success or failure) takes over this
-    // line until the next keypress, same lifetime a status line
-    // conventionally gets -- the depth readout resumes once it's gone.
+    // A mutation's result takes over this line until the next key press; the
+    // depth readout resumes after.
     if let Some((message, is_error)) = &app.status {
         let color = if *is_error { DANGER } else { ACCENT };
         frame.render_widget(Paragraph::new(message.clone()).style(Style::default().fg(color)), area);
@@ -62,11 +58,8 @@ pub(super) fn render_status(frame: &mut Frame, app: &AppState, area: Rect) {
 pub(super) fn header(app: &AppState, max_chars: usize) -> String {
     match (&app.track_artist, &app.track_title) {
         (Some(a), Some(t)) => truncate_ellipsis(&format!("{a} \u{2014} {t}"), max_chars),
-        // The persistent playback bar renders every frame regardless of
-        // which screen is up top, so during a reconnect it was still
-        // saying "press / to search" -- true of the idle-on-launch case
-        // this line is really for, false while the session is down and
-        // nothing can be searched yet.
+        // The playbar renders on every screen, so during a reconnect it must not say
+        // "press / to search", which is only true when idle after launch.
         _ if matches!(app.lyrics, LyricsState::SessionEnded) => "reconnecting\u{2026}".to_string(),
         _ => "ready \u{2014} press / to search\u{2026}".to_string(),
     }
@@ -108,13 +101,9 @@ pub(super) fn progress_gauge(app: &AppState) -> Gauge<'static> {
     Gauge::default().gauge_style(Style::default().fg(color)).label("").ratio(progress_ratio(app))
 }
 
-/// Same gauge, with a border -- used only by the fullscreen layouts
-/// (which have a whole extra row to spare for it), not the compact view.
-/// At low progress (a song's first few seconds) an unbordered gauge is
-/// almost entirely its own background color, which reads as "a tiny
-/// colored square" with no visible indication of where the bar actually
-/// ends. The border always outlines the full capsule regardless of how
-/// little of it is filled.
+/// Same gauge with a border, for the fullscreen layouts. Unbordered, a gauge at
+/// low progress is nearly all background and reads as a tiny square; the border
+/// always outlines the whole capsule.
 pub(super) fn progress_gauge_bordered(app: &AppState) -> Gauge<'static> {
     progress_gauge(app).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(DIM)))
 }

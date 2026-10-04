@@ -24,12 +24,9 @@ pub(super) fn render_library_home(frame: &mut Frame, app: &AppState, area: Rect)
     frame.render_stateful_widget(List::new(items), chunks[1], &mut state);
 }
 
-/// Not the shared `render_list_screen`, for the same reason Your
-/// Playlists isn't: pinned tracks (spot-tui's own local-only substitute,
-/// separate from pinned playlists -- see `pins.rs`) bubble to the top and
-/// get a marker glyph, a concept the generic 4-screen renderer doesn't
-/// know about. Reuses `pinned_first`/`filtered_sorted` exactly as Your
-/// Playlists does, just keyed on `app.pinned_tracks` instead.
+/// Not the shared `render_list_screen`: pinned tracks (a local-only feature, see
+/// `pins.rs`) bubble to the top and get a marker glyph, which the generic renderer
+/// has no notion of.
 pub(super) fn render_playlist_detail(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
     let Some(pd) = &app.playlist_detail else {
         frame.render_widget(Paragraph::new("no playlist selected"), area);
@@ -41,12 +38,8 @@ pub(super) fn render_playlist_detail(frame: &mut Frame, app: &AppState, list_sta
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
     if pd.move_mode.is_some() {
-        // Key hints moved to the status bar (`render_status`'s own
-        // move-mode takeover) -- this row is `Constraint::Length(1)` with
-        // no wrap, so the hint text was already silently truncated on a
-        // narrow terminal; three distinct weights (name, badge, nothing
-        // else) read more clearly than one undifferentiated ACCENT+BOLD
-        // line ever did.
+        // Key hints live in the status bar (`render_status`); this row is one line with
+        // no wrap.
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(pd.playlist.name.clone(), Style::default().add_modifier(Modifier::BOLD)),
@@ -70,22 +63,12 @@ pub(super) fn render_playlist_detail(frame: &mut Frame, app: &AppState, list_sta
             render_fetch_error(frame, chunks[1], e);
         }
         Fetch::Ready(items) => {
-            // Move-mode intentionally does NOT bubble pinned tracks to the
-            // top here, even though every other rendering of this list
-            // does -- pinned_first is what breaks the display-position ==
-            // real-array-position identity move-mode depends on. Skipping
-            // it during the move keeps that identity exact regardless of
-            // what's pinned, rather than blocking reorder whenever
-            // anything in the playlist happens to be pinned.
+            // Move mode skips the pinned-first bubbling: it needs display position to equal
+            // array position, whatever is pinned.
             let natural = filtered_sorted(items, &pd.filter, &label);
             if pd.move_mode.is_some() {
-                // The moving row gets a WARN `\u{2192}` marker independent
-                // of selection (the second caller of `render_display_list_lines`,
-                // after Devices) -- previously this row was visually
-                // identical to any other selected row. `pd.selected` is a
-                // real index into `natural` here (move mode's whole point
-                // is keeping display position == real array position), so
-                // the moving track's URI is looked up once, not per-row.
+                // The moving row gets an arrow marker regardless of selection. `pd.selected` is a
+                // real index into `natural` here, so the moving track's URI is looked up once.
                 let moving_uri = natural.get(pd.selected).map(|(_, t)| t.uri.as_str());
                 let move_line = |t: &TrackResult| {
                     let marker = if Some(t.uri.as_str()) == moving_uri { "\u{2192} " } else { "  " };
@@ -120,11 +103,8 @@ pub(super) fn render_playlist_detail(frame: &mut Frame, app: &AppState, list_sta
     }
 }
 
-/// Your Playlists' own renderer, not the shared `render_list_screen`:
-/// pinned playlists (spot-tui's own local-only substitute for Spotify's
-/// pinning, which the public Web API doesn't expose at all) bubble to
-/// the top and get a marker glyph -- a concept none of the other 4 list
-/// screens have.
+/// Your Playlists' own renderer: pinned playlists (local-only, since the Web API
+/// exposes no pinning) bubble to the top and get a marker glyph.
 pub(super) fn render_your_playlists(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
     let label =
         |p: &crate::api::library::PlaylistSummary| format!("{} ({} tracks)", p.name, p.track_count);
@@ -167,12 +147,9 @@ pub(super) fn render_your_playlists(frame: &mut Frame, app: &AppState, list_stat
     }
 }
 
-/// The Connect queue (Phase 7): a static "currently playing" caption
-/// above a plain list of what's up next. No filter/sort/pin concept --
-/// unlike every other list screen, this one has no local mutation
-/// surface at all (see `api::queue`'s own doc comment for why: the
-/// public Web API has no remove/reorder endpoint for it), so it's the
-/// one list screen that's genuinely just a view.
+/// The Connect queue: a "currently playing" caption above the list of what is
+/// up next. A pure view: the Web API has no remove or reorder endpoint for the
+/// queue (see `api::queue`).
 pub(super) fn render_queue(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
     let chunks =
         Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(1)]).split(area);
@@ -211,9 +188,8 @@ pub(super) fn render_queue(frame: &mut Frame, app: &AppState, list_state: &mut L
     }
 }
 
-/// Connect devices (Phase 8): a plain list, the active one marked. `r`
-/// refetches manually (see `DevicesState`'s own doc comment for why this
-/// doesn't poll like Queue does).
+/// Connect devices: a plain list with the active one marked. `Shift+R`
+/// refetches; unlike the queue this does not poll (see `DevicesState`).
 pub(super) fn render_devices(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -239,14 +215,9 @@ pub(super) fn render_devices(frame: &mut Frame, app: &AppState, list_state: &mut
             );
         }
         Fetch::Ready(items) => {
-            // The active marker keeps ACCENT whether or not this row is
-            // also selected -- an explicitly-styled span's own color
-            // patches over the row's selection style per-cell, so
-            // `render_display_list_lines` (not the plain-string
-            // `render_display_list`) is what makes this possible.
-            // Previously the marker was plain text baked into the label,
-            // so an active-but-unselected device read identically to an
-            // inactive one except for the bare glyph.
+            // The active marker keeps its accent colour even on the selected row: a span with
+            // its own colour patches over the row's selection style, which is why this uses
+            // `render_display_list_lines` rather than the plain-string variant.
             let line = |d: &crate::api::devices::DeviceSummary| {
                 let marker = if d.is_active { "\u{25cf} " } else { "  " };
                 let volume = d.volume_percent.map(|v| format!(", {v}%")).unwrap_or_default();
@@ -261,14 +232,9 @@ pub(super) fn render_devices(frame: &mut Frame, app: &AppState, list_state: &mut
     }
 }
 
-/// The two drill-down detail screens (Artist, Album) share this shape: a
-/// one-row styled header over a plain list of the thing's children.
-/// Previously duplicated in full, including re-rendering the header
-/// separately inside each of the three `Fetch` arms -- second concrete
-/// case of the identical shell, past this codebase's own established
-/// "extract on the second case" bar. `fallback_title` is what the header
-/// shows before the real name is known (loading/error), so it's never
-/// blank and never written three times.
+/// Artist and Album detail share this shape: a styled one-row header over a plain
+/// list of the entity's children. `fallback_title` is the header before the real
+/// name is known (loading, error).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_detail_screen<D, T>(
     frame: &mut Frame,
@@ -307,9 +273,8 @@ pub(super) fn render_detail_screen<D, T>(
     }
 }
 
-/// Artist Detail (Phase 9): name + genres in the header, a plain list of
-/// albums below. No top-tracks section -- see `api::artist`'s own doc
-/// comment for why (Spotify removed that endpoint).
+/// Artist Detail: name and genres in the header, albums below. No top-tracks
+/// section, since Spotify removed that endpoint (see `api::artist`).
 pub(super) fn render_artist_detail(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
     let Some(state) = &app.artist_detail else {
         frame.render_widget(Paragraph::new("no artist selected"), area);
@@ -333,10 +298,8 @@ pub(super) fn render_artist_detail(frame: &mut Frame, app: &AppState, list_state
     );
 }
 
-/// Album Detail (Phase 9): name + artist in the header, the track list
-/// below -- `Enter` plays the album as context starting from the
-/// selected track, same convention `render_playlist_detail` already
-/// established.
+/// Album Detail: name and artist in the header, tracks below. `Enter` plays the
+/// album as context from the selected track, as in Playlist Detail.
 pub(super) fn render_album_detail(frame: &mut Frame, app: &AppState, list_state: &mut ListState, area: Rect) {
     let Some(state) = &app.album_detail else {
         frame.render_widget(Paragraph::new("no album selected"), area);
@@ -350,10 +313,7 @@ pub(super) fn render_album_detail(frame: &mut Frame, app: &AppState, list_state:
         list_state,
         "Album",
         |album: &crate::api::album::AlbumDetail| {
-            // Single-space em dash, matching every track label in the
-            // app (including this same screen's own list) -- the
-            // previous double-padded "  --  " was the only one of its
-            // kind in the file.
+            // Single-space em dash, matching every other track label.
             let meta = format!("\u{2014} {} \u{00b7} {} tracks \u{00b7} v view artist", album.artist, album.tracks.len());
             screen_header_line(&album.name, Some(&meta))
         },
@@ -372,10 +332,9 @@ pub(super) struct ListView<'a, T> {
     pub selected: usize,
 }
 
-/// Renders one of the 4 uniform fetched-list screens (Liked Songs, Saved
-/// Albums, Followed Artists, Playlist Detail tracks). Your Playlists gets
-/// its own renderer instead -- it's the one list with an extra per-item
-/// concept (pinning) this generic version has no notion of.
+/// Renders one of the uniform fetched-list screens (Liked Songs, Saved Albums,
+/// Followed Artists). Your Playlists and Playlist Detail have their own renderers
+/// because of pinning.
 pub(super) fn render_list_screen<T>(
     frame: &mut Frame,
     area: Rect,
@@ -414,24 +373,16 @@ pub(super) fn render_list_screen<T>(
     }
 }
 
-/// Renders `query` with a block cursor sitting at char index `cursor` --
-/// the app's one real text-input convention. Previously open-coded
-/// separately at every call site (`filter_header`, Search's own query
-/// line, the text-prompt overlay); the playlist-picker and quick-jump
-/// overlays skipped this entirely and drew a trailing-only cursor, which
-/// actively lied -- both already support real `Left`/`Right` cursor
-/// movement in their key handlers.
+/// Renders `query` with a block cursor at char index `cursor`: the app's one
+/// text-input convention, used by every filter box, Search and the overlays.
 pub(super) fn cursor_text(query: &str, cursor: usize) -> String {
     let byte_pos = query.char_indices().nth(cursor).map(|(b, _)| b).unwrap_or(query.len());
     let (before, after) = query.split_at(byte_pos);
     format!("{before}\u{2588}{after}")
 }
 
-/// The app's screen-header row: title bold, an optional secondary fact
-/// demoted beside it in `DIM` -- replaces screens that were cramming key
-/// hints or extra facts into the title string at equal visual weight
-/// (Devices' "(Enter: transfer, r: refresh)", Album Detail's "(v: view
-/// artist)").
+/// The screen-header row: bold title with an optional secondary fact beside it in
+/// `DIM`, instead of cramming key hints into the title.
 pub(super) fn screen_header_line(title: &str, meta: Option<&str>) -> Line<'static> {
     let mut spans = vec![Span::styled(title.to_string(), Style::default().add_modifier(Modifier::BOLD))];
     if let Some(meta) = meta {
@@ -462,16 +413,10 @@ pub(super) fn filter_header(title: &str, filter: &ListFilter) -> String {
     }
 }
 
-/// Same contract as `render_display_list`, but rows arrive as `Line`s
-/// instead of a plain label string -- lets a screen color one span (a
-/// pin/playing/moving marker) independently of whether that row happens
-/// to be selected. Ratatui patches an explicitly-styled span's own color
-/// over the row's base style per-cell, so a marker span with its own
-/// `.fg(...)` keeps that color even on a selected (ACCENT+BOLD) row,
-/// while any unstyled span in the same line still follows selection
-/// normally. This is what makes Devices' active-device marker and
-/// move-mode's moving-row arrow possible without changing
-/// `render_display_list`'s own signature or its 9 existing callers.
+/// Like `render_display_list`, but rows are `Line`s, so a screen can colour one
+/// span (a pin, playing or moving marker) independently of selection. ratatui
+/// patches a span's own colour over the row's base style, so a styled marker
+/// keeps its colour on the selected row while unstyled spans follow selection.
 pub(super) fn render_display_list_lines<T>(
     frame: &mut Frame,
     area: Rect,
@@ -498,11 +443,8 @@ pub(super) fn render_display_list_lines<T>(
             }
         })
         .collect();
-    // Mutates just `.selected`, keeping whatever `.offset` this list_state
-    // already had from the previous frame -- ratatui only moves the
-    // offset if `selected` would otherwise fall outside the current
-    // viewport, exactly the "only scroll at the edges" behavior a plain
-    // `ListState::default()` (offset reset to 0 every frame) broke.
+    // Only `.selected` is set, keeping the `.offset` from the previous frame, so
+    // ratatui scrolls only when the selection would leave the viewport.
     list_state.select(Some(selected));
     frame.render_stateful_widget(List::new(list_items), area, list_state);
 }
@@ -528,14 +470,9 @@ pub(super) fn render_sidebar(frame: &mut Frame, app: &AppState, list_state: &mut
             items.push(ListItem::new("PLAYLISTS").style(Style::default().fg(DIM)));
             saw_playlists_header = true;
         }
-        // "Is this what's currently showing in Main" -- checked against
-        // `top()` alone, not stack depth. `goto()` always keeps NowPlaying
-        // at the bottom of the stack (see Nav::goto), so anything reached
-        // via the Sidebar sits at depth 2, never depth 1 -- a lingering
-        // `depth() == 1` check here (from before that invariant existed)
-        // meant this could only ever light up for Now Playing itself,
-        // reported live as no visible "which item am I in" indicator at
-        // all once you'd navigated anywhere else.
+        // Whether this is what Main is showing: checked against `top()`, not stack
+        // depth. `goto()` keeps NowPlaying at the root, so anything reached from the
+        // sidebar sits at depth 2.
         let (text, is_open) = match row {
             SidebarRow::Menu(label, screen) => (label.to_string(), app.nav.top() == screen),
             SidebarRow::Playlist(p) => {
@@ -555,11 +492,9 @@ pub(super) fn render_sidebar(frame: &mut Frame, app: &AppState, list_state: &mut
         }
         items.push(ListItem::new(text).style(style));
     }
-    // The "PLAYLISTS" header takes up one visual row that `sidebar_sel`
-    // (an index into logical rows: menu entries + playlists, no header)
-    // doesn't know about -- shift the on-screen selection down by one
-    // once the cursor is actually on a playlist row, past where the
-    // header was inserted.
+    // The "PLAYLISTS" header takes one visual row that `sidebar_sel` (an index into
+    // logical rows, no header) does not count, so shift the on-screen selection down
+    // by one once the cursor is on a playlist.
     let header_offset = if saw_playlists_header && app.sidebar_sel >= SIDEBAR_ENTRIES.len() { 1 } else { 0 };
     list_state.select(Some(app.sidebar_sel + header_offset));
     frame.render_stateful_widget(
@@ -579,8 +514,7 @@ pub(super) fn render_search(frame: &mut Frame, app: &AppState, list_state: &mut 
         .constraints([Constraint::Length(3), Constraint::Min(1)])
         .split(area);
 
-    // Cursor renders at its real position, not always trailing -- Left/Right
-    // now move it mid-string (arrow-key editing, reported live as missing).
+    // The cursor renders at its real position: Left/Right move it mid-string.
     let query_line = format!("/ {}", cursor_text(&app.search.query, app.search.cursor));
     frame.render_widget(
         Paragraph::new(query_line).block(Block::default().borders(Borders::ALL).title("search")),
@@ -601,12 +535,8 @@ pub(super) fn render_search(frame: &mut Frame, app: &AppState, list_state: &mut 
         } else if app.search.query.is_empty() {
             "type a query, then Enter to search, Esc to cancel"
         } else {
-            // Distinct from the empty-query message on purpose: this is
-            // the state reported live as "have to click enter first and
-            // then scroll" -- clarifying *why* up/down do nothing yet
-            // (there's a real Web API call to make, not a local list to
-            // narrow) rather than leaving it looking broken or identical
-            // to having typed nothing at all.
+            // Distinct from the empty-query message: it explains why Up/Down do nothing yet
+            // (a Web API call is still to be made, not a local list to narrow).
             "press Enter to search \u{2014} this hits Spotify directly, not a live filter like Library's /"
         };
         render_empty_state(frame, chunks[1], headline, None);

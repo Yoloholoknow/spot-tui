@@ -186,10 +186,9 @@ pub fn pinned_first<'a, T>(
     items
 }
 
-/// Playlist reorder move-mode (Phase 6): `Up`/`Down` relocate the
-/// selected item one slot at a time, entirely locally -- no network call
-/// per keystroke, only once on confirm. Returns the item's new selected
-/// index (unchanged, a no-op, at either end of the list).
+/// Playlist move mode: `Up`/`Down` relocate the selected item one slot at a
+/// time, entirely locally (the network is hit once, on confirm). Returns the
+/// item's new index (unchanged at either end of the list).
 pub fn move_item_up<T>(items: &mut [T], selected: usize) -> usize {
     if selected == 0 {
         return selected;

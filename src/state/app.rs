@@ -79,8 +79,7 @@ pub struct AppState {
     pub pending_confirm: Option<PendingConfirm>,
     pub text_prompt: Option<TextPrompt>,
     pub playlist_picker: Option<PlaylistPicker>,
-    /// Phase 12's global quick-jump palette (`Ctrl+P`) -- a fourth
-    /// sibling overlay at the same tier as the three above.
+    /// The quick-jump palette (`Ctrl+P`), a fourth overlay.
     pub quick_jump: Option<QuickJump>,
     /// `(message, is_error)` for the status line, cleared on the next key
     /// press. Every mutation's outcome surfaces here.

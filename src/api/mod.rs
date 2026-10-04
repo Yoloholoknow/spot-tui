@@ -1,30 +1,15 @@
-//! Spotify Web API client bootstrap: PKCE OAuth, token cache/refresh.
-//! Shared across every `api::*` submodule (`search` today; `library`,
-//! `playlists`, `queue`, `devices` land alongside the phases that need
-//! them -- see the design-scope plan's Architecture changes).
-//!
-//! Uses spot-tui's own registered Spotify app (Development Mode), not
-//! ncspot's shared client_id -- ncspot's id turned out to be caught in a
-//! broad, ongoing Spotify-side lockdown on third-party Web API access
-//! (confirmed live: ncspot's own search is equally broken, not just
-//! ours). A personal Dev Mode app's traffic doesn't resemble the
-//! aggregate-abuse pattern that triggered that lockdown, so it plausibly
-//! sidesteps it entirely -- though this can't be verified until it's
-//! actually exercised for real.
-//!
-//! PKCE flow (via `librespot_oauth`, same crate/pattern ncspot itself
-//! uses for its own login): only a client_id is needed, never a secret --
-//! that's the whole point of PKCE for a native app that can't keep a
-//! secret safe. The Spotify dashboard now requires an exact port in the
-//! registered redirect URI (confirmed live -- the historic "register
-//! without a port" exception no longer works), so unlike ncspot's
-//! find-a-free-port-each-run approach, this uses one fixed port that must
-//! match `REDIRECT_URI` below exactly, including in the dashboard.
-//!
-//! Because this is a different client_id than ncspot's, none of ncspot's
-//! cached token is reusable -- refresh tokens are locked to the client_id
-//! that issued them (confirmed earlier). First run needs a real one-time
-//! browser login; the resulting token is cached separately from ncspot's.
+// Spotify Web API client bootstrap: PKCE OAuth and token cache/refresh, shared by
+// every `api::*` submodule.
+//
+// Uses spot-tui's own Spotify app (Development Mode), not ncspot's client id:
+// ncspot's was caught in a Spotify-side lockdown on third-party Web API access
+// (its own search was equally broken). Refresh tokens are locked to the client id
+// that issued them, so ncspot's cached token is unusable here; the first run does
+// a one-time browser login and caches the token separately.
+//
+// PKCE (via `librespot_oauth`, as ncspot does) needs only a client id, never a
+// secret. The dashboard requires an exact port in the redirect URI, so this uses
+// one fixed port that must match `REDIRECT_URI` there.
 
 pub mod album;
 pub mod artist;
@@ -96,11 +81,9 @@ fn oauth_token_to_rspotify(fresh: librespot_oauth::OAuthToken, prior_refresh: Op
     }
 }
 
-/// Sync -- must only ever be called via `spawn_blocking`. librespot_oauth's
-/// refresh_token() spins up its own blocking runtime internally; calling
-/// it directly from inside our already-running tokio context panics
-/// ("Cannot drop a runtime in a context where blocking is not allowed"),
-/// confirmed live.
+/// Blocking: call only via `spawn_blocking`. librespot_oauth's `refresh_token()`
+/// builds its own runtime, and calling it inside a running tokio context panics
+/// ("Cannot drop a runtime in a context where blocking is not allowed").
 fn refresh_blocking(refresh_token: &str) -> Result<Token, String> {
     let client = OAuthClientBuilder::new(CLIENT_ID, REDIRECT_URI, SCOPES.to_vec())
         .build()
@@ -109,10 +92,9 @@ fn refresh_blocking(refresh_token: &str) -> Result<Token, String> {
     Ok(oauth_token_to_rspotify(fresh, Some(refresh_token)))
 }
 
-/// Sync, blocking, and interactive: opens a browser for the user to log
-/// in and approve scopes, then blocks listening on `REDIRECT_URI`'s exact
-/// port for the callback. Only needed once -- after this, the cached
-/// refresh_token means `refresh_blocking` handles everything silently.
+/// Blocking and interactive: opens a browser for login, then listens on
+/// `REDIRECT_URI`'s port for the callback. Needed once; afterwards the cached
+/// refresh token is used silently.
 fn login_blocking() -> Result<Token, String> {
     let client = OAuthClientBuilder::new(CLIENT_ID, REDIRECT_URI, SCOPES.to_vec())
         .open_in_browser()
@@ -177,13 +159,10 @@ pub async fn client_from_token(token: Token) -> AuthCodeSpotify {
     spotify
 }
 
-/// Refreshes the client's held token in place if it's expired (or about
-/// to be). Without this, a client built once at startup silently goes
-/// stale after ~1 hour -- Spotify access tokens are short-lived -- and
-/// every search after that fails with 401, confirmed live on a
-/// multi-hour-old session. `token_refreshing: false` on the client means
-/// rspotify never does this on its own; nothing else calls this path
-/// either, so it must run before every use, not just once.
+/// Refreshes the client's token in place if it is expired or about to be.
+/// Spotify access tokens last about an hour, and `token_refreshing: false` stops
+/// rspotify refreshing on its own, so this must run before every use or calls
+/// start failing with 401.
 async fn ensure_fresh(client: &AuthCodeSpotify) -> Result<(), String> {
     let (needs_refresh, refresh_token) = {
         let token_arc = client.get_token();
@@ -213,19 +192,10 @@ async fn ensure_fresh(client: &AuthCodeSpotify) -> Result<(), String> {
     Ok(())
 }
 
-/// Extracts Spotify's own error response body when a call fails with an
-/// HTTP status code, instead of settling for `ClientError`'s default
-/// Display ("http error: status code 400 Bad Request") which names the
-/// failure but never *why*. Logs the raw body text directly rather than
-/// trying to parse it into `rspotify_model::ApiError` first -- an
-/// earlier version of this function did that, and its own fallback text
-/// on a parse failure ("http error: status code {status}") was
-/// indistinguishable from the pre-this-function message, which cost a
-/// whole round-trip of live reproduction to even notice: it was
-/// impossible to tell whether that meant "stale binary, never reached
-/// this code" or "reached it, and the body genuinely didn't parse as
-/// ApiError." Raw text has no such ambiguity -- it always shows
-/// something concrete once this code actually runs.
+/// Extracts the response body from an HTTP-status failure. `ClientError`'s own
+/// text ("status code 400 Bad Request") names the failure but not the reason.
+/// The raw text is logged rather than parsed as `ApiError`, so there is always
+/// something concrete to read even when parsing would have failed.
 pub async fn describe_client_error(err: rspotify::ClientError) -> String {
     match err {
         rspotify::ClientError::Http(http_err) => match *http_err {

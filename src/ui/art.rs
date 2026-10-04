@@ -2,32 +2,17 @@ use super::*;
 
 pub(super) const ART_MIN_WIDTH: u16 = 14;
 pub(super) const ART_MAX_WIDTH: u16 = 26;
-/// The compact hero's gauge sits beside the art in the (usually much
-/// wider) text column, unlike the fullscreen layouts' gauge, which
-/// shares the same narrow column as the art and is already
-/// `capsule_row`-matched to it. Left unconstrained, a bordered gauge
-/// there stretches to the full text-column width on a wide terminal --
-/// mostly empty bordered space -- reported live as "stretches for so
-/// long in empty space." Capped at a fixed, modest width instead of
-/// matching the art (the two aren't stacked in the same column here, so
-/// there's no natural width to match).
+/// The compact hero's gauge sits beside the art in a much wider text column.
+/// Unconstrained it would stretch across mostly empty space, so it is capped at a
+/// fixed width.
 pub(super) const COMPACT_GAUGE_MAX_WIDTH: u16 = 44;
 
-/// The real per-cell pixel size, for sizing an art card to an actual
-/// pixel square instead of guessing a fixed ratio. Reads
-/// `Picker::font_size()` directly -- `main.rs` corrects that stored
-/// value once at startup (via the same OS `window_size` ioctl this
-/// function used to call itself) specifically so this and
-/// `ratatui-image`'s own internal image encoder agree on the same real
-/// cell size; calling the ioctl again independently here, after that
-/// fix, is exactly what caused the two to *disagree* the first time
-/// this bug was chased (this app's layout math using one freshly-
-/// queried value while the encoder kept using `Picker`'s own separate,
-/// uncorrected one) -- confirmed live as a visibly pixelated card, the
-/// transmitted image encoded at a different, lower resolution than the
-/// cells this app's math stretched it across. One corrected value, read
-/// from one place, fixes both. Falls back to a flat 2:1 guess only when
-/// there's no real `Picker` at all (no graphics protocol in use).
+/// The real per-cell pixel size, for sizing the art card to a pixel square. Reads
+/// `Picker::font_size()`, which `terminal::detect_graphics_picker` corrects once
+/// at startup. Reading it from one place keeps this layout math and
+/// `ratatui-image`'s encoder agreeing; querying the ioctl again here made them
+/// disagree and the image came out pixelated. Falls back to a 2:1 guess when
+/// there is no `Picker`.
 pub(super) fn real_cell_size(picker: Option<&ratatui_image::picker::Picker>) -> (u16, u16) {
     match picker.map(|p| p.font_size()) {
         Some(font) if font.width > 0 && font.height > 0 => (font.width, font.height),
@@ -35,28 +20,16 @@ pub(super) fn real_cell_size(picker: Option<&ratatui_image::picker::Picker>) -> 
     }
 }
 
-/// `render_art` always wraps the image in `Borders::ALL`, which removes
-/// exactly 1 cell per side (2 total) from both width and height before
-/// the image itself ever gets drawn. That flat cell subtraction removes
-/// a *different number of real pixels* on each axis whenever a cell
-/// isn't exactly square (which real fonts never are) -- taller cells
-/// mean the 2 rows taken for the border cost more real vertical pixels
-/// than the 2 columns cost horizontally. The smaller the card, the
-/// larger that skew is as a fraction of the whole: negligible on
-/// fullscreen's 50-70-cell-wide cards, but large enough on the compact
-/// hero's much smaller `ART_MAX_WIDTH = 26` card to read as a real,
-/// reported gap on one side once the image (still correctly square in
-/// itself, since `Resize::Scale` never distorts it) didn't fill the
-/// remaining space. Squaring the *inner*, post-border region -- not the
-/// outer card size -- and only then adding the border back is what
-/// actually keeps the finished, bordered card itself square.
+/// `render_art` wraps the image in `Borders::ALL`, which removes one cell per side.
+/// Cells are not square, so those two rows and two columns cost different numbers
+/// of pixels, and the skew shows on small cards (the compact hero is at most
+/// `ART_MAX_WIDTH` wide). So the *inner*, post-border region is squared first and
+/// the border added back, which keeps the finished card square.
 pub(super) const ART_BORDER_CELLS: u16 = 2;
 
-/// Pure square-sizing math, given an already-known real cell pixel size
-/// (`real_cell_size`) -- kept separate from that detection so this part
-/// stays a plain, environment-free function to unit test. Returns the
-/// *outer* (pre-border) height needed so that the card's inner,
-/// post-border region is a true pixel square -- see `ART_BORDER_CELLS`.
+/// Square-sizing math for a known cell pixel size, kept apart from detection so it
+/// is testable. Returns the outer (pre-border) height that makes the inner region
+/// a pixel square; see `ART_BORDER_CELLS`.
 pub(super) fn square_height_cells(width_cells: u16, cell_size: (u16, u16)) -> u16 {
     let (cell_w, cell_h) = cell_size;
     if cell_h == 0 {
@@ -163,10 +136,8 @@ pub(super) fn hash_bytes(s: &str) -> u32 {
     h
 }
 
-/// A deterministic placeholder for real album art (the design-scope
-/// plan's own Non-goal: real bitmap art needs the `ratatui-image` crate
-/// plus a terminal graphics protocol, tracked but not scheduled).
-/// `Color::Indexed`, not `Rgb`, matching `ACCENT`'s own choice above --
+/// A deterministic placeholder for album art, used when no graphics protocol
+/// is available. `Color::Indexed`, not `Rgb`, like `ACCENT`:
 /// renders correctly on plain 256-color terminals, not just truecolor
 /// ones. Kept to the middle of the 6-step color cube's range (1..=4 per
 /// channel, out of 0..=5) so it reads as "colorful art," not a
@@ -373,18 +344,11 @@ pub(super) fn render_art(frame: &mut Frame, app: &AppState, images: &mut ImageSt
             &mut images.sized_covers.last_mut().unwrap().3
         };
 
-        // `Resize::Crop` was tried here on the theory that, since
-        // `cover_crop` above already pre-sizes the image exactly, `Crop`
-        // would be a pure no-op -- reported live as visibly pixelated
-        // instead. `Crop`'s own doc comment names the actual reason: it
-        // exists for terminals where "overdrawing characters over
-        // graphics" needs avoiding (its example is Alacritty's sixel
-        // branch), which implies a different, less precise transmission
-        // path than `Scale` -- not the "no-op on an already-correct
-        // image" behavior assumed here. Reverted to `Resize::Scale`,
-        // proven pixelation-free across every prior round of this saga;
-        // `cover_crop`'s pre-sizing (the part that actually fixed the
-        // gap) is unaffected by this revert.
+        // `Resize::Scale`, not `Crop`: `Crop` exists for terminals that need to avoid
+        // overdrawing characters over graphics, uses a different, less precise
+        // transmission path, and rendered visibly pixelated even on an already-sized
+        // image. `cover_crop`'s pre-sizing is what actually closes the gap beside the
+        // image.
         let widget = ratatui_image::StatefulImage::default().resize(ratatui_image::Resize::Scale(None));
         frame.render_stateful_widget(widget, inner, proto);
         return;

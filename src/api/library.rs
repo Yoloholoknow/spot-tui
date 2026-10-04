@@ -1,15 +1,10 @@
-//! Library reads (Phase 2/3 of the design-scope plan): Liked Songs, Saved
-//! Albums, Followed Artists, Your Playlists, Playlist Detail tracks.
-//! Read-only for now -- CRUD on playlists comes in Phase 5. Client/token
-//! bootstrap lives in the parent `api` module.
-//!
-//! Fully paginates each endpoint (up to `MAX_ITEMS`, a generous safety
-//! cap against a pathological runaway -- not a realistic ceiling for
-//! actual use). Reported live that the original single-50-item-page
-//! version cut off real playlists mid-list; the in-list filter (`/`)
-//! shipped alongside this makes browsing a large fetched list workable,
-//! which is what makes a few-thousand-item cap a reasonable tradeoff
-//! rather than a real limitation.
+// Library reads: Liked Songs, Saved Albums, Followed Artists, Your Playlists and
+// playlist tracks, plus like/follow/save writes. Playlist writes are in
+// `playlists`; client and token bootstrap are in the parent `api` module.
+//
+// Each endpoint is fully paginated up to `MAX_ITEMS`, a safety cap against a
+// runaway rather than a real ceiling (a single 50-item page cut real playlists
+// off). The in-list filter makes a few thousand items workable.
 
 use rspotify::clients::{BaseClient, OAuthClient};
 use rspotify::model::{AlbumId, ArtistId, LibraryId, Market, PlayableItem, PlaylistId, TrackId};
@@ -144,16 +139,12 @@ pub async fn your_playlists(client: &AuthCodeSpotify) -> ClientResult<Vec<Playli
     Ok(out)
 }
 
-/// Track listing for one playlist (Phase 3). `playlist_uri` is a full
-/// `spotify:playlist:...` URI, matching what `PlaylistSummary::uri`
-/// already stores. Local tracks and podcast episodes are skipped --
-/// neither has a playable track URI this app's `LoadRequest` can use,
-/// and podcasts are an explicit non-goal.
+/// Tracks of one playlist. `playlist_uri` is a full `spotify:playlist:...` URI.
+/// Local tracks and podcast episodes are skipped: neither has a playable track
+/// URI for `LoadRequest`.
 ///
-/// Returns `String` rather than `ClientResult` like the other functions
-/// here: this one can also fail on bad ID input, a distinct failure mode
-/// rspotify's `ClientError` has no variant for -- every caller already
-/// stringifies the other functions' errors immediately anyway.
+/// Returns `String` errors rather than `ClientResult` because a bad ID is a
+/// failure mode `ClientError` has no variant for.
 pub async fn playlist_tracks(client: &AuthCodeSpotify, playlist_uri: &str) -> Result<Vec<TrackResult>, String> {
     if let Err(e) = ensure_fresh(client).await {
         log::warn!("token refresh before playlist_tracks failed, trying with existing token anyway: {e}");
@@ -166,11 +157,8 @@ pub async fn playlist_tracks(client: &AuthCodeSpotify, playlist_uri: &str) -> Re
             .playlist_items_manual(playlist_id.as_ref(), None, None::<Market>, Some(PAGE_LIMIT), Some(offset))
             .await
             .map_err(|e| e.to_string())?;
-        // Bounded on raw items fetched, not the filtered output below --
-        // a playlist heavy on local files/podcast episodes (filtered out
-        // entirely) would otherwise keep paging well past MAX_ITEMS'
-        // intended cap on API calls, since `out` grows slower than what
-        // was actually fetched.
+        // Bounded on raw items fetched, not on the filtered output: a playlist full of
+        // local files or episodes would otherwise keep paging past the intended cap.
         let got = page.items.len() as u32;
         out.extend(page.items.into_iter().filter_map(|item| match item.item {
             Some(PlayableItem::Track(t)) => {
@@ -190,15 +178,9 @@ pub async fn playlist_tracks(client: &AuthCodeSpotify, playlist_uri: &str) -> Re
     Ok(out)
 }
 
-// Phase 13: like/follow/save -- confirmed against rspotify 0.16.1's real
-// `LibraryId` enum (`rspotify-model/src/idtypes.rs`) before writing any of
-// these, per this project's own standing "check the real API surface
-// first" discipline: `Track`/`Artist`/`Album` variants exist exactly as
-// assumed, each wrapping that type's own `Id`. `library_add`/
-// `library_remove` are the same two calls `api::playlists::delete_playlist`
-// already uses for `LibraryId::Playlist` -- Spotify's Feb-2026 library
-// consolidation covers all of these through one endpoint family, not a
-// separate one per item kind.
+// Like/follow/save: Spotify's Feb 2026 library consolidation covers tracks,
+// artists, albums and playlists through one `library_add`/`library_remove`
+// endpoint family, with a `LibraryId` variant per kind.
 
 fn track_id_for_library(track_uri: &str) -> Result<TrackId<'_>, String> {
     TrackId::from_id_or_uri(track_uri).map_err(|e| e.to_string())

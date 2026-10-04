@@ -7,10 +7,8 @@ pub(super) fn render_compact(frame: &mut Frame, app: &AppState, images: &mut Ima
     }
 }
 
-/// The unglamorous state, designed on its own terms rather than as a
-/// stripped-down hero: nothing is loaded yet, so there's nothing to
-/// depict art for -- showing a colorful block anyway would be a lie
-/// about there being a track, not a placeholder for one.
+/// Nothing loaded yet: no art block at all, since a coloured placeholder would
+/// imply a track exists.
 pub(super) fn render_now_playing_idle(frame: &mut Frame, app: &AppState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -23,13 +21,9 @@ pub(super) fn render_now_playing_idle(frame: &mut Frame, app: &AppState, area: R
     frame.render_widget(Paragraph::new(body_lines(app)).wrap(Wrap { trim: true }), chunks[2]);
 }
 
-/// Art block + larger title/transport on one row, lyrics given real room
-/// below -- the hero treatment validated in the browser mockup, ported
-/// into the real terminal for the first time. `hero_height` scales with
-/// the pane but stays capped: this is a glance screen, not the whole
-/// app, and lyrics still need to be the dominant use of vertical space
-/// (calibrating density to what this screen is actually for, not
-/// maximizing decoration).
+/// Art plus title and transport on one row, with the lyrics given the room below.
+/// `hero_height` scales with the pane but is capped: this is a glance screen and
+/// lyrics should dominate the vertical space.
 pub(super) fn render_now_playing_hero(
     frame: &mut Frame,
     app: &AppState,
@@ -43,30 +37,16 @@ pub(super) fn render_now_playing_hero(
     // something unreadable just to say there's art.
     let art_width = (area.width / 4).clamp(ART_MIN_WIDTH, ART_MAX_WIDTH);
     let show_art = area.width >= art_width + 24;
-    // A real pixel square, not a flat "half as tall as wide" guess --
-    // see `square_height_cells`'s own doc comment for why that flat
-    // assumption produced a card reported live as visibly too tall.
+    // A real pixel square, not a flat "half as tall as wide" guess, which
+    // made the card too tall; see `square_height_cells`.
     let art_height = square_height_cells(art_width, real_cell_size(images.picker.as_ref()));
 
-    // +2 over the original 6-11 clamp: the gauge row grew from
-    // `Length(1)` to `Length(3)` below (a border, requested live to
-    // match the fullscreen views' already-bordered gauge) and needs the
-    // 2 extra rows of slack. `.max(art_height + 2)`, not just
-    // `.max(art_height)`: the art column below splits into
-    // `[Min(1), Length(art_height), Min(1)]` to center the card --
-    // a real, log-confirmed bug (not assumed) was `hero_height` only
-    // ever guaranteeing *exactly* `art_height`, leaving zero room for
-    // those two spacers; ratatui's layout solver then shrank the
-    // `Length(art_height)` allocation by 1 to make room for them,
-    // silently handing `render_art` a card one row short of the square
-    // it asked for (confirmed directly from the `"art size"` diagnostic
-    // log: computed `art_height` was 12, actually-rendered `area.height`
-    // was 11). `+2` reserves the spacers' own minimum up front instead.
-    // Clamp floor raised 8 -> 9: `meta_chunks` below now needs 9 rows
-    // minimum (its leading spacer grew to `Length(2)`, see that comment),
-    // and a `hero_height` that's too short for its own content would
-    // reproduce the exact same silent-shrink failure mode named above,
-    // just against `meta_chunks` instead of the art column this time.
+    // Clamp: at least `art_height + 2` and at least 9 rows, at most 13. The `+ 2` is
+    // slack for the two `Min(1)` spacers around the art card; with only
+    // `art_height`, ratatui shrinks the `Length(art_height)` card by a row to fit
+    // them and `render_art` gets a card one row short of square. The 9-row floor is
+    // what `meta_chunks` below needs (the bordered gauge row is 3 high); a shorter
+    // hero would shrink it the same silent way.
     let hero_height = (area.height / 2).clamp(9, 13).max(art_height + 2).min(area.height);
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -85,27 +65,13 @@ pub(super) fn render_now_playing_hero(
     let album = app.track_album.as_deref().unwrap_or(title);
     let mut art_top_row: Option<u16> = None;
     let meta_area = if show_art {
-        // The art column reserves `hero_height` rows (matching the text
-        // column beside it), but the card itself only ever needs
-        // `art_height` of them to stay square -- rendering into the
-        // whole column would hand `render_art`/`Resize::Scale` a taller-
-        // than-square target, and while `Scale` still preserves the
-        // image's own aspect (it won't distort), it does leave a blank
-        // gap on one side to do it, right back to the shape of bug
-        // `Resize::Scale` was originally introduced to fix.
+        // The column reserves `hero_height` rows but the card needs only `art_height` to
+        // stay square; a taller target would leave a blank gap beside the scaled image.
         //
-        // Top margin is a fixed `Length(1)`, not `Min(1)` on both ends --
-        // a symmetric top+bottom `Min(1)` split centers the card within
-        // `hero_height`, but `meta_chunks` below starts its own content
-        // (the title) after a *fixed* one-row spacer regardless of
-        // `hero_height`'s leftover slack. Whenever the two didn't agree
-        // (any time `hero_height` exceeded `art_height + 2`, which is
-        // the common case once the 8-13 row clamp binds), the card's
-        // computed centering offset and the title's fixed offset drifted
-        // apart -- reported live as "the song name still not aligned
-        // with top of the frame". Matching this column's own top margin
-        // to the text column's fixed spacer keeps both starting at the
-        // exact same row, by construction, regardless of `hero_height`.
+        // The top margin is a fixed `Length(1)`, not a symmetric `Min(1)` pair, to match
+        // the text column's fixed spacer: otherwise the card's centring offset and the
+        // title's fixed offset drift apart whenever `hero_height` exceeds
+        // `art_height + 2`, and the title no longer lines up with the top of the frame.
         let art_area = Layout::default()
             .constraints([Constraint::Length(1), Constraint::Length(art_height), Constraint::Min(1)])
             .split(hero_cols[0])[1];
@@ -116,27 +82,11 @@ pub(super) fn render_now_playing_hero(
         hero_cols[0]
     };
 
-    // Round 9 put the title on the *same* row as the art border's own top
-    // edge (`Length(1)` spacer, matching the art column's own), confirmed
-    // live via the diagnostic below to actually land on the identical row
-    // -- and still reported as visibly misaligned. Root cause, reasoned
-    // out rather than guessed further: Unicode box-drawing corner
-    // characters (the border's `┌`) render their ink starting from the
-    // *vertical center* of their cell, not the top -- that's what makes
-    // stacked box-drawing rows connect seamlessly. Regular text glyphs
-    // sit near the top of their cell. So even on the *identical* buffer
-    // row, the border's visible line sits at that row's middle while the
-    // title's visible glyph-top sits near that row's top -- the title
-    // reads as floating above the border line no matter what row it's
-    // on, because the two kinds of glyph don't align to the same point
-    // within a shared cell. Asked directly which side of that gap is
-    // preferred, since eliminating it entirely isn't reachable at
-    // integer-row granularity (the border's true visual position sits
-    // *between* two text rows, not on either one): the leading spacer
-    // grew from `Length(1)` to `Length(2)`, moving the title one row
-    // *below* the border line -- lining up with where the art's actual
-    // pixel content starts (`inner.y`, one row below the border) instead
-    // of the border line's own row.
+    // The title starts one row below the art border (a `Length(2)` spacer), not on
+    // its row. Box-drawing corners draw their ink from the vertical centre of a cell
+    // while text glyphs sit near the top, so even on the same buffer row the title
+    // reads as floating above the border line. Exact alignment is impossible at row
+    // granularity; this lines the title up with where the art's pixels start.
     let meta_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -240,10 +190,9 @@ pub(super) fn bold_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// The most immersive treatment: art + song info on one half, the full
-/// lyric sheet on the other, no divider between them -- replacing the
-/// previous single stacked column (which `render_fullscreen_hero_stacked`
-/// below still covers, as the fallback for a terminal too narrow to split).
+/// Fullscreen: art and song info on one half, the whole lyric sheet on the other,
+/// no divider. `render_fullscreen_hero_stacked` is the fallback for terminals too
+/// narrow to split.
 pub(super) fn render_fullscreen_hero(
     frame: &mut Frame,
     app: &AppState,
@@ -266,74 +215,26 @@ pub(super) fn render_fullscreen_hero(
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    // Sized off the column's own width first, height derived from that --
-    // the previous version did the opposite (`art_width = art_height*2`,
-    // with `art_height` itself just half the pane's height), which on a
-    // wide fullscreen column left a large, unfilled gutter on both sides
-    // of the art card no matter how tall the terminal was -- reported
-    // live as "the left side... looks empty." Deriving width from the
-    // column directly fills far more of it; height still follows width
-    // at the same 2:1 ratio the stacked fallback uses (a terminal cell
-    // is roughly twice as tall as it is wide, so this is what reads as
-    // a visually square card).
-    //
-    // Two flat-cap attempts both failed for the same underlying reason:
-    // a fixed cell ceiling only looks right at one specific terminal
-    // height. 70 cols / 35 rows was tuned for a solid-color placeholder
-    // and, once Phase 11 started rendering a real photo there, consumed
-    // nearly the entire column on a normal terminal, squeezing the
-    // fixed content below to nothing ("still not completely right").
-    // 50 cols / 20 rows fixed that squeeze but then read as too small
-    // ("shrunk") on a taller terminal, where 20 rows is a shrinking
-    // fraction of the available height the taller the terminal gets --
-    // a flat cap can't scale with the pane, by definition.
-    //
-    // Fixed properly this time: height is the *lesser* of two numbers
-    // that each answer a different question, instead of one flat
-    // ceiling trying to answer both. `ideal_height` keeps the card
-    // visually square against whatever width the column produced ("how
-    // tall should a square card of this width be"). `height_budget` is
-    // 75% of the vertical room actually left after the 8 fixed rows
-    // below the card ("how tall can the card get before the fixed
-    // content below it, and both breathing-room spacers, get squeezed
-    // out") -- the other 25% covers those two `Min(1)` spacers plus
-    // slack. Taking the smaller of the two means: on a short terminal,
-    // `height_budget` is the binding constraint and the card shrinks to
-    // fit safely (this round's original goal); on a tall terminal,
-    // `ideal_height` is the binding constraint and the card simply stays
-    // a natural, width-matched square instead of an arbitrarily tiny
-    // fixed size ("shrunk" complaint, now fixed by not having a flat
-    // ceiling at all).
+    // Sized from the column width first, height derived from it, so the card fills
+    // the column instead of leaving gutters. Height is the lesser of two numbers:
+    // `ideal_height` (how tall a square of this width is, at the 2:1 cell ratio) and
+    // `height_budget` (75% of the vertical room left after the 8 fixed rows below,
+    // the rest being slack for the two `Min(1)` spacers). A flat cap cannot work: it
+    // is right at only one terminal height, too big on short ones and too small on
+    // tall ones.
     let art_width_candidate = cols[0].width.saturating_sub(8).clamp(20, 70);
     let cell_size = real_cell_size(images.picker.as_ref());
     let ideal_height = square_height_cells(art_width_candidate, cell_size);
     let max_safe_height = area.height.saturating_sub(8);
     let height_budget = ((max_safe_height as f32) * 0.75) as u16;
-    // A real bug from an unconditional `.max(10)` here, caught live: on
-    // a short enough terminal, `height_budget` (already `<= max_safe_height`
-    // by construction, since it's 75% of it) could fall under 10, but
-    // the old floor forced `art_height` back up to 10 regardless --
-    // pushing `art_height + 8` past `area.height` and starving the
-    // fixed title/artist/transport rows below it of any space at all
-    // (ratatui's layout solver dropped them to zero height under the
-    // resulting pressure, so they silently disappeared rather than just
-    // looking cramped). The floor now aims for 10 only when the terminal
-    // actually has that much room to give.
+    // Floor of 10 rows only when the terminal has that much room. An unconditional
+    // `.max(10)` pushed `art_height + 8` past `area.height` on a short terminal and
+    // ratatui dropped the fixed title/transport rows to zero height.
     let floor = 10.min(max_safe_height);
     let effective_ceiling = height_budget.max(floor);
-    // The real bug the diagnostic log confirmed: previously `art_height`
-    // alone was clamped down to `height_budget` whenever the terminal
-    // didn't have room for a true square at `art_width_candidate`, but
-    // `art_width` never shrank to match -- producing a card that was
-    // *shorter* than square without ever becoming *narrower* to match,
-    // i.e. not a square at all (logged live: 70x30 cells at an 18x40px
-    // cell came out 1224x1120 real pixels, 9% wider than tall). Fixed by
-    // re-deriving width from the constrained height with
-    // `square_width_cells` (already built for Phase 11's own narrow-
-    // stacked fallback) whenever height ends up being the limiting
-    // dimension, so the card is a true square either way -- "adjust one
-    // or the other but get them to fit flush," per the live report --
-    // instead of only ever adjusting height and leaving the mismatch.
+    // When height is the limiting dimension, width is re-derived from it with
+    // `square_width_cells` so the card stays a true square. Clamping only the height
+    // produced a card shorter than square but never narrower.
     let (art_width, art_height) = if ideal_height <= effective_ceiling {
         (art_width_candidate, ideal_height.max(1))
     } else {
@@ -341,12 +242,7 @@ pub(super) fn render_fullscreen_hero(
         let constrained_width = square_width_cells(constrained_height, cell_size).min(art_width_candidate).max(1);
         (constrained_width, constrained_height)
     };
-    // Symmetric `Min(1)` on both ends -- true centering. This looked
-    // wrong once before only because the fixed content above it (art +
-    // 6 text rows) was too small a block to center inside a tall pane
-    // without the leftover space reading as excessive; with the art
-    // itself now scaling to the pane, the same centering reads as
-    // balanced instead of top- or bottom-heavy.
+    // Symmetric `Min(1)` spacers centre the block in the pane.
     let side_rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -394,12 +290,8 @@ pub(super) fn render_fullscreen_hero(
             .alignment(Alignment::Center),
         side_rows[6],
     );
-    // A contained capsule the same width as the art card above it, not a
-    // bar stretching to the full column -- same `capsule_row` call
-    // applied to a different row of the same parent guarantees
-    // byte-identical left/right edges with the art card by construction,
-    // which is the actual fix (previously computed independently, which
-    // is how the two drifted apart).
+    // The capsule is the same width as the art card, from the same `capsule_row`
+    // call, so their left and right edges match by construction.
     frame.render_widget(progress_gauge_bordered(app), capsule_row(side_rows[7], art_width));
 
     // No divider rule between the two halves -- asked for directly,
@@ -432,40 +324,13 @@ pub(super) fn render_lyrics_credit(frame: &mut Frame, app: &AppState, area: Rect
     lyrics
 }
 
-// Six attempts at "bigger" here, in order -- see git history for each
-// one's full detail. First: `tui-big-text` enlarged only the current
-// line, jarringly inconsistent next to its normal-size neighbors.
-// Second and third: `tui-big-text` uniformly at `PixelSize::Quadrant`,
-// reported "way too large" twice, with a song's opening line pinned to
-// the top instead of centered. Fourth: letter-spacing instead of block
-// glyphs -- "irregularly big spacing," then still "way too large" and
-// "unnatural" even after fixing the spacing ratio. Fifth and sixth:
-// block glyphs reopened at the user's explicit request, first at
-// `PixelSize::Sextant` (confirmed to render with correct, non-garbled
-// glyphs -- the font-coverage risk was real but didn't materialize),
-// then `PixelSize::Octant` for even smaller -- both still reported "way
-// too big," and, decisively this round, rejected on a different axis
-// entirely: "not pixelized... more curved," an explicit preference for
-// how the text looks, not just how big it is. Block-glyph rendering
-// (font8x8-backed, inherently blocky at any `PixelSize`) cannot satisfy
-// that -- it's not a parameter to tune, it's the technique itself. Six
-// attempts across two families (glyph-scaling, letter-spacing) both
-// eventually rejected is well past the systematic-debugging "question
-// the architecture" threshold a second and third time over: `tui-big-
-// text`/`font8x8` removed from the project outright (`cargo remove`,
-// confirmed `Cargo.toml`/`Cargo.lock` clean via `git diff`), the same
-// full removal already proven twice this session for letter-spacing and
-// the original block-glyph code. What's left -- `bold_lines` +
-// `lyric_tier_color`'s 4-tier fade + `center_current_line`/
-// `top_anchored_offset` -- renders with the terminal's own font, which
-// is exactly what "curved" means in a terminal context: normal
-// anti-aliased glyphs, not a bitmap approximation. Literally bigger
-// *and* curved at the same time isn't achievable through text alone in
-// a fixed-size cell grid -- that would need rendering text to a real
-// raster image via an actual font and displaying it through a terminal
-// graphics protocol (kitty/iTerm2/sixel), the same category of
-// investment Phase 11 already tracks for album art specifically, not
-// attempted here without discussing that scope and cost first.
+// Lyrics are not enlarged. Block-glyph big text (`tui-big-text`, at several
+// sizes) and letter-spacing were each tried and rejected: too large, uneven, or
+// blocky rather than smooth. Bold text with a four-tier colour fade
+// (`bold_lines`, `lyric_tier_color`), centred by `center_current_line` /
+// `top_anchored_offset`, renders in the terminal's own font. Truly larger smooth
+// text would need rasterising lyrics to an image and showing it through a
+// graphics protocol, a separate piece of work.
 pub(super) fn render_fullscreen_lyrics(frame: &mut Frame, app: &AppState, area: Rect, alignment: Alignment) {
     let area = render_lyrics_credit(frame, app, area, alignment);
     let (lines, offset) =
@@ -476,21 +341,10 @@ pub(super) fn render_fullscreen_lyrics(frame: &mut Frame, app: &AppState, area: 
     );
 }
 
-/// Narrow-terminal fallback: the original single stacked column (art on
-/// top, then title/transport/lyrics, all centered) -- kept rather than
-/// deleted since a split too narrow to read either half legibly is
-/// worse than not splitting at all.
-/// Inline (art beside title/artist/transport/gauge), mirroring the
-/// compact hero's own established shape -- reported live as wanted here
-/// too ("the now playing format is not inline... song name is above
-/// the album cover"). Previously stacked (art on top, text below,
-/// lyrics under that); keeps the same two regions (an art+meta header,
-/// then lyrics spanning the full width below it) but makes the header
-/// row inline instead of vertically stacked, matching
-/// `render_now_playing_hero`'s structure -- centered instead of
-/// left-aligned, and using `render_fullscreen_lyrics` (this app's
-/// bold+color-fade fullscreen lyrics treatment) rather than the compact
-/// hero's small top-anchored one, since this is still a fullscreen view.
+/// Narrow-terminal fallback for fullscreen: a header row (art beside
+/// title, artist, transport and gauge, as in the compact hero) with the lyric
+/// sheet spanning the full width below. Used when a split would be too narrow to
+/// read either half.
 pub(super) fn render_fullscreen_hero_stacked(
     frame: &mut Frame,
     app: &AppState,
@@ -503,10 +357,8 @@ pub(super) fn render_fullscreen_hero_stacked(
     let art_height = square_height_cells(art_width, real_cell_size(images.picker.as_ref()));
     let show_art = area.width >= art_width + 24 && area.height >= art_height + 4;
 
-    // `.max(9)`, not `8`: `meta_chunks` below needs 9 rows minimum now
-    // (its leading spacer grew to `Length(2)`, matching the compact
-    // hero's own identical fix) -- a `header_height` too short for that
-    // would silently shrink `meta_chunks`' own content instead.
+    // At least 9 rows: `meta_chunks` below needs that many, and a shorter header
+    // would silently shrink its content.
     let header_height = (art_height + 2).max(9).min(area.height.saturating_sub(2).max(1));
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -525,20 +377,9 @@ pub(super) fn render_fullscreen_hero_stacked(
     let album = app.track_album.as_deref().unwrap_or(title);
     let mut art_top_row: Option<u16> = None;
     let meta_area = if show_art {
-        // Same bug, same fix, as `render_now_playing_hero`'s own art
-        // column (see its doc comment for the full account): a top
-        // `Min(1)` competes with the bottom `Min(1)` for whatever slack
-        // `header_height` has beyond `art_height`, and ratatui's surplus
-        // distribution between two `Min` constraints doesn't reliably
-        // split it 1-and-1 the way a hand-check might assume -- while
-        // `meta_chunks` below starts the title after a *fixed* `Length(1)`
-        // spacer regardless. This function was missed when that fix
-        // shipped for the compact hero (this is a *different* function,
-        // not a leftover branch of the same one), so the exact same
-        // "song name floats above the art card" report kept reproducing
-        // here even after the compact view was confirmed fixed. Fixed
-        // identically: a fixed `Length(1)` top margin, matching this
-        // column's own `meta_chunks[0]` spacer exactly, by construction.
+        // Fixed `Length(1)` top margin, matching `meta_chunks[0]`, as in
+        // `render_now_playing_hero`. Two `Min(1)` spacers do not reliably split the
+        // slack evenly, and the title would float above the art card.
         let art_area = Layout::default()
             .constraints([Constraint::Length(1), Constraint::Length(art_height), Constraint::Min(1)])
             .split(header_cols[0])[1];
@@ -549,11 +390,7 @@ pub(super) fn render_fullscreen_hero_stacked(
         header_cols[0]
     };
 
-    // Same shift as `render_now_playing_hero`'s own `meta_chunks` -- see
-    // its doc comment for the full reasoning (box-drawing corner glyphs
-    // render centered in their cell, regular text glyphs render near the
-    // top, so the two can never visually align on one shared row; asked
-    // directly, the title moves one row below the border line instead).
+    // Title one row below the border line; see `render_now_playing_hero`.
     let meta_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -566,11 +403,7 @@ pub(super) fn render_fullscreen_hero_stacked(
         ])
         .split(meta_area);
 
-    // Same diagnostic as `render_now_playing_hero`, extended here after
-    // finding this function had the same top-spacer bug that function's
-    // own fix never reached (see the art_area comment above) -- logs once
-    // per distinct value change so a live run can confirm this call site
-    // too, not just the compact one.
+    // Logs once per change in value, as in `render_now_playing_hero`.
     if let Some(art_row) = art_top_row {
         let title_row = meta_chunks[1].y;
         thread_local! {

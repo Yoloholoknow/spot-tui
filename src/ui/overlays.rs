@@ -10,30 +10,23 @@ pub(super) fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
     Rect { x, y, width, height }
 }
 
-// Every overlay used its own bare width/height literals (40x13, 50x16,
-// 50x3, and confirm's own self-sizing) with nothing shared -- one width
-// for the two list-shaped overlays (picker, quick jump) so they read as
-// one system, and a named horizontal-padding amount applied to all four.
+// Shared overlay dimensions: one width for the two list overlays (picker, quick
+// jump) so they read as a system, and one horizontal padding for all four.
 pub(super) const OVERLAY_LIST_WIDTH: u16 = 50;
 pub(super) const OVERLAY_LIST_HEIGHT: u16 = 16;
 pub(super) const OVERLAY_PROMPT_WIDTH: u16 = 50;
 pub(super) const OVERLAY_PROMPT_HEIGHT: u16 = 3; // 1 content row + 2 borders -- no vertical padding
 pub(super) const OVERLAY_CONFIRM_MIN_WIDTH: u16 = 24;
 pub(super) const OVERLAY_CONFIRM_MAX_WIDTH: u16 = 70;
-/// Horizontal-only: a blank row costs real percentage height in a
-/// 13-16-row list overlay for no benefit the border doesn't already
-/// give; horizontal has a real payoff since content otherwise sits flush
-/// against the border everywhere else in the app doesn't.
+/// Horizontal only: a blank row costs real height in a short list overlay, while
+/// side padding keeps text off the border.
 pub(super) const OVERLAY_PAD_X: u16 = 1;
-/// Borders (2) + horizontal padding (2x `OVERLAY_PAD_X`) -- everything
-/// between an overlay's outer width and its usable text width. The
-/// confirm overlay predicts its own wrapped height by hand rather than
-/// going through `Block::inner` (the other three overlays get padding
-/// subtracted for free), so this constant must stay the single source
-/// of truth for both its width-clamp formula and the width it feeds to
-/// `wrapped_line_count` -- if vertical padding is ever added, the `+ 2`
-/// in `render_confirm_overlay`'s height formula must become `+ 4` at the
-/// same time, or long messages clip again.
+/// Borders plus horizontal padding: everything between an overlay's outer width
+/// and its text width. The confirm overlay predicts its wrapped height by hand
+/// (the others get padding from `Block::inner`), so this is the single source for
+/// its width clamp and `wrapped_line_count`. If vertical padding is added, the
+/// `+ 2` in `render_confirm_overlay`'s height must become `+ 4`, or long messages
+/// clip.
 pub(super) const OVERLAY_CHROME_X: u16 = 2 + 2 * OVERLAY_PAD_X;
 
 pub(super) fn render_text_prompt_overlay(frame: &mut Frame, prompt: &TextPrompt) {
@@ -52,12 +45,10 @@ pub(super) fn render_text_prompt_overlay(frame: &mut Frame, prompt: &TextPrompt)
     );
 }
 
-/// Greedy word-wrap into the actual line strings, matching `Paragraph`'s
-/// own `Wrap` behavior closely enough to predict it -- there's no way to
-/// ask ratatui how many lines (or which lines) a `Paragraph` will wrap to
-/// before rendering it, so both count and content are predicted here
-/// separately. A word longer than `width` still gets its own line rather
-/// than being split mid-word, matching `Wrap`'s own behavior.
+/// Greedy word-wrap, close enough to `Paragraph`'s `Wrap` to predict it:
+/// ratatui cannot report a paragraph's wrapped lines before rendering, so both
+/// count and content are computed here. A word longer than `width` gets its own
+/// line instead of being split.
 pub(super) fn wrap_words(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut lines: Vec<String> = Vec::new();
@@ -112,10 +103,8 @@ mod wrap_words_tests {
     }
 }
 
-/// Wraps a `Fetch::Failed` message in a bordered box instead of a bare
-/// line of text -- designed as its own state (per fable-ui-design), not
-/// a stripped-down list. A real 400 was this project's single most-
-/// repeated live bug class; it deserves to be legible, not just present.
+/// A `Fetch::Failed` message in a bordered box rather than a bare line: API
+/// errors are common enough to deserve a legible state of their own.
 pub(super) fn render_fetch_error(frame: &mut Frame, area: Rect, message: &str) {
     frame.render_widget(
         Paragraph::new(format!("failed to load: {message}"))
@@ -152,12 +141,9 @@ pub(super) fn render_empty_state(frame: &mut Frame, area: Rect, headline: &str, 
 
 pub(super) fn render_confirm_overlay(frame: &mut Frame, confirm: &PendingConfirm) {
     let frame_area = frame.area();
-    // Fixed at a max of 60 cols with no wrapping originally -- fine for
-    // short messages ("Quit spot-tui? y/n") but the newer, longer ones
-    // (duplicate-track warnings naming both the track and the playlist)
-    // ran off both edges of the box with no way to read the rest,
-    // reported live as "completely cutoff." Now wraps, and the box grows
-    // to fit however many lines that takes instead of assuming one.
+    // Messages wrap and the box grows to fit: long ones (a duplicate-track
+    // warning naming both the track and the playlist) would otherwise run off
+    // both edges.
     let max_width = frame_area.width.saturating_sub(4).clamp(OVERLAY_CONFIRM_MIN_WIDTH, OVERLAY_CONFIRM_MAX_WIDTH);
     let width = (confirm.message.chars().count() as u16 + 4).clamp(OVERLAY_CONFIRM_MIN_WIDTH, max_width);
     let inner_width = width.saturating_sub(OVERLAY_CHROME_X);
@@ -212,16 +198,10 @@ mod confirm_overlay_tests {
     }
 }
 
-/// Reuses `render_display_list` (the same helper every other list in the
-/// app already uses) specifically for its `ListState`-backed scrolling --
-/// the picker's first version built its rows as a plain `Paragraph`,
-/// which never scrolls at all, so a playlist past the visible height was
-/// simply unreachable (reported live).
 /// Whether `playlist_uri` is known to already contain `track_uri`, per
-/// `AppState::playlist_membership`'s own doc comment on why "unknown" is
-/// a real, distinct third answer here, not just "no" -- an incomplete
-/// cache must never claim a track is confirmed absent from a playlist
-/// nobody's looked inside yet this session.
+/// `AppState::playlist_membership`. "Unknown" is a distinct third answer, not
+/// "no": an incomplete cache must never claim a track is absent from a
+/// playlist nobody has looked inside.
 pub(super) fn playlist_has_track(
     membership: &std::collections::HashMap<String, std::collections::HashSet<String>>,
     playlist_uri: &str,
@@ -332,12 +312,9 @@ pub(super) fn render_playlist_picker_overlay(
     }
 }
 
-/// Phase 12's quick-jump palette. Built on `filter_overlay_body` -- the
-/// same shared chrome `render_playlist_picker_overlay` uses -- over the
-/// flattened, heterogeneous pool `quick_jump_entries` builds fresh from
-/// live `AppState` every render, so a background fetch (eager-triggered
-/// on open) landing while this is open shows up on the very next frame
-/// with no extra plumbing.
+/// The quick-jump palette. Shares `filter_overlay_body` with the playlist
+/// picker, over the pool `quick_jump_entries` rebuilds from live `AppState`
+/// each frame, so a fetch landing while it is open shows up at once.
 pub(super) fn render_quick_jump_overlay(frame: &mut Frame, app: &AppState, qj: &QuickJump, list_state: &mut ListState) {
     let body = filter_overlay_body(frame, "Quick jump", &qj.filter);
     let entries = quick_jump_entries(app, &qj.filter);

@@ -177,7 +177,7 @@ pub fn handle_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) {
 }
 
 /// Opens the palette, first starting the fetch for any lazily-loaded
-/// category not visited yet this session so it can appear in results.
+/// category not yet visited this run so it can appear in results.
 fn open_quick_jump(ctx: &mut KeyCtx<'_>) {
     for screen in [Screen::SavedAlbums, Screen::FollowedArtists, Screen::Devices] {
         ctx.svc.ensure_loaded(ctx.app, screen);

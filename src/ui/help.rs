@@ -23,7 +23,7 @@ pub(super) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "Ctrl+C",
-                "quit immediately, never confirms -- a harder interrupt than Shift+Q, by convention (not while typing in Search)",
+                "quit immediately, never confirms -- works everywhere, including while typing",
             ),
             ("Space / n / p / + / -", "play-pause / next / previous / volume -- works from any screen, including while browsing a list, not just Now Playing (not while typing in Search)"),
             (
@@ -182,7 +182,7 @@ pub(super) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
                 "v",
                 "open the selected track's album -- Liked Songs, Playlist Detail, Queue, Now Playing (the currently-playing track; on Album Detail, opens the album's own artist instead -- there's no separate album to open from inside one)",
             ),
-            ("Shift+V", "open the selected track's artist -- Liked Songs, Playlist Detail, Queue, Now Playing"),
+            ("Shift+V", "open the selected track's artist -- Liked Songs, Playlist Detail, Queue, Album Detail, Now Playing"),
             (
                 "Ctrl+\u{2192} / Alt+\u{2192}",
                 "open the selected result's album / artist -- Search only (plain letters all type into the query box there)",

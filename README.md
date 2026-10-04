@@ -17,8 +17,8 @@ to any other device.
   Lyrics (optional, needs a key), Spotify's own, YouTube Music, then lrclib.
 - **Romanized lyrics:** Japanese, Chinese and Korean lyrics in Latin letters
   (`t`), with the word highlight kept in step.
-- **Album art** in terminals that support a graphics protocol (Kitty, iTerm2,
-  Sixel), with Ghostty and tmux handled.
+- **Album art** in terminals that support a graphics protocol (Kitty and iTerm2
+  style; falls back to a text placeholder), with Ghostty and tmux handled.
 - **Library:** Liked Songs, Saved Albums, Followed Artists, playlists, artist and
   album pages, the play queue and the device list, each with live filtering.
 - **Playlists:** create, rename, delete, add (with a duplicate warning), remove,

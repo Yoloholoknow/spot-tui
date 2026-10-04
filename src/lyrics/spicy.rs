@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// What a `200` body reduces to. `Static` (untimed text) is kept distinct
-/// from `Miss` only so a later phase can offer it as plain lyrics; today
-/// both fall through to the next source.
+/// from `Miss` so the pipeline can offer it as plain lyrics when no later
+/// source finds a synced sheet.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Parsed {
     /// Timed lines (seconds, text), ascending, plus the credit line the
@@ -24,7 +24,7 @@ pub enum Parsed {
         words: Vec<Vec<WordSeg>>,
         credit: String,
     },
-    Static,
+    Static(String),
     Miss,
 }
 
@@ -82,7 +82,7 @@ pub fn parse_response(bytes: &[u8]) -> Parsed {
     let rows: Vec<Row> = match body.get("Type").and_then(Value::as_str) {
         Some("Line") => content.map(|c| c.iter().filter_map(line_row).collect()),
         Some("Syllable") => content.map(|c| c.iter().filter_map(syllable_row).collect()),
-        Some("Static") => return Parsed::Static,
+        Some("Static") => return static_text(body),
         _ => return Parsed::Miss,
     }
     .unwrap_or_default();
@@ -125,6 +125,24 @@ pub fn parse_response(bytes: &[u8]) -> Parsed {
         words,
         credit: credit_line(source, username("Uploader"), username("Maker")),
     }
+}
+
+/// The untimed sheet as plain text, one lyric line per line. Blank lines are
+/// kept (they are stanza breaks); a sheet with no text at all is a `Miss`.
+fn static_text(body: &Value) -> Parsed {
+    let lines: Vec<&str> = body
+        .get("Lines")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .map(|row| row.get("Text").and_then(Value::as_str).unwrap_or("").trim())
+                .collect()
+        })
+        .unwrap_or_default();
+    if lines.iter().all(|line| line.is_empty()) {
+        return Parsed::Miss;
+    }
+    Parsed::Static(lines.join("\n"))
 }
 
 fn line_row(row: &Value) -> Option<Row> {
@@ -387,6 +405,15 @@ pub struct SpicyLyrics {
     pub credit: String,
 }
 
+/// What a lookup found: a synced sheet, untimed text worth showing only if
+/// nothing better turns up, or nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpicyAnswer {
+    Synced(SpicyLyrics),
+    Plain(String),
+    Nothing,
+}
+
 /// Cheap to clone: the agent and gate are shared, so every per-track task
 /// sees the same rate-limit and key-refused state.
 #[derive(Clone)]
@@ -406,22 +433,32 @@ impl SpicyClient {
     }
 
     /// `Some` only for a usable *synced* result; every other outcome is `None`
-    /// and the caller moves on to the next source. Every branch logs at
+    /// and the caller moves on to the next source.
+    #[cfg(test)]
+    pub async fn lyrics(&self, track_id: &str) -> Option<SpicyLyrics> {
+        match self.answer(track_id).await {
+            SpicyAnswer::Synced(lyrics) => Some(lyrics),
+            SpicyAnswer::Plain(_) | SpicyAnswer::Nothing => None,
+        }
+    }
+
+    /// Like `lyrics`, but also hands back untimed text when that is all
+    /// Spicy has, so the caller can fall back to it. Every branch logs at
     /// `info!` (this app's filter drops `debug!` from its own code) -- with
     /// the track id and status code, never the key.
-    pub async fn lyrics(&self, track_id: &str) -> Option<SpicyLyrics> {
+    pub async fn answer(&self, track_id: &str) -> SpicyAnswer {
         if !is_valid_track_id(track_id) {
             log::info!(
                 "spicy_lyrics: not a track id, skipped ({} chars)",
                 track_id.len()
             );
-            return None;
+            return SpicyAnswer::Nothing;
         }
         if !self.gate.allow(track_id, Instant::now()) {
             log::info!(
                 "spicy_lyrics[{track_id}]: skipped (disabled, backing off, or already a miss this session)"
             );
-            return None;
+            return SpicyAnswer::Nothing;
         }
 
         let (agent, key, id) = (self.agent.clone(), self.key.clone(), track_id.to_owned());
@@ -431,11 +468,11 @@ impl SpicyClient {
             // Transient: fall through this time, but don't remember it as a miss.
             Ok(Err(e)) => {
                 log::info!("spicy_lyrics[{track_id}]: request failed: {e}");
-                return None;
+                return SpicyAnswer::Nothing;
             }
             Err(e) => {
                 log::info!("spicy_lyrics[{track_id}]: lookup task failed: {e}");
-                return None;
+                return SpicyAnswer::Nothing;
             }
         };
 
@@ -454,17 +491,18 @@ impl SpicyClient {
                         lines.len(),
                         words.iter().filter(|w| !w.is_empty()).count()
                     );
-                    return Some(SpicyLyrics {
+                    return SpicyAnswer::Synced(SpicyLyrics {
                         lines,
                         words,
                         credit,
                     });
                 }
-                Parsed::Static => {
+                Parsed::Static(text) => {
                     log::info!(
-                        "spicy_lyrics[{track_id}]: only untimed lyrics available, falling through"
+                        "spicy_lyrics[{track_id}]: only untimed lyrics available, keeping them as a fallback"
                     );
                     self.gate.record(track_id, Action::Miss, now);
+                    return SpicyAnswer::Plain(text);
                 }
                 Parsed::Miss => {
                     log::info!(
@@ -499,7 +537,7 @@ impl SpicyClient {
                 self.gate.record(track_id, action, now);
             }
         }
-        None
+        SpicyAnswer::Nothing
     }
 }
 
@@ -680,7 +718,28 @@ mod parse_tests {
     fn static_lyrics_are_not_synced() {
         let json =
             r#"{"Body":{"Type":"Static","source":"spotify","Lines":[{"Text":"a"},{"Text":"b"}]}}"#;
-        assert_eq!(parse_response(json.as_bytes()), Parsed::Static);
+        assert_eq!(
+            parse_response(json.as_bytes()),
+            Parsed::Static("a\nb".to_string())
+        );
+    }
+
+    #[test]
+    fn static_lyrics_keep_stanza_breaks() {
+        let json =
+            r#"{"Body":{"Type":"Static","Lines":[{"Text":"a"},{"Text":""},{"Text":" b "}]}}"#;
+        assert_eq!(
+            parse_response(json.as_bytes()),
+            Parsed::Static("a\n\nb".to_string())
+        );
+    }
+
+    #[test]
+    fn static_lyrics_with_no_text_are_a_miss() {
+        let json = r#"{"Body":{"Type":"Static","Lines":[{"Text":" "}]}}"#;
+        assert_eq!(parse_response(json.as_bytes()), Parsed::Miss);
+        let json = r#"{"Body":{"Type":"Static"}}"#;
+        assert_eq!(parse_response(json.as_bytes()), Parsed::Miss);
     }
 
     #[test]

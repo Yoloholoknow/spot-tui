@@ -35,7 +35,7 @@ to any other device.
   run it, and sign in. spot-tui never writes to that directory.
 - **Rust 1.88 or newer** (edition 2024) to build.
 - **Network access on the first build**, which downloads a Japanese dictionary
-  (about 49 MB embedded in the binary, so a release build is roughly 72 MB).
+  (about 49 MB embedded in the binary, so a release build is roughly 59 MB).
 - macOS is the tested platform. Logs use the macOS location; Linux should work
   but is untested.
 
@@ -93,3 +93,17 @@ handling, parsing, romanization, layout maths) is unit tested.
 - Pins are local to spot-tui and never sync with the official app.
 - Developer-mode Spotify apps are capped at 10 results per search and per
   catalogue page.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Unless you explicitly state otherwise, any contribution you
+intentionally submit for inclusion in this work, as defined in the Apache-2.0
+license, is dual licensed as above, without any additional terms or conditions.
+
+The patched librespot crates in `vendor/` stay under their original MIT license
+([vendor/LICENSE-librespot-MIT](vendor/LICENSE-librespot-MIT)).

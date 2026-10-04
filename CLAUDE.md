@@ -10,7 +10,7 @@
 ## Commands
 - Build: `cargo build` (first build downloads IPADIC, needs network)
 - Run: `cargo run`
-- Release: `cargo build --release` (~72 MB binary)
+- Release: `cargo build --release` (~59 MB stripped binary; profile in Cargo.toml)
 - Test: `cargo test`
 - Lint/format: `cargo clippy`, `cargo fmt`
 - Rebuild code graph: `python3 scripts/graphify_build.py` (src + docs only, tests pruned; not plain `/graphify --update`)
@@ -19,6 +19,7 @@
 - `[patch.crates-io]` in Cargo.toml must survive `cargo add/remove`; see docs/VENDORING.md
 - Input handling per screen in `src/input/`
 - Docs in `docs/` (architecture, config, keybindings)
+- License: `MIT OR Apache-2.0` (`LICENSE-MIT`, `LICENSE-APACHE`); vendored librespot stays MIT (`vendor/LICENSE-librespot-MIT`)
 
 ## Layout
 - `src/api/` Spotify API calls (album, track, playlists, search...)

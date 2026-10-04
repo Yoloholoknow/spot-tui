@@ -1,21 +1,18 @@
 //! Album art fetching: for the track that just started, and a prefetch of
 //! the one queued after it.
 
-use crate::api;
+use crate::{api, http};
 use crate::lyrics::pipeline::{self, TrackMeta};
 use crate::lyrics::spicy::SpicyClient;
 use image::DynamicImage;
 use librespot_connect::Spirc;
 use rspotify::AuthCodeSpotify;
-use std::io::Read;
 use std::sync::mpsc::Sender;
 
 /// Downloads and decodes a cover. Blocking: call from `spawn_blocking`.
 pub fn fetch_cover(url: &str) -> Option<DynamicImage> {
-    let response = ureq::get(url).call().ok()?;
-    let mut bytes = Vec::new();
-    response.into_reader().read_to_end(&mut bytes).ok()?;
-    image::load_from_memory(&bytes).ok()
+    let response = http::agent().get(url).call().ok()?;
+    image::load_from_memory(&http::read_limited(response, http::MAX_IMAGE_BYTES).ok()?).ok()
 }
 
 /// Warms the art and lyrics caches for whatever librespot already has queued

@@ -1,11 +1,7 @@
 use super::*;
 use crate::api::search::TrackResult;
 
-/// A single-line text prompt (playlist name, for now). The third caller
-/// of the shared `text_*` cursor functions, after `SearchState` and
-/// `ListFilter` -- not yet a big enough win to unify all three into one
-/// shared struct, but that stays a documented option rather than a
-/// to-do.
+/// A single-line text prompt (a playlist name, or a move-to position).
 pub struct TextPrompt {
     pub title: String,
     pub query: String,
@@ -66,21 +62,16 @@ pub enum ConfirmAction {
     /// that doesn't mutate anything, just tells the main loop to actually
     /// exit once confirmed.
     Quit,
-    // Reported live: liking/following/saving fires immediately (matches
-    // `a` = add-to-playlist, which never confirms either), but the
-    // reverse -- unlike/unfollow/unsave, all reached from the screen
-    // that *is* the owning list -- confirms first, same standing rule
-    // "d"/"Shift+D" already established for anything that removes an
-    // item from a list you're looking straight at.
+    // Liking, following and saving fire immediately, like add-to-playlist.
+    // The reverse (unlike/unfollow/unsave), always reached from the list
+    // that owns the item, confirms first, like every removal.
     UnlikeTrack { track_uri: String },
     UnfollowArtist { artist_uri: String },
     UnsaveAlbum { album_uri: String },
 }
 
-/// Derived from the variant rather than stored as its own field on
-/// `PendingConfirm` -- severity is a deterministic fact about *which*
-/// action this is, not independent state, so there's nothing to keep in
-/// sync at each of the 4 construction call sites.
+/// How carefully to read a confirmation. Derived from the action rather
+/// than stored, since it is a fact about which action it is.
 pub enum ConfirmSeverity {
     Danger,
     Warn,
@@ -103,35 +94,23 @@ impl ConfirmAction {
     }
 }
 
-/// The add-to-playlist picker (`a`). Lists `app.library.playlists`,
-/// pinned-first -- same ordering Your Playlists and the Sidebar already
-/// use. No in-picker filter/sort in this pass; the list is short enough
-/// that it isn't missed yet (see the design-scope plan's Phase 5
-/// non-goals).
+/// The add-to-playlist picker (`a`): the user's playlists, pinned first (the
+/// same order as Your Playlists and the sidebar).
 pub struct PlaylistPicker {
     pub track_uri: String,
     pub selected: usize,
-    /// Always live -- unlike the list screens' `/`-to-start-editing
-    /// convention, the picker has no other letter-key action competing
-    /// for space, so every printable character narrows it immediately,
-    /// no explicit "start editing" step needed. `editing`/`sort_alpha`
-    /// go unused here; reusing `ListFilter` wholesale (rather than a
-    /// bespoke query+cursor pair) is what gets `filtered_sorted` for
-    /// free. Reported live as needed once a real account had enough
-    /// playlists that scrolling to find one by hand was real friction --
-    /// originally scoped out on the assumption the list would stay
-    /// short.
+    /// Always live: the picker has no letter-key actions competing for
+    /// input, so every printable key narrows it with no `/` step. Reuses
+    /// `ListFilter` for `filtered_sorted`; `editing` and `sort_alpha` go
+    /// unused.
     pub filter: ListFilter,
 }
 
-/// Phase 12: the global quick-jump palette (`Ctrl+P`). Flattens playlists,
-/// liked tracks, followed artists, saved albums, devices, and every
-/// fixed nav destination into one searchable list. No stored/memoized
-/// entry list here, deliberately -- like `PlaylistPicker`, `selected`
-/// and `filter` are the only state; the actual entry pool is recomputed
-/// live from `AppState` on every keystroke (`quick_jump_entries`), so a
-/// background fetch completing while this is open is picked up for free
-/// on the very next render with no invalidation logic to get wrong.
+/// The quick-jump palette (`Ctrl+P`): playlists, liked tracks, followed
+/// artists, saved albums, devices and every screen in one searchable list.
+/// Only `selected` and `filter` are stored. The entries are recomputed from
+/// `AppState` on demand (`quick_jump_entries`), so a fetch that completes
+/// while the palette is open shows up with no invalidation to get wrong.
 pub struct QuickJump {
     pub filter: ListFilter,
     pub selected: usize,
@@ -175,16 +154,11 @@ pub const QUICK_JUMP_SCREENS: &[(&str, Screen)] = &[
     ("Help", Screen::Help),
 ];
 
-/// Builds the flattened, filterable pool quick jump searches. Deliberately
-/// category-ordered (screens, then playlists, artists, albums, devices,
-/// tracks last) rather than scored -- there's no numeric relevance score
-/// with plain substring matching, so build order *is* the display order.
-/// When `filter.query` is empty, returns only the 10 fixed screen
-/// entries and skips building the dynamic categories entirely -- cheap
-/// by construction the instant the overlay opens, not just capped at
-/// display time; the dynamic pool (which can be hundreds to thousands of
-/// items on a real account) is only ever built once the user has actually
-/// started typing.
+/// Builds the pool quick jump searches, in category order (screens,
+/// playlists, artists, albums, devices, tracks): substring matching has no
+/// relevance score, so build order is display order. With an empty query
+/// only the fixed screens are built, since the dynamic pool can run to
+/// thousands of items and is only needed once the user starts typing.
 pub fn quick_jump_entries(app: &AppState, filter: &ListFilter) -> Vec<QuickJumpEntry> {
     let mut entries: Vec<QuickJumpEntry> = QUICK_JUMP_SCREENS
         .iter()

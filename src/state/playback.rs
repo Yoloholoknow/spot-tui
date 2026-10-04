@@ -1,11 +1,9 @@
 use crate::lyrics::{CachedLyrics, LyricLine};
 use std::time::Duration;
 
-/// Repeat as the three states a person actually cycles through (off /
-/// the whole album or playlist / this one song), collapsed from the
-/// player's two independent booleans (`repeating_context`,
-/// `repeating_track`) -- four flag combinations, but only three of them
-/// mean anything different to a listener.
+/// Repeat as the three states a person cycles through (off / the whole
+/// album or playlist / this song), collapsed from the player's two
+/// independent flags, whose four combinations only mean three things.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RepeatMode {
     #[default]
@@ -96,16 +94,12 @@ impl ShuffleMode {
     }
 }
 
-/// The playbar's always-visible shuffle and repeat toggles, as Spotify
-/// shows them: every glyph is drawn in every state, and the `bool` says
-/// whether that one is currently on (accent) or off (dim) -- the caller
-/// does the coloring. Repeat's slot is a fixed two cells wide (`↻ ` for off
-/// and album/playlist, `↻1` for this song) so the readout never changes
-/// width and the track title's truncation point doesn't jump around as
-/// modes change. Smart shuffle is a third shuffle state, not a separate
-/// toggle, so its sparkle sits in the one-cell gap between the two toggles
-/// (a blank when off) instead of widening the readout; it only lights while
-/// shuffle itself is on.
+/// The playbar's shuffle and repeat toggles. Every glyph is drawn in every
+/// state; the `bool` says whether it is on (accent) or off (dim), and the
+/// caller colours it. The readout is a fixed width so the title's truncation
+/// point doesn't jump as modes change. Smart shuffle is a state of shuffle,
+/// not a separate toggle: its sparkle sits in the gap between the two
+/// toggles and only lights while shuffle is on.
 pub fn playback_modes(shuffle: bool, smart: bool, repeat: RepeatMode) -> [(&'static str, bool); 3] {
     let repeat_glyph = match repeat {
         RepeatMode::Track => "\u{21bb}1",
@@ -125,11 +119,9 @@ pub const PLAYBACK_MODES_WIDTH: usize = 4;
 
 pub enum LyricsState {
     Idle,
-    /// Distinct from `Idle`: the Spotify Connect session ended
-    /// unexpectedly (network drop, laptop sleep, etc.) after having been
-    /// alive. There's no auto-reconnect yet, so this is a dead end --
-    /// restart the process. Shown separately so a real drop is never
-    /// mistaken for "just hasn't connected yet".
+    /// The Connect session dropped (network, sleep) and is being
+    /// reconnected. Distinct from `Idle` so a real drop is never mistaken
+    /// for "not connected yet".
     SessionEnded,
     Loading,
     Synced(Vec<LyricLine>),
@@ -291,7 +283,9 @@ impl From<CachedLyrics> for LyricsState {
                     .into_iter()
                     .enumerate()
                     .map(|(i, (secs, text))| LyricLine {
-                        timestamp: Duration::from_secs_f64(secs),
+                        // Cached data came from a remote source; a bad value becomes 0
+                        // rather than a panic.
+                        timestamp: Duration::try_from_secs_f64(secs).unwrap_or_default(),
                         text,
                         // `words` runs parallel to `lines`; empty (or short,
                         // if a cache file is corrupt) means no word timing.
@@ -319,6 +313,18 @@ mod lyric_words_tests {
         match state {
             LyricsState::Synced(lines) => lines,
             _ => panic!("expected Synced lyrics"),
+        }
+    }
+
+    #[test]
+    fn a_corrupt_timestamp_never_panics() {
+        for bad in [f64::NAN, f64::INFINITY, -1.0, 1e300] {
+            let state = LyricsState::from(CachedLyrics::Synced {
+                lines: vec![(bad, "x".to_string())],
+                words: Vec::new(),
+                credit: None,
+            });
+            assert_eq!(lines_of(state)[0].timestamp, Duration::ZERO);
         }
     }
 

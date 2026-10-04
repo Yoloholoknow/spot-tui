@@ -1,10 +1,7 @@
 
-/// Char-boundary-safe cursor editing, shared by every text-input field in
-/// the app (Search's query, and every list screen's `/` filter box --
-/// duplicating this a second time for `ListFilter` is what justified
-/// pulling it out here instead of leaving it as a `SearchState`-only
-/// method). Cursor is a character index, not a byte offset, so this stays
-/// correct on multi-byte UTF-8 text.
+/// Cursor editing shared by every text field (Search, list filters, the text
+/// prompt, the overlays). The cursor is a character index, not a byte
+/// offset, so this is correct on multi-byte UTF-8.
 pub(super) fn text_char_byte_offset(s: &str, char_idx: usize) -> usize {
     s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
 }

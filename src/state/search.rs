@@ -3,12 +3,8 @@ use crate::api::search::TrackResult;
 
 pub struct SearchState {
     pub query: String,
-    /// Character position (not byte offset -- safe on multi-byte UTF-8
-    /// query text), where the next typed character is inserted. Reported
-    /// live as a real gap: query editing was always append-at-end /
-    /// remove-from-end, so fixing a typo mid-query meant backspacing
-    /// everything after it and retyping, rather than moving the cursor
-    /// there directly.
+    /// Where the next typed character goes, as a character index (not a
+    /// byte offset, so it is safe on multi-byte text).
     pub cursor: usize,
     pub results: Vec<TrackResult>,
     pub selected: usize,

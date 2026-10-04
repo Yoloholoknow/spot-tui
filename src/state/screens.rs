@@ -1,12 +1,9 @@
 use super::*;
 use crate::api::search::TrackResult;
 
-/// The Connect queue (Phase 7). Kept separate from `LibraryState` --
-/// unlike Liked Songs/Saved Albums/etc, this reflects live playback
-/// state that changes on its own even when this app hasn't done
-/// anything (the current track finishes, another device skips ahead),
-/// so it's periodically refetched while visible rather than fetched once
-/// and cached indefinitely -- see `main.rs`'s own polling logic.
+/// The Connect queue. Unlike the library lists it changes on its own (a track
+/// ends, another device skips), so it is polled while visible rather than
+/// fetched once.
 pub struct QueueState {
     pub fetch: Fetch<crate::api::queue::QueueSummary>,
     pub selected: usize,
@@ -24,10 +21,8 @@ impl Default for QueueState {
     }
 }
 
-/// Connect devices (Phase 8). Fetched once on entry (like the Library
-/// lists), not periodically like `QueueState` -- a device coming online
-/// or offline is a discrete, comparatively rare event, not something
-/// changing every few seconds during normal use. `r` refetches manually.
+/// Connect devices. Fetched on entry; devices come and go rarely, so
+/// `Shift+R` refetches manually instead of polling.
 pub struct DevicesState {
     pub fetch: Fetch<Vec<crate::api::devices::DeviceSummary>>,
     pub selected: usize,
@@ -87,29 +82,22 @@ impl Default for LibraryState {
     }
 }
 
-/// Which playlist `Screen::PlaylistDetail` is currently showing, and its
-/// fetch state. A single `Option` rather than a per-playlist cache --
-/// only one can be on top of the stack at a time, matching `Nav`'s own
-/// one-at-a-time `top()`. Fetch results carry the playlist's URI so a
-/// stale in-flight fetch from a playlist the user has since backed out
-/// of can't overwrite whichever one is showing now.
+/// The playlist `Screen::PlaylistDetail` is showing, and its tracks. Fetch
+/// results carry the playlist's URI so a late response for a playlist the
+/// user has left cannot overwrite the one showing now.
 pub struct PlaylistDetailState {
     pub playlist: crate::api::library::PlaylistSummary,
     pub tracks: Fetch<Vec<TrackResult>>,
     pub selected: usize,
     pub filter: ListFilter,
-    /// `Some(start_index)` while move-mode (Phase 6, `m`) is active --
-    /// the index the moving track started at, so confirming (`Enter`)
-    /// knows the net displacement regardless of how many times it moved
-    /// up and down in between.
+    /// `Some(start_index)` while move mode (`m`) is active: where the moving
+    /// track started, so `Enter` can send the net displacement. While it is
+    /// set, `selected` is a raw array index, not a display row.
     pub move_mode: Option<usize>,
 }
 
-/// Phase 9, read-only, no filter/sort/pin concept -- just enough state
-/// to show one artist's albums and remember which real artist this is,
-/// so a stale in-flight fetch from an artist backed out of can't
-/// overwrite whichever one is showing now (same guard idiom
-/// `PlaylistDetailState` already uses).
+/// One artist's albums. The URI guards against late responses, as in
+/// `PlaylistDetailState`.
 pub struct ArtistDetailState {
     pub artist_uri: String,
     pub detail: Fetch<crate::api::artist::ArtistDetail>,
@@ -122,18 +110,10 @@ pub struct AlbumDetailState {
     pub selected: usize,
 }
 
-// Phase 5's transient overlays (name prompt, yes/no confirm, playlist
-// picker) live as sibling `Option<_>` fields on `AppState` rather than
-// new `Screen` stack variants -- `Screen::Help`'s own addition (the most
-// recent precedent) touched 8+ separate call sites (the exhaustive
-// `render` match, the exhaustive Main-focus `match key.code`, and a
-// `nav.push` binding hand-added to every one of 8 screens individually,
-// each re-implementing the global keys by hand since there's no shared
-// fallthrough). None of that is right for something transient anyway --
-// a yes/no confirm isn't a destination with its own `Esc`-back semantics,
-// it's a gate on top of wherever the user already was. One interception
-// point at the very top of the key loop (same place `Tab` is already
-// intercepted) and one draw call at the end of `render` covers all
-// three, and the screen underneath is untouched -- its list position,
-// filter, nav depth all just resume once the overlay closes.
+// The transient overlays (confirm, text prompt, playlist picker, quick jump)
+// are `Option` fields on `AppState`, not `Screen` variants. A confirm is a
+// gate on top of wherever the user already is, not a destination with its own
+// Esc-back semantics; one interception at the top of key handling and one
+// draw at the end of `render` cover them, and the screen underneath resumes
+// untouched when the overlay closes.
 

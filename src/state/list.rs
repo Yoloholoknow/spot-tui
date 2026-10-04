@@ -1,12 +1,8 @@
 use super::*;
 
-/// State of one asynchronously-fetched list. Every Library list (Liked
-/// Songs, Saved Albums, Followed Artists, Your Playlists) needs this
-/// exact shape independently and simultaneously -- backing each with its
-/// own loading/error bookkeeping avoided a real race a single shared
-/// `loading` flag would have: navigating away from one still-loading
-/// list into another would have made the second list's own fetch
-/// wrongly believe one was already in flight.
+/// State of one asynchronously fetched value. Each list carries its own, so
+/// leaving one still-loading list for another never makes the second think a
+/// fetch is already in flight.
 pub enum Fetch<T> {
     NotStarted,
     Loading,
@@ -14,20 +10,14 @@ pub enum Fetch<T> {
     Failed(String),
 }
 
-/// In-list filter/sort, shared by every list screen. Filtering and
-/// sorting are presentation-only -- they never mutate the underlying
-/// fetched `Vec`, so clearing the filter or toggling sort off always
-/// returns to exactly what was originally fetched, no re-fetch needed.
+/// In-list filter and sort, shared by every list screen. Presentation only:
+/// the fetched `Vec` is never touched, so clearing the filter restores the
+/// original list with no refetch.
 #[derive(Default)]
 pub struct ListFilter {
     pub query: String,
-    /// Character position within `query`, same convention as
-    /// `SearchState::cursor` -- Left/Right move it mid-string. Two other
-    /// designs were tried and rejected live: Left/Right as pane
-    /// navigation (nav.escape()/open) while typing felt like it silently
-    /// kicked you out of the filter; a no-op felt like the arrows were
-    /// just broken. Real in-text cursor movement, matching Search, is
-    /// the one that actually reads as "working."
+    /// Cursor position in characters (not bytes) within `query`; Left/Right
+    /// move it, as in Search.
     pub cursor: usize,
     pub editing: bool,
     pub sort_alpha: bool,
@@ -42,11 +32,8 @@ impl ListFilter {
         self.cursor = self.query.chars().count();
     }
 
-    /// Exits edit mode AND clears the query -- distinct from just setting
-    /// `editing = false` (which keeps whatever was typed applied).
-    /// Reported live: Esc while filtering only stopped editing, leaving
-    /// the narrowed view in place with no way to actually cancel back to
-    /// the full list short of backspacing everything by hand.
+    /// Exits edit mode and clears the query. (`editing = false` alone would
+    /// keep what was typed applied.)
     pub fn cancel_editing(&mut self) {
         self.editing = false;
         self.query.clear();
@@ -70,17 +57,12 @@ impl ListFilter {
     }
 }
 
-/// Applies `filter`'s query (case-insensitive substring match against
-/// `label`) and, if `sort_alpha` is set, an alphabetical-by-label sort.
-/// Returns references into `items` so this never clones or reorders the
-/// canonical fetched data.
-/// Returns `(original_index, item)` pairs, not just items -- callers that
-/// need to tell Spotify "play index N of this context" (Playlist Detail)
-/// must send the index into the *real, unfiltered* playlist, never the
-/// display position. Losing the original index here was a real bug
-/// caught before shipping: filtering down to a few matches and pressing
-/// Enter would have told Spotify to play whatever sat at that position
-/// in the full, unfiltered playlist instead.
+/// Applies `filter`'s query (case-insensitive substring match on `label`)
+/// and, if `sort_alpha` is set, an alphabetical sort by label.
+///
+/// Returns `(original_index, item)` pairs referencing `items`. The original
+/// index matters: telling Spotify to play "index N of this playlist" needs
+/// the position in the real, unfiltered list, never the display row.
 pub fn filtered_sorted<'a, T>(
     items: &'a [T],
     filter: &ListFilter,

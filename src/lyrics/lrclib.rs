@@ -44,7 +44,7 @@ pub struct LyricsClient {
 impl LyricsClient {
     pub fn new(cache_dir: std::path::PathBuf) -> Self {
         Self {
-            agent: ureq::AgentBuilder::new().build(),
+            agent: crate::http::agent(),
             base_url: "https://lrclib.net".to_string(),
             cache_dir,
         }
@@ -104,7 +104,7 @@ impl LyricsClient {
         }
 
         if let Ok(resp) = req.call()
-            && let Ok(entry) = resp.into_json::<LrcLibEntry>() {
+            && let Ok(entry) = crate::http::read_json::<LrcLibEntry>(resp) {
                 return classify(&entry);
             }
 
@@ -118,7 +118,7 @@ impl LyricsClient {
             .call();
 
         if let Ok(resp) = search
-            && let Ok(candidates) = resp.into_json::<Vec<LrcLibEntry>>()
+            && let Ok(candidates) = crate::http::read_json::<Vec<LrcLibEntry>>(resp)
                 && let Some(best) = best_search_candidate(&candidates, duration_secs) {
                     return classify(best);
                 }

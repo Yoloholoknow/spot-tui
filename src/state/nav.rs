@@ -1,9 +1,6 @@
 use super::*;
 
-/// A screen in the main-pane stack. More variants land alongside the
-/// phase that actually builds them (Queue in Phase 7, Devices in Phase
-/// 8, Help in Phase 9), rather than stubbing out destinations nothing
-/// can reach yet.
+/// A screen in the main-pane stack.
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum Screen {
     NowPlaying,
@@ -21,8 +18,7 @@ pub enum Screen {
     AlbumDetail,
 }
 
-/// Which persistent pane currently receives arrow keys / `Enter`, toggled
-/// by `Tab`. See the design-scope plan's Navigation model.
+/// Which persistent pane receives arrow keys and `Enter`, toggled by `Tab`.
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum Focus {
     Sidebar,
@@ -68,13 +64,9 @@ impl Nav {
         }
     }
 
-    /// Sidebar-triggered navigation: collapses any in-content drill-down
-    /// depth, like switching a tab -- but `NowPlaying` stays the
-    /// permanent root underneath, exactly as `push`/`pop` leave it. A
-    /// version of this that replaced the whole stack made `Esc` a
-    /// permanent no-op after any sidebar-triggered navigation, since
-    /// `pop` refuses to remove the last remaining screen -- there was
-    /// nothing left under it to land on.
+    /// Switches to `screen` like a tab, collapsing any drill-down. The stack
+    /// always keeps `NowPlaying` underneath: without a root to pop back to,
+    /// `Esc` would do nothing after a sidebar jump.
     pub fn goto(&mut self, screen: Screen) {
         self.stack = if screen == Screen::NowPlaying {
             vec![Screen::NowPlaying]
@@ -83,12 +75,9 @@ impl Nav {
         };
     }
 
-    /// `Esc`'s full behavior in the Main pane: pop one level, and if that
-    /// pop lands back at the permanent root, hand focus to the Sidebar in
-    /// the same keystroke -- a separate second `Esc` just to reach the
-    /// Sidebar after already backing out felt like one press too many
-    /// (confirmed live). Every future main-pane screen's `Esc` handler
-    /// should call this rather than reimplementing the pop-then-check.
+    /// `Esc` in the main pane: pops one level, and if that lands on the root,
+    /// hands focus to the sidebar in the same keypress. Every screen's `Esc`
+    /// should call this rather than reimplementing it.
     pub fn escape(&mut self) {
         self.pop();
         if self.depth() == 1 {
@@ -110,10 +99,8 @@ impl Default for Nav {
     }
 }
 
-/// Sidebar menu entries. Shared between rendering and key-dispatch so the
-/// two can never drift. Grows alongside the phase that builds each real
-/// destination (Library in Phase 2, Queue in Phase 7, Devices in Phase 8,
-/// Help in Phase 9) -- only the two screens that exist today are listed.
+/// Sidebar menu entries, shared by rendering and key handling so they cannot
+/// drift.
 pub const SIDEBAR_ENTRIES: &[(&str, Screen)] = &[
     ("Now Playing", Screen::NowPlaying),
     ("Search", Screen::Search),
@@ -123,21 +110,15 @@ pub const SIDEBAR_ENTRIES: &[(&str, Screen)] = &[
     ("Devices", Screen::Devices),
 ];
 
-/// One row of the sidebar -- either a static menu entry or one of the
-/// user's own playlists. The sidebar was always meant to list playlists
-/// directly (see the design-scope plan's Navigation model diagram) so
-/// they're reachable in one step, not menu -> Library -> Your Playlists;
-/// that part just hadn't been built yet.
+/// One row of the sidebar: a menu entry, or one of the user's playlists
+/// (listed directly so they are one step away).
 pub enum SidebarRow<'a> {
     Menu(&'static str, Screen),
     Playlist(&'a crate::api::library::PlaylistSummary),
 }
 
-/// Combines the static menu entries with the user's playlists, pinned
-/// ones first (same `pinned_first`/`filtered_sorted` used by the Your
-/// Playlists screen -- one shared notion of pin order, not two). Used by
-/// both rendering and key-handling so they can never disagree on what
-/// row N actually is.
+/// The menu entries followed by the user's playlists, pinned first. Used by
+/// both rendering and key handling, so they agree on what row N is.
 pub fn sidebar_rows(app: &AppState) -> Vec<SidebarRow<'_>> {
     let mut rows: Vec<SidebarRow> =
         SIDEBAR_ENTRIES.iter().map(|(label, screen)| SidebarRow::Menu(label, *screen)).collect();
@@ -151,9 +132,8 @@ pub fn sidebar_rows(app: &AppState) -> Vec<SidebarRow<'_>> {
     rows
 }
 
-/// The Library home screen's 4 entries. Not part of `SIDEBAR_ENTRIES` --
-/// this is a menu one level into the main-pane stack, not a persistent
-/// destination.
+/// The Library home screen's entries: a menu one level into the stack, not
+/// a persistent sidebar destination.
 pub const LIBRARY_ENTRIES: &[(&str, Screen)] = &[
     ("Liked Songs", Screen::LikedSongs),
     ("Saved Albums", Screen::SavedAlbums),

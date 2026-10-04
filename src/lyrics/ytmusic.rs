@@ -286,7 +286,7 @@ fn yt_agent() -> ureq::Agent {
 fn yt_post(agent: &ureq::Agent, endpoint: &str, body: Value) -> Result<Value, String> {
     let url = format!("{YT_BASE}/{endpoint}?alt=json");
     let resp = agent.post(&url).set("Content-Type", "application/json").send_json(body).map_err(|e| e.to_string())?;
-    resp.into_json::<Value>().map_err(|e| e.to_string())
+    crate::http::read_json::<Value>(resp)
 }
 
 fn search_song_blocking(query: &str) -> Result<Vec<YtSongCandidate>, String> {

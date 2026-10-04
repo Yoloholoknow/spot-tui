@@ -5,6 +5,7 @@
 mod api;
 mod config;
 mod covers;
+mod http;
 mod input;
 mod lyrics;
 mod paths;

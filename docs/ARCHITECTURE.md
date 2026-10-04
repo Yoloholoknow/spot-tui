@@ -133,8 +133,9 @@ the plain letter because some terminals report Shift+L as `l` plus a modifier.
 | What fails | What happens |
 |------------|--------------|
 | Connect session drops (sleep, Wi-Fi) | The UI shows "reconnecting" and retries with exponential backoff, 500 ms up to 10 s. It reclaims the last active session on success. |
-| No cached ncspot login | The UI shows "not logged in" with the fix (log in once with ncspot, then restart) instead of the transient "reconnecting" text. Connect still retries on the same backoff, so a login made meanwhile is picked up. |
-| Web API token missing or refresh fails | Search and library show a clear error; playback and lyrics are unaffected. |
+| No stored login (first run, signed out) | A sign-in screen replaces the app; `Enter` runs the two browser logins (playback, then library), `q` quits. No connect attempts are made until signed in. |
+| Spotify rejects the stored login (revoked, password changed) | The stored login is deleted and the sign-in screen shows with a note. It is not retried, since retrying cannot help. |
+| Web API token refresh fails while signed in | Search and library show a clear error; playback and lyrics are unaffected. Sign out and in again to recover. |
 | Web API call fails | The result carries the error text, shown in the status line or in place of the list. Spotify's response body is logged, not just the status. |
 | A lyrics source fails or has nothing | Falls through to the next source; lrclib is last and can answer not-found. Not-found is cached for 7 days. |
 | Cover or lyrics response is huge or hangs | Capped and timed out (`http.rs`), then treated as a miss. |

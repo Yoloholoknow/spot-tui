@@ -78,6 +78,9 @@ pub enum ConfirmAction {
     /// that doesn't mutate anything, just tells the main loop to actually
     /// exit once confirmed.
     Quit,
+    /// Quick jump's "Sign out": deletes the stored logins, then the app returns
+    /// to its signed-out screen.
+    SignOut,
     // Liking, following and saving fire immediately, like add-to-playlist.
     // The reverse (unlike/unfollow/unsave), always reached from the list
     // that owns the item, confirms first, like every removal.
@@ -114,6 +117,8 @@ impl ConfirmAction {
             | ConfirmAction::UnfollowArtist { .. }
             | ConfirmAction::UnsaveAlbum { .. } => ConfirmSeverity::Warn,
             ConfirmAction::Quit => ConfirmSeverity::Neutral,
+            // Reversible, but it ends the session and needs a browser to undo.
+            ConfirmAction::SignOut => ConfirmSeverity::Warn,
         }
     }
 }
@@ -151,6 +156,7 @@ pub enum QuickJumpKind {
     Artist { uri: String },
     Album { uri: String },
     Device(crate::api::devices::DeviceSummary),
+    SignOut,
 }
 
 #[derive(Clone)]
@@ -191,6 +197,11 @@ pub fn quick_jump_entries(app: &AppState, filter: &ListFilter) -> Vec<QuickJumpE
             kind: QuickJumpKind::Screen(*screen),
         })
         .collect();
+    // Last, so the palette's default selection (the first row) never lands on it.
+    entries.push(QuickJumpEntry {
+        label: "[Account] Sign out".to_string(),
+        kind: QuickJumpKind::SignOut,
+    });
     if filter.query.is_empty() {
         return entries;
     }
@@ -269,5 +280,46 @@ mod text_prompt_tests {
         assert_eq!(p.cursor, 3); // clamped at the end
         p.backspace_at_cursor();
         assert_eq!(p.query, "ab");
+    }
+}
+
+#[cfg(test)]
+mod sign_out_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn app() -> AppState {
+        AppState::new(false, HashSet::new(), HashSet::new(), 0)
+    }
+
+    #[test]
+    fn sign_out_is_in_the_palette_but_never_the_default_row() {
+        let entries = quick_jump_entries(&app(), &ListFilter::default());
+        let position = entries
+            .iter()
+            .position(|e| matches!(e.kind, QuickJumpKind::SignOut))
+            .expect("a sign out entry");
+        assert_ne!(
+            position, 0,
+            "Enter on a freshly opened palette must not sign out"
+        );
+    }
+
+    #[test]
+    fn typing_sign_finds_it() {
+        let filter = ListFilter {
+            query: "sign".to_string(),
+            ..ListFilter::default()
+        };
+        let entries = quick_jump_entries(&app(), &filter);
+        assert!(entries.iter().any(|e| e.label.contains("Sign out")));
+    }
+
+    #[test]
+    fn signing_out_asks_first_as_a_warning() {
+        assert!(matches!(
+            ConfirmAction::SignOut.severity(),
+            ConfirmSeverity::Warn
+        ));
     }
 }

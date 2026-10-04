@@ -3,6 +3,7 @@
 //! `docs/ARCHITECTURE.md`.
 
 mod api;
+mod auth;
 mod config;
 mod covers;
 mod http;

@@ -3,7 +3,7 @@
 
 use super::{KeyCtx, go_to_screen, is_ctrl};
 use crate::player::play_context;
-use crate::state::{ConfirmAction, Focus, QuickJumpKind, Screen, TextPromptAction};
+use crate::state::{ConfirmAction, Focus, PendingConfirm, QuickJumpKind, Screen, TextPromptAction};
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// `y`/`Enter` confirms and fires the action; `n`/`Esc` cancels; every other
@@ -25,6 +25,7 @@ fn fire_confirmed(ctx: &mut KeyCtx<'_>, action: ConfirmAction) {
     let (app, svc) = (&mut *ctx.app, ctx.svc);
     match action {
         ConfirmAction::Quit => ctx.quit = true,
+        ConfirmAction::SignOut => ctx.sign_out = true,
         ConfirmAction::DeletePlaylist(playlist) => svc.delete_playlist(app, playlist),
         ConfirmAction::RemoveTrack {
             playlist_uri,
@@ -237,5 +238,12 @@ fn activate_quick_jump(ctx: &mut KeyCtx<'_>, kind: QuickJumpKind) {
         ),
         // Stays wherever the user was.
         QuickJumpKind::Device(device) => ctx.svc.transfer_playback(ctx.app, device.id),
+        QuickJumpKind::SignOut => {
+            ctx.app.pending_confirm = Some(PendingConfirm {
+                message: "Sign out of Spotify? You will need your browser to sign in again. y/n"
+                    .to_string(),
+                action: ConfirmAction::SignOut,
+            });
+        }
     }
 }

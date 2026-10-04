@@ -24,15 +24,12 @@ to any other device.
 - **Playlists:** create, rename, delete, add (with a duplicate warning), remove,
   reorder (move mode), and pin. Like, follow and save from anywhere.
 - **Search** with actions on results, and **quick jump** (`Ctrl+P`) to find any
-  playlist, track, artist, album, device or screen by name.
+  playlist, track, artist, album, device or screen by name, or to sign out.
 - **Resilience:** reconnects with backoff when the session drops (sleep, Wi-Fi).
 
 ## Requirements
 
 - **Spotify Premium.** librespot cannot stream on a free account.
-- **ncspot, logged in once.** spot-tui reuses the login credentials ncspot
-  caches in `~/.cache/ncspot/librespot/`. Install [ncspot](https://github.com/hrkfdn/ncspot),
-  run it, and sign in. spot-tui never writes to that directory.
 - **Your own Spotify developer app** (free). spot-tui does not ship a client ID;
   create one and set `spotify_client_id` in `config.toml`. Takes two minutes, see
   [docs/CONFIGURATION.md](docs/CONFIGURATION.md#spotify-client-id).
@@ -51,10 +48,16 @@ cargo build --release
 ./target/release/spot-tui
 ```
 
-On first run a browser window opens once for the Web API login (library,
-playlists, queue and devices need it; playback does not). The login callback
-uses `http://127.0.0.1:8888/callback`, so that port must be free. The token is
-cached and refreshed automatically afterwards.
+On first run spot-tui shows a sign-in screen. Press `Enter` and it walks you
+through two browser steps: one for playback, one for the library, playlists,
+queue and devices. Spotify requires them to be separate. The callbacks use
+`http://127.0.0.1:8898/login` and `http://127.0.0.1:8888/callback`, so both
+ports must be free. If no browser can open (over SSH), copy each link printed in
+the terminal. The logins are stored (owner-only) and refreshed automatically,
+so later runs go straight in.
+
+To sign out, press `Ctrl+P`, type `sign` and choose **Sign out**. It deletes the
+stored login and returns to the sign-in screen.
 
 Press `?` in the app for key bindings, or see [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md).
 

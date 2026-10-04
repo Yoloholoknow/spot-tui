@@ -44,6 +44,9 @@ pub struct KeyCtx<'a> {
     pub confirm_quit: bool,
     /// Set by a handler to end the main loop.
     pub quit: bool,
+    /// Set by a handler to sign out: the main loop deletes the stored logins
+    /// and returns to the signed-out screen.
+    pub sign_out: bool,
 }
 
 /// A physical Shift+<letter>: the literal uppercase char (how most

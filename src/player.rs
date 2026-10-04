@@ -1,13 +1,11 @@
 //! The Spotify Connect player: connecting, and the playback controls that
 //! key handlers invoke.
 
-use crate::paths;
 use crate::state::{AppState, RepeatMode, Screen, ShuffleMode};
 use librespot_connect::{
     ConnectConfig, LoadContextOptions, LoadRequest, LoadRequestOptions, Options, PlayingTrack,
     Spirc,
 };
-use librespot_core::cache::Cache;
 use librespot_core::config::{DeviceType, SessionConfig};
 use librespot_core::session::Session;
 use librespot_playback::audio_backend;
@@ -40,7 +38,7 @@ pub enum ConnectError {
 impl std::fmt::Display for ConnectError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NoCredentials => f.write_str("no cached credentials found in ncspot's cache"),
+            Self::NoCredentials => f.write_str("not signed in"),
             Self::Other(e) => f.write_str(e),
         }
     }
@@ -58,20 +56,18 @@ impl From<&str> for ConnectError {
     }
 }
 
+/// Whether Spotify refused the stored login itself, as opposed to a network or
+/// server problem. Retrying a refused login can never succeed. The token login
+/// reports a refusal as a generic "invalid state" error, so its message decides.
+fn is_login_rejection(e: &librespot_core::Error) -> bool {
+    e.kind == librespot_core::error::ErrorKind::Unauthenticated
+        || e.to_string().contains("INVALID_CREDENTIALS")
+}
+
 /// Full librespot bootstrap. Returns `Err` instead of panicking so a failed
 /// attempt can back off and retry rather than crash.
 pub async fn connect() -> Result<Connection, ConnectError> {
-    // Login credentials come from ncspot's cache. Volume and audio cache get
-    // a directory of their own: librespot writes a file literally named
-    // `volume` there, which collides with ncspot's `volume/` directory.
-    let own_cache = paths::cache_dir().join("librespot");
-    let cache = Cache::new(
-        Some(&paths::ncspot_librespot_cache()),
-        Some(&own_cache),
-        Some(&own_cache),
-        None,
-    )
-    .map_err(|e| e.to_string())?;
+    let cache = crate::auth::session_cache()?;
     let credentials = cache.credentials().ok_or(ConnectError::NoCredentials)?;
 
     let session = Session::new(SessionConfig::default(), Some(cache));
@@ -98,9 +94,17 @@ pub async fn connect() -> Result<Connection, ConnectError> {
     };
     // `Spirc::new` consumes the session; keep a handle for lyrics lookups.
     let lyrics_session = session.clone();
-    let (spirc, spirc_task) = Spirc::new(config, session, credentials, player, mixer)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (spirc, spirc_task) = match Spirc::new(config, session, credentials, player, mixer).await {
+        Ok(parts) => parts,
+        // Spotify refused the stored login (revoked, or the account's password
+        // changed): retrying can never help, so sign out and ask for a new one.
+        Err(e) if is_login_rejection(&e) => {
+            log::warn!("stored login rejected, signing out: {e}");
+            crate::auth::sign_out();
+            return Err(ConnectError::NoCredentials);
+        }
+        Err(e) => return Err(e.to_string().into()),
+    };
 
     Ok(Connection {
         spirc,

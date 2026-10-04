@@ -123,10 +123,6 @@ pub enum LyricsState {
     /// reconnected. Distinct from `Idle` so a real drop is never mistaken
     /// for "not connected yet".
     SessionEnded,
-    /// There is no cached login to connect with (ncspot was never logged in).
-    /// Unlike `SessionEnded` this does not clear by itself, so the screen must
-    /// not promise that it will.
-    NoLogin,
     Loading,
     Synced(Vec<LyricLine>),
     Plain(String),

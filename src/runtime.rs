@@ -13,9 +13,11 @@ use crate::player::{self, ConnectError, Connection};
 use crate::position::PositionTracker;
 use crate::services::{ServiceReceivers, Services};
 use crate::state::{AppState, LyricsState, RepeatMode, Screen};
-use crate::terminal::{TerminalGuard, detect_graphics_picker, install_panic_hook};
-use crate::{api, pins, ui};
-use crossterm::event::{self, Event};
+use crate::terminal::{
+    TerminalGuard, detect_graphics_picker, install_panic_hook, resume_tui, suspend_tui,
+};
+use crate::{api, auth, paths, pins, ui};
+use crossterm::event::{self, Event, KeyCode};
 use image::DynamicImage;
 use librespot_metadata::audio::UniqueFields;
 use librespot_playback::player::PlayerEvent;
@@ -63,6 +65,31 @@ const STARTUP_TRACK_MAX_WAIT: Duration = Duration::from_secs(4);
 enum LoopExit {
     Quit,
     Disconnected,
+    SignOut,
+}
+
+/// What the user chose on the signed-out screen.
+enum SignedOutChoice {
+    SignIn,
+    Quit,
+}
+
+/// Loads the Web API client in the background: a failure disables search and
+/// library browsing only, never playback or lyrics. Without a stored token
+/// (signed out) it reports `None` straight away.
+fn spawn_web_client_loader() -> Receiver<Option<AuthCodeSpotify>> {
+    let (client_tx, client_rx) = mpsc::channel::<Option<AuthCodeSpotify>>();
+    tokio::spawn(async move {
+        let client = match api::load_or_refresh_token().await {
+            Ok(token) => Some(api::client_from_token(token).await),
+            Err(e) => {
+                log::warn!("Web API unavailable: {e}");
+                None
+            }
+        };
+        let _ = client_tx.send(client);
+    });
+    client_rx
 }
 
 /// The pending, debounced lyrics request for the track that just started.
@@ -126,19 +153,10 @@ pub async fn run() -> std::io::Result<()> {
     };
     api::set_client_id(client_id);
 
-    // The Web API client loads in the background: a failure here disables
-    // search and library browsing only, never playback or lyrics.
-    let (client_tx, client_rx) = mpsc::channel::<Option<AuthCodeSpotify>>();
-    tokio::spawn(async move {
-        let client = match api::load_or_refresh_token().await {
-            Ok(token) => Some(api::client_from_token(token).await),
-            Err(e) => {
-                log::warn!("Web API unavailable: failed to load/refresh Spotify token: {e}");
-                None
-            }
-        };
-        let _ = client_tx.send(client);
-    });
+    if let Err(e) = paths::ensure_private_dir(&paths::cache_dir()) {
+        log::warn!("could not restrict the cache directory: {e}");
+    }
+    let client_rx = spawn_web_client_loader();
 
     let _guard = TerminalGuard::new()?;
     let terminal = ratatui::Terminal::new(CrosstermBackend::new(stdout()))?;
@@ -205,7 +223,19 @@ impl Runtime {
         // reconnects stay fast.
         let mut first_attempt = true;
         let mut awaiting_first_track = true;
+        // Why the signed-out screen is showing, when it is not the first run.
+        let mut note: Option<String> = None;
         loop {
+            if !auth::is_signed_in() {
+                if matches!(self.sign_in_flow(note.take()).await?, SignedOutChoice::Quit) {
+                    return Ok(());
+                }
+                // The splash and the settle-wait are for a fresh start, which
+                // signing in is.
+                first_attempt = true;
+                awaiting_first_track = true;
+                backoff = RECONNECT_INITIAL_BACKOFF;
+            }
             let connected = if std::mem::take(&mut first_attempt) {
                 self.connect_with_splash().await?
             } else {
@@ -213,9 +243,14 @@ impl Runtime {
             };
             let mut conn = match connected {
                 Ok(conn) => conn,
+                Err(ConnectError::NoCredentials) => {
+                    log::warn!("no usable stored login, asking to sign in");
+                    note = Some("Your Spotify login is no longer valid.".to_string());
+                    continue;
+                }
                 Err(e) => {
                     log::warn!("connect failed, retrying in {backoff:?}: {e}");
-                    self.show_disconnected(e == ConnectError::NoCredentials)?;
+                    self.show_disconnected()?;
                     tokio::time::sleep(backoff).await;
                     backoff = next_backoff(backoff);
                     continue;
@@ -245,12 +280,97 @@ impl Runtime {
             match exit {
                 LoopExit::Quit => return Ok(()),
                 LoopExit::Disconnected => {
-                    self.show_disconnected(false)?;
+                    self.show_disconnected()?;
                     tokio::time::sleep(backoff).await;
                     backoff = next_backoff(backoff);
                 }
+                LoopExit::SignOut => {
+                    // Stop the session for good before deleting its login, or a
+                    // late reconnect could write the credentials back.
+                    conn.session.shutdown();
+                    conn.task.abort();
+                    drop(conn);
+                    auth::sign_out();
+                    self.reset_account_state();
+                    note = Some("Signed out.".to_string());
+                }
             }
         }
+    }
+
+    /// The signed-out screen, and the browser sign-in behind its Enter key.
+    /// Returns once signed in, or when the user quits instead.
+    async fn sign_in_flow(&mut self, mut note: Option<String>) -> std::io::Result<SignedOutChoice> {
+        loop {
+            if matches!(
+                self.signed_out_prompt(note.as_deref())?,
+                SignedOutChoice::Quit
+            ) {
+                return Ok(SignedOutChoice::Quit);
+            }
+            // The library prints the sign-in links itself, which would tear the
+            // alternate screen, so sign in on the normal one. It doubles as the
+            // fallback when no browser can open (over SSH). Ctrl+C cancels, by
+            // ending the program.
+            suspend_tui();
+            let result = auth::sign_in().await;
+            resume_tui()?;
+            self.terminal.clear()?;
+            match result {
+                Ok(()) => {
+                    self.reset_account_state();
+                    self.client_rx = spawn_web_client_loader();
+                    self.client_checked = false;
+                    return Ok(SignedOutChoice::SignIn);
+                }
+                Err(e) => {
+                    log::warn!("sign-in failed: {e}");
+                    note = Some(format!("Sign-in failed: {e}"));
+                }
+            }
+        }
+    }
+
+    fn signed_out_prompt(&mut self, note: Option<&str>) -> std::io::Result<SignedOutChoice> {
+        loop {
+            self.terminal.draw(|f| ui::render_signed_out(f, note))?;
+            if !event::poll(TICK)? {
+                continue;
+            }
+            let Event::Key(key) = event::read()? else {
+                continue;
+            };
+            match key.code {
+                KeyCode::Enter => return Ok(SignedOutChoice::SignIn),
+                KeyCode::Char('q') | KeyCode::Esc => return Ok(SignedOutChoice::Quit),
+                KeyCode::Char('c')
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    return Ok(SignedOutChoice::Quit);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Forgets everything about the previous account, so a sign-in as someone
+    /// else never shows the last user's library, queue or lyrics.
+    fn reset_account_state(&mut self) {
+        // Results still in flight would otherwise land in the fresh state.
+        self.drain_results();
+        self.app = AppState::new(
+            self.cfg.romanize_lyrics,
+            pins::load("playlists"),
+            pins::load("tracks"),
+            player::INITIAL_VOLUME,
+        );
+        self.svc.client = None;
+        self.generation += 1;
+        self.pending_lyrics = None;
+        self.synced_lines.clear();
+        self.queue_last_fetched = None;
     }
 
     /// Animates the splash while the first connect resolves (several real
@@ -302,16 +422,12 @@ impl Runtime {
         Ok(())
     }
 
-    fn show_disconnected(&mut self, no_login: bool) -> std::io::Result<()> {
+    fn show_disconnected(&mut self) -> std::io::Result<()> {
         self.app.track_title = None;
         self.app.track_artist = None;
         self.app.track_album = None;
         self.app.playing = None;
-        self.app.lyrics = if no_login {
-            LyricsState::NoLogin
-        } else {
-            LyricsState::SessionEnded
-        };
+        self.app.lyrics = LyricsState::SessionEnded;
         self.draw()
     }
 
@@ -371,10 +487,14 @@ impl Runtime {
                         generation: self.generation,
                         confirm_quit: self.cfg.confirm_quit,
                         quit: false,
+                        sign_out: false,
                     };
                     input::handle_key(&mut ctx, key);
                     if ctx.quit {
                         return Ok(LoopExit::Quit);
+                    }
+                    if ctx.sign_out {
+                        return Ok(LoopExit::SignOut);
                     }
                 }
                 _ => {}

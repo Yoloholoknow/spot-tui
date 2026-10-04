@@ -135,6 +135,55 @@ pub fn render_startup(frame: &mut Frame, tick: usize) {
     );
 }
 
+/// Shown whenever there is no stored login: first run, after signing out, or
+/// when Spotify rejected the stored one. `note` says why.
+pub fn render_signed_out(frame: &mut Frame, note: Option<&str>) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(frame.area());
+    let centered = |text: String, style: Style| {
+        Paragraph::new(text)
+            .alignment(Alignment::Center)
+            .style(style)
+    };
+    frame.render_widget(
+        centered(
+            "spot-tui".to_string(),
+            Style::default().add_modifier(Modifier::BOLD).fg(ACCENT),
+        ),
+        rows[1],
+    );
+    frame.render_widget(
+        centered(
+            "Sign in to Spotify to start listening".to_string(),
+            Style::default(),
+        ),
+        rows[2],
+    );
+    if let Some(note) = note {
+        frame.render_widget(
+            centered(note.to_string(), Style::default().fg(DIM)),
+            rows[3],
+        );
+    }
+    frame.render_widget(
+        centered(
+            "Enter  sign in     q  quit".to_string(),
+            Style::default().fg(DIM),
+        ),
+        rows[5],
+    );
+}
+
 pub fn render(
     frame: &mut Frame,
     app: &AppState,

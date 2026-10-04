@@ -1,15 +1,13 @@
 // Spotify Web API client bootstrap: PKCE OAuth and token cache/refresh, shared by
 // every `api::*` submodule.
 //
-// Uses spot-tui's own Spotify app (Development Mode), not ncspot's client id:
-// ncspot's was caught in a Spotify-side lockdown on third-party Web API access
-// (its own search was equally broken). Refresh tokens are locked to the client id
-// that issued them, so ncspot's cached token is unusable here; the first run does
-// a one-time browser login and caches the token separately.
+// Uses the user's own Spotify app (see `Config::spotify_client_id`). Sign-in is
+// interactive and lives in `crate::auth`; this module only reads and refreshes
+// the token it saves. Playback has its own, separate login (see `crate::auth`).
 //
-// PKCE (via `librespot_oauth`, as ncspot does) needs only a client id, never a
-// secret. The dashboard requires an exact port in the redirect URI, so this uses
-// one fixed port that must match `REDIRECT_URI` there.
+// PKCE (via `librespot_oauth`) needs only a client id, never a secret. The
+// dashboard requires an exact port in the redirect URI, so this uses one fixed
+// port that must match `REDIRECT_URI` there.
 
 pub mod album;
 pub mod artist;
@@ -59,9 +57,7 @@ const SCOPES: &[&str] = &[
     "user-read-recently-played",
 ];
 
-fn token_cache_path() -> std::path::PathBuf {
-    // Separate from ncspot's: a different client_id means a different,
-    // non-interchangeable token.
+pub fn token_cache_path() -> std::path::PathBuf {
     crate::paths::cache_dir().join("spotify_token.json")
 }
 
@@ -112,9 +108,10 @@ fn refresh_blocking(refresh_token: &str) -> Result<Token, String> {
 }
 
 /// Blocking and interactive: opens a browser for login, then listens on
-/// `REDIRECT_URI`'s port for the callback. Needed once; afterwards the cached
-/// refresh token is used silently.
-fn login_blocking() -> Result<Token, String> {
+/// `REDIRECT_URI`'s port for the callback. Prints the sign-in link to stdout, so
+/// the caller must have left the alternate screen. Needed once; afterwards the
+/// cached refresh token is used silently.
+pub fn login_blocking() -> Result<Token, String> {
     let client = OAuthClientBuilder::new(client_id(), REDIRECT_URI, SCOPES.to_vec())
         .open_in_browser()
         .build()
@@ -123,41 +120,32 @@ fn login_blocking() -> Result<Token, String> {
     Ok(oauth_token_to_rspotify(fresh, None))
 }
 
-fn write_token_cache(token: &Token) {
+/// The token is a credential: owner-only, in an owner-only directory.
+pub fn write_token_cache(token: &Token) {
     let path = token_cache_path();
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = crate::paths::ensure_private_dir(parent);
     }
-    if let Ok(json) = serde_json::to_string(token) {
-        let _ = std::fs::write(path, json);
+    if let Ok(json) = serde_json::to_string(token)
+        && let Err(e) = crate::paths::write_private(&path, json.as_bytes())
+    {
+        log::warn!("could not save the Spotify token: {e}");
     }
 }
 
-/// Loads our own cached token, refreshing if expired, or running a real
-/// interactive browser login if there's no cache yet (first run) or the
-/// refresh_token itself has stopped working.
+/// Loads the cached token, refreshing it if expired. Never opens a browser:
+/// without a usable token the user is signed out (`crate::auth`).
 pub async fn load_or_refresh_token() -> Result<Token, String> {
-    let path = token_cache_path();
-
-    if let Ok(raw) = std::fs::read_to_string(&path)
-        && let Ok(cached) = serde_json::from_str::<Token>(&raw)
-    {
-        if !is_expired(&cached) {
-            return Ok(cached);
-        }
-        if let Some(refresh_token) = cached.refresh_token.clone() {
-            let refreshed = tokio::task::spawn_blocking(move || refresh_blocking(&refresh_token))
-                .await
-                .map_err(|e| e.to_string())?;
-            if let Ok(fresh) = refreshed {
-                write_token_cache(&fresh);
-                return Ok(fresh);
-            }
-            log::warn!("cached refresh_token no longer works, falling back to interactive login");
-        }
+    let raw = std::fs::read_to_string(token_cache_path()).map_err(|_| "not signed in")?;
+    let cached =
+        serde_json::from_str::<Token>(&raw).map_err(|e| format!("bad token cache: {e}"))?;
+    if !is_expired(&cached) {
+        return Ok(cached);
     }
-
-    let fresh = tokio::task::spawn_blocking(login_blocking)
+    let refresh_token = cached
+        .refresh_token
+        .ok_or("token expired with no refresh token")?;
+    let fresh = tokio::task::spawn_blocking(move || refresh_blocking(&refresh_token))
         .await
         .map_err(|e| e.to_string())??;
     write_token_cache(&fresh);

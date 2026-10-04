@@ -20,7 +20,7 @@ typed into, except where noted.
 | `f` | Fullscreen Now Playing; jumps there from anywhere |
 | `l` | Go to Library |
 | `/` | Go to Search (sidebar, Now Playing), or open a list's filter |
-| `Ctrl+P` | Quick jump: find any playlist, liked track, artist, album, device or screen by name. Works mid-query in Search; press again to close |
+| `Ctrl+P` | Quick jump: find any playlist, liked track, artist, album, device or screen by name, or choose **Sign out**. Works mid-query in Search; press again to close |
 | `c` | Create a playlist |
 | `Shift+Q` | Quit (asks first by default, see [configuration](CONFIGURATION.md)) |
 | `Ctrl+C` | Quit immediately, always |

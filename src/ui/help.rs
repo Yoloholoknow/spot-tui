@@ -44,7 +44,7 @@ pub(super) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "Ctrl+P",
-                "quick jump -- search any playlist/liked track/artist/album/device/screen by name and jump straight to it (works even mid-query on Search; press again to close)",
+                "quick jump -- search any playlist/liked track/artist/album/device/screen by name and jump straight to it (or choose Sign out) (works even mid-query on Search; press again to close)",
             ),
             (
                 "t",

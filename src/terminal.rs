@@ -28,6 +28,19 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Hands the terminal back to the shell for a moment (sign-in prints a link and
+/// waits in the normal screen). Pair with [`resume_tui`].
+pub fn suspend_tui() {
+    let _ = disable_raw_mode();
+    let _ = stdout().execute(DisableFocusChange);
+    let _ = stdout().execute(LeaveAlternateScreen);
+}
+
+pub fn resume_tui() -> std::io::Result<()> {
+    enable_raw_mode()?;
+    execute!(stdout(), EnterAlternateScreen, EnableFocusChange)
+}
+
 /// Restores the terminal before the default hook prints, so a panic message
 /// is readable instead of landing inside the alternate screen.
 pub fn install_panic_hook() {

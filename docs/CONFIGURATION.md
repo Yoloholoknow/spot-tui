@@ -14,6 +14,9 @@ spot-tui does not ship a Spotify app; you register your own (free, two minutes):
 4. Copy the app's **Client ID** (public, not a secret; you do not need the client secret).
 5. Put it in `config.toml` as `spotify_client_id = "..."`, or export `SPOT_TUI_CLIENT_ID`.
 
+The playback sign-in uses librespot's own client and needs no setup; its callback
+(`http://127.0.0.1:8898/login`) only needs its port free.
+
 While the app is in development mode only your own account can log in, which is
 all you need. If you change the client ID, delete `spotify_token.json` from the
 cache dir so the next run logs in again.
@@ -55,8 +58,8 @@ spicy_lyrics_key = "sl_sk_..."
 | Path | Contents |
 |------|----------|
 | `~/Library/Logs/spot-tui/spot-tui.log` | Log. The TUI owns the terminal, so nothing is written to stderr. |
-| Cache dir (`~/Library/Caches/spot-tui/` on macOS) | Spotify token (`spotify_token.json`), pins (`pinned_*.json`), search and lyrics caches, librespot's volume and audio cache |
-| `~/.cache/ncspot/librespot/` | **Read only.** Login credentials are reused from ncspot's cache. |
+| Cache dir (`~/Library/Caches/spot-tui/` on macOS) | Spotify token (`spotify_token.json`, owner-only, deleted by Sign out), pins (`pinned_*.json`), search and lyrics caches, librespot's volume and audio cache |
+| `<cache dir>/librespot/credentials.json` | The stored playback login. Owner-only. Deleted by Sign out. |
 
 Pins are local to spot-tui. Spotify's public API exposes no pin state, so they
 never sync with the official app.

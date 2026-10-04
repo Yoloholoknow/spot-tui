@@ -44,6 +44,11 @@ pub(super) fn body_lines(app: &AppState) -> Vec<Line<'static>> {
             Line::from("session disconnected -- reconnecting\u{2026}"),
             Line::from("no need to restart, this usually clears in a few seconds"),
         ],
+        // Unlike a dropped session this does not clear by itself, so it names the fix.
+        LyricsState::NoLogin => vec![
+            Line::from("not logged in -- no ncspot login found"),
+            Line::from("log in once with ncspot, then restart spot-tui"),
+        ],
         LyricsState::Loading => vec![Line::from("fetching lyrics\u{2026}")],
         LyricsState::Instrumental => vec![Line::from("\u{266a} instrumental")],
         LyricsState::NotFound => vec![Line::from("no lyrics found")],
@@ -613,3 +618,32 @@ mod plain_display_tests {
     }
 }
 
+
+#[cfg(test)]
+mod connect_state_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn app_with(lyrics: LyricsState) -> AppState {
+        let mut app = AppState::new(false, HashSet::new(), HashSet::new(), 0);
+        app.lyrics = lyrics;
+        app
+    }
+
+    fn text(lines: &[Line<'static>]) -> String {
+        lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.as_ref())).collect()
+    }
+
+    #[test]
+    fn a_missing_login_names_the_fix_and_never_promises_it_will_clear() {
+        let shown = text(&body_lines(&app_with(LyricsState::NoLogin)));
+        assert!(shown.contains("ncspot"));
+        assert!(!shown.contains("clears"));
+    }
+
+    #[test]
+    fn a_dropped_session_still_says_it_is_reconnecting() {
+        let shown = text(&body_lines(&app_with(LyricsState::SessionEnded)));
+        assert!(shown.contains("reconnecting"));
+    }
+}

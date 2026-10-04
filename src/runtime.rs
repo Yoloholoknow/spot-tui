@@ -9,7 +9,7 @@ use crate::lyrics::pipeline::{LyricsPipeline, TrackMeta};
 use crate::lyrics::romanizer::Romanizer;
 use crate::lyrics::spicy::SpicyClient;
 use crate::lyrics::{current_line_index, CachedLyrics, LyricLine};
-use crate::player::{self, Connection};
+use crate::player::{self, Connection, ConnectError};
 use crate::position::PositionTracker;
 use crate::services::{ServiceReceivers, Services};
 use crate::state::{AppState, LyricsState, RepeatMode, Screen};
@@ -41,6 +41,11 @@ const QUEUE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 const RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(10);
+
+/// Doubles the wait between connect attempts, capped at `RECONNECT_MAX_BACKOFF`.
+fn next_backoff(current: Duration) -> Duration {
+    (current * 2).min(RECONNECT_MAX_BACKOFF)
+}
 
 // Startup: the splash stays up for at least `STARTUP_MIN_VISIBLE`, which
 // gives Ghostty's kitty-graphics subsystem time to initialise before the
@@ -182,9 +187,9 @@ impl Runtime {
                 Ok(conn) => conn,
                 Err(e) => {
                     log::warn!("connect failed, retrying in {backoff:?}: {e}");
-                    self.show_disconnected()?;
+                    self.show_disconnected(e == ConnectError::NoCredentials)?;
                     tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(RECONNECT_MAX_BACKOFF);
+                    backoff = next_backoff(backoff);
                     continue;
                 }
             };
@@ -210,9 +215,9 @@ impl Runtime {
             match exit {
                 LoopExit::Quit => return Ok(()),
                 LoopExit::Disconnected => {
-                    self.show_disconnected()?;
+                    self.show_disconnected(false)?;
                     tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(RECONNECT_MAX_BACKOFF);
+                    backoff = next_backoff(backoff);
                 }
             }
         }
@@ -220,7 +225,7 @@ impl Runtime {
 
     /// Animates the splash while the first connect resolves (several real
     /// seconds: AP resolution, auth, first track load).
-    async fn connect_with_splash(&mut self) -> std::io::Result<Result<Connection, String>> {
+    async fn connect_with_splash(&mut self) -> std::io::Result<Result<Connection, ConnectError>> {
         let start = Instant::now();
         let mut handle = tokio::spawn(player::connect());
         let mut tick: usize = 0;
@@ -267,12 +272,12 @@ impl Runtime {
         Ok(())
     }
 
-    fn show_disconnected(&mut self) -> std::io::Result<()> {
+    fn show_disconnected(&mut self, no_login: bool) -> std::io::Result<()> {
         self.app.track_title = None;
         self.app.track_artist = None;
         self.app.track_album = None;
         self.app.playing = None;
-        self.app.lyrics = LyricsState::SessionEnded;
+        self.app.lyrics = if no_login { LyricsState::NoLogin } else { LyricsState::SessionEnded };
         self.draw()
     }
 
@@ -528,5 +533,33 @@ impl Runtime {
         } else {
             None
         };
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    #[test]
+    fn the_wait_doubles_from_the_initial_backoff() {
+        assert_eq!(next_backoff(RECONNECT_INITIAL_BACKOFF), Duration::from_secs(1));
+        assert_eq!(next_backoff(Duration::from_secs(1)), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn the_wait_never_exceeds_the_cap() {
+        assert_eq!(next_backoff(Duration::from_secs(6)), RECONNECT_MAX_BACKOFF);
+        assert_eq!(next_backoff(RECONNECT_MAX_BACKOFF), RECONNECT_MAX_BACKOFF);
+    }
+
+    #[test]
+    fn the_cap_is_reached_in_a_handful_of_attempts() {
+        let mut wait = RECONNECT_INITIAL_BACKOFF;
+        let attempts = (0..20).take_while(|_| {
+            let done = wait == RECONNECT_MAX_BACKOFF;
+            wait = next_backoff(wait);
+            !done
+        });
+        assert_eq!(attempts.count(), 5);
     }
 }

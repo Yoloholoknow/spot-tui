@@ -60,6 +60,7 @@ pub(super) fn header(app: &AppState, max_chars: usize) -> String {
         (Some(a), Some(t)) => truncate_ellipsis(&format!("{a} \u{2014} {t}"), max_chars),
         // The playbar renders on every screen, so during a reconnect it must not say
         // "press / to search", which is only true when idle after launch.
+        _ if matches!(app.lyrics, LyricsState::NoLogin) => "not logged in \u{2014} see ncspot login".to_string(),
         _ if matches!(app.lyrics, LyricsState::SessionEnded) => "reconnecting\u{2026}".to_string(),
         _ => "ready \u{2014} press / to search\u{2026}".to_string(),
     }

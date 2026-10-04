@@ -5,6 +5,7 @@
 mod cache;
 mod lrc;
 mod lrclib;
+pub mod netease;
 pub mod pipeline;
 pub mod romanize;
 pub mod romanizer;
@@ -12,7 +13,7 @@ pub mod spicy;
 mod spotify;
 pub mod ytmusic;
 
-pub use cache::{cached_synced, spicy_cache_key, store_synced};
+pub use cache::{cached_synced, netease_cache_key, spicy_cache_key, store_synced};
 pub use lrclib::LyricsClient;
 pub use spotify::spotify_lyrics;
 

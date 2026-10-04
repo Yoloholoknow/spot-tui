@@ -17,8 +17,8 @@
 use super::cache::write_cache;
 use super::spicy::{SpicyAnswer, SpicyClient, SpicyLyrics};
 use super::{
-    CachedLyrics, LyricsClient, cached_synced, spicy_cache_key, spotify_lyrics, store_synced,
-    ytmusic,
+    CachedLyrics, LyricsClient, cached_synced, netease, spicy_cache_key, spotify_lyrics,
+    store_synced, ytmusic,
 };
 use crate::paths::cache_dir;
 use librespot_core::session::Session;
@@ -57,13 +57,28 @@ impl LyricsPipeline {
             let client = LyricsClient::new(cache_dir());
             for (generation, meta, plain) in lrclib_rx {
                 let album = meta.album.as_deref();
-                let result = client.fetch(
+                let mut result = client.fetch(
                     &meta.track_id,
                     &meta.artist,
                     &meta.title,
                     album,
                     meta.duration_ms,
                 );
+                // Last resort, and only for tracks nothing else had: it keeps
+                // the unofficial NetEase API out of every track that is
+                // already covered.
+                if matches!(result, CachedLyrics::NotFound)
+                    && let Some(found) = netease::lookup(
+                        &cache_dir(),
+                        &meta.track_id,
+                        &meta.artist,
+                        &meta.title,
+                        meta.duration_ms as f64 / 1000.0,
+                        unix_now(),
+                    )
+                {
+                    result = found;
+                }
                 let result = match with_plain_fallback(result, plain) {
                     (result, true) => {
                         // Replace lrclib's cached miss, so a replay shows the

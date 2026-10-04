@@ -86,6 +86,12 @@ pub fn spicy_cache_key(track_uri: &str) -> String {
     format!("spicy:{track_uri}")
 }
 
+/// Cache key for NetEase results. Its own namespace, so a NetEase sheet never
+/// shadows (or is shadowed by) the lrclib entry for the same track.
+pub fn netease_cache_key(track_uri: &str) -> String {
+    format!("netease:{track_uri}")
+}
+
 #[cfg(test)]
 mod spicy_cache_tests {
     use super::*;

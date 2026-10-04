@@ -25,7 +25,18 @@ use librespot_oauth::OAuthClientBuilder;
 use rspotify::clients::BaseClient;
 use rspotify::{AuthCodeSpotify, Config, Credentials, OAuth, Token};
 
-const CLIENT_ID: &str = "c77da1e492ed47689eec0c61f83e761d";
+/// The user's own Spotify app client ID (public, not a secret), set once at
+/// startup from the config; see `crate::config::Config::spotify_client_id`.
+static CLIENT_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn set_client_id(id: String) {
+    let _ = CLIENT_ID.set(id);
+}
+
+fn client_id() -> &'static str {
+    CLIENT_ID.get().map(String::as_str).unwrap_or_default()
+}
+
 // Must match the redirect URI registered on the Spotify dashboard
 // exactly, including the port -- loopback URIs without a port are no
 // longer accepted there.
@@ -91,7 +102,7 @@ fn oauth_token_to_rspotify(
 /// builds its own runtime, and calling it inside a running tokio context panics
 /// ("Cannot drop a runtime in a context where blocking is not allowed").
 fn refresh_blocking(refresh_token: &str) -> Result<Token, String> {
-    let client = OAuthClientBuilder::new(CLIENT_ID, REDIRECT_URI, SCOPES.to_vec())
+    let client = OAuthClientBuilder::new(client_id(), REDIRECT_URI, SCOPES.to_vec())
         .build()
         .map_err(|e| e.to_string())?;
     let fresh = client
@@ -104,7 +115,7 @@ fn refresh_blocking(refresh_token: &str) -> Result<Token, String> {
 /// `REDIRECT_URI`'s port for the callback. Needed once; afterwards the cached
 /// refresh token is used silently.
 fn login_blocking() -> Result<Token, String> {
-    let client = OAuthClientBuilder::new(CLIENT_ID, REDIRECT_URI, SCOPES.to_vec())
+    let client = OAuthClientBuilder::new(client_id(), REDIRECT_URI, SCOPES.to_vec())
         .open_in_browser()
         .build()
         .map_err(|e| e.to_string())?;
@@ -154,7 +165,7 @@ pub async fn load_or_refresh_token() -> Result<Token, String> {
 }
 
 pub async fn client_from_token(token: Token) -> AuthCodeSpotify {
-    let creds = Credentials::new(CLIENT_ID, "");
+    let creds = Credentials::new(client_id(), "");
     let config = Config {
         token_refreshing: false, // we handle refresh ourselves, above
         ..Config::default()

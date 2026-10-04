@@ -33,6 +33,9 @@ to any other device.
 - **ncspot, logged in once.** spot-tui reuses the login credentials ncspot
   caches in `~/.cache/ncspot/librespot/`. Install [ncspot](https://github.com/hrkfdn/ncspot),
   run it, and sign in. spot-tui never writes to that directory.
+- **Your own Spotify developer app** (free). spot-tui does not ship a client ID;
+  create one and set `spotify_client_id` in `config.toml`. Takes two minutes, see
+  [docs/CONFIGURATION.md](docs/CONFIGURATION.md#spotify-client-id).
 - **Rust 1.88 or newer** (edition 2024) to build.
 - **Network access on the first build**, which downloads a Japanese dictionary
   (about 49 MB embedded in the binary, so a release build is roughly 59 MB).
@@ -40,6 +43,8 @@ to any other device.
   but is untested.
 
 ## Install and run
+
+Set your client ID first (see Requirements), then:
 
 ```sh
 cargo build --release
@@ -72,7 +77,6 @@ environment variables, and where files and logs live.
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Config file, environment, file locations |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the code is organised, data flow, platform constraints |
 | [docs/VENDORING.md](docs/VENDORING.md) | The patched librespot crates and how to re-apply them |
-| [docs/mockup/index.html](docs/mockup/index.html) | The original HTML design preview |
 
 ## Development
 

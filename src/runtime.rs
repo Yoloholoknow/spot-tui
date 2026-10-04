@@ -114,6 +114,18 @@ struct Runtime {
 pub async fn run() -> std::io::Result<()> {
     install_panic_hook();
 
+    let cfg = config::load();
+    let Some(client_id) = cfg.spotify_client_id() else {
+        eprintln!(
+            "spot-tui needs your own Spotify app's client ID.\n\
+             Set `spotify_client_id` in config.toml or the {} environment variable.\n\
+             Setup steps: docs/CONFIGURATION.md (\"Spotify client ID\")",
+            config::SPOTIFY_CLIENT_ID_ENV
+        );
+        std::process::exit(2);
+    };
+    api::set_client_id(client_id);
+
     // The Web API client loads in the background: a failure here disables
     // search and library browsing only, never playback or lyrics.
     let (client_tx, client_rx) = mpsc::channel::<Option<AuthCodeSpotify>>();
@@ -132,7 +144,6 @@ pub async fn run() -> std::io::Result<()> {
     let terminal = ratatui::Terminal::new(CrosstermBackend::new(stdout()))?;
     let picker = detect_graphics_picker();
 
-    let cfg = config::load();
     let spicy = cfg.spicy_lyrics_key().map(SpicyClient::new);
     log::info!(
         "spicy_lyrics: {}",

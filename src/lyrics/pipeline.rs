@@ -64,10 +64,10 @@ impl LyricsPipeline {
                     album,
                     meta.duration_ms,
                 );
-                // Last resort, and only for tracks nothing else had: it keeps
-                // the unofficial NetEase API out of every track that is
-                // already covered.
-                if matches!(result, CachedLyrics::NotFound)
+                // Last resort, and only for tracks with no synced sheet yet: it
+                // keeps the unofficial NetEase API out of every track that is
+                // already covered. A synced hit replaces untimed text.
+                if wants_netease(&result)
                     && let Some(found) = netease::lookup(
                         &cache_dir(),
                         &meta.track_id,
@@ -203,6 +203,12 @@ fn unix_now() -> u64 {
         .unwrap_or_default()
 }
 
+/// Whether NetEase is worth asking: nothing was found, or only untimed text
+/// was. Synced lyrics and instrumentals are final.
+fn wants_netease(result: &CachedLyrics) -> bool {
+    matches!(result, CachedLyrics::NotFound | CachedLyrics::Plain { .. })
+}
+
 /// Swaps in untimed text when the source chain ended in "not found". Anything
 /// lrclib did find (synced, plain, instrumental) wins over it. The flag says
 /// whether the swap happened.
@@ -272,6 +278,18 @@ mod fallback_tests {
             assert!(!swapped);
             assert_eq!(result, found);
         }
+    }
+
+    #[test]
+    fn netease_runs_for_misses_and_untimed_text_only() {
+        assert!(wants_netease(&CachedLyrics::NotFound));
+        assert!(wants_netease(&CachedLyrics::Plain { text: "x".into() }));
+        assert!(!wants_netease(&CachedLyrics::Instrumental));
+        assert!(!wants_netease(&CachedLyrics::Synced {
+            lines: vec![(1.0, "x".into())],
+            words: Vec::new(),
+            credit: None,
+        }));
     }
 
     #[test]

@@ -8,6 +8,7 @@
 //! best match. A match must agree on duration and on the artist or the title,
 //! so a different song is never shown.
 
+use super::cache::{read_cache, write_cache};
 use super::*;
 use serde::Deserialize;
 use std::path::Path;
@@ -167,16 +168,26 @@ fn lyrics_blocking(agent: &ureq::Agent, id: u64) -> Result<Vec<u8>, String> {
     crate::http::read_limited(response, crate::http::MAX_BODY_BYTES)
 }
 
+/// What the network said about a track.
+#[derive(Debug, PartialEq)]
+enum Fetched {
+    Synced(Vec<(f64, String)>),
+    /// NetEase answered and has no usable sheet for the track.
+    Miss,
+    /// The request itself failed; says nothing about the track.
+    Failed,
+}
+
 /// Synced lyrics for the track from the network. Every branch logs at `info!`,
 /// like the other sources, so a missing sheet can be traced.
-fn fetch(artist: &str, title: &str, duration_secs: f64) -> Option<Vec<(f64, String)>> {
+fn fetch(artist: &str, title: &str, duration_secs: f64) -> Fetched {
     let agent = crate::http::agent();
     let query = format!("{artist} {title}");
     let songs = match search_blocking(&agent, &query) {
         Ok(songs) => songs,
         Err(e) => {
             log::info!("netease_lyrics: search failed: {e}");
-            return None;
+            return Fetched::Failed;
         }
     };
     let Some(song) = best_match(&songs, artist, title, duration_secs) else {
@@ -184,7 +195,7 @@ fn fetch(artist: &str, title: &str, duration_secs: f64) -> Option<Vec<(f64, Stri
             "netease_lyrics: no match for {query:?} within {DURATION_TOLERANCE_SECS}s ({} results)",
             songs.len()
         );
-        return None;
+        return Fetched::Miss;
     };
     log::info!(
         "netease_lyrics: matched id={} {:?} ({:.1}s)",
@@ -196,20 +207,25 @@ fn fetch(artist: &str, title: &str, duration_secs: f64) -> Option<Vec<(f64, Stri
         Ok(bytes) => bytes,
         Err(e) => {
             log::info!("netease_lyrics[{}]: lyrics request failed: {e}", song.id);
-            return None;
+            return Fetched::Failed;
         }
     };
-    let lines = parse_lyrics(&bytes);
-    match &lines {
-        Some(lines) => log::info!("netease_lyrics[{}]: got {} lines", song.id, lines.len()),
-        None => log::info!("netease_lyrics[{}]: no usable synced sheet", song.id),
+    match parse_lyrics(&bytes) {
+        Some(lines) => {
+            log::info!("netease_lyrics[{}]: got {} lines", song.id, lines.len());
+            Fetched::Synced(lines)
+        }
+        None => {
+            log::info!("netease_lyrics[{}]: no usable synced sheet", song.id);
+            Fetched::Miss
+        }
     }
-    lines
 }
 
 /// A synced result for the track: the disk cache first, so a replay never
-/// touches the network, then NetEase, storing what it returns. Only hits are
-/// cached; a miss is retried on the next play.
+/// touches the network, then NetEase, storing what it returns. A definite
+/// miss is cached for the negative TTL (so a plain-only track doesn't search
+/// on every play); a failed request is not, and is retried on the next play.
 pub fn lookup(
     cache_dir: &Path,
     track_uri: &str,
@@ -222,7 +238,24 @@ pub fn lookup(
     if let Some(hit) = cached_synced(cache_dir, &key, now_unix) {
         return Some(hit);
     }
-    let lines = fetch(artist, title, duration_secs)?;
+    // `cached_synced` ignores a fresh `NotFound`, which here means "asked
+    // recently, nothing there".
+    if matches!(
+        read_cache(cache_dir, &key, now_unix),
+        Some(CachedLyrics::NotFound)
+    ) {
+        return None;
+    }
+    let lines = match fetch(artist, title, duration_secs) {
+        Fetched::Synced(lines) => lines,
+        Fetched::Miss => {
+            if let Err(e) = write_cache(cache_dir, &key, &CachedLyrics::NotFound, now_unix) {
+                log::warn!("netease_lyrics: couldn't cache the miss: {e}");
+            }
+            return None;
+        }
+        Fetched::Failed => return None,
+    };
     if let Err(e) = store_synced(
         cache_dir,
         &key,
@@ -243,6 +276,25 @@ pub fn lookup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fresh_cached_miss_skips_the_network() {
+        let dir =
+            std::env::temp_dir().join(format!("spot-tui-test-netease-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let uri = "spotify:track:negcache";
+        // A search for this gibberish would be a network call; the cached
+        // miss must answer first.
+        write_cache(
+            &dir,
+            &netease_cache_key(uri),
+            &CachedLyrics::NotFound,
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(lookup(&dir, uri, "a", "b", 100.0, 1_000 + 60), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn song(id: u64, name: &str, artists: &[&str], secs: f64) -> Song {
         Song {
@@ -381,7 +433,9 @@ mod tests {
     #[ignore = "needs network access to music.163.com"]
     fn netease_live_finds_the_lyrics_spotify_lacks() {
         // 自愛·在 by DreamBeach: no lyrics on Spotify, Spicy, YouTube Music or lrclib.
-        let lines = fetch("DreamBeach", "自愛·在", 189.699).expect("a synced sheet");
+        let Fetched::Synced(lines) = fetch("DreamBeach", "自愛·在", 189.699) else {
+            panic!("a synced sheet");
+        };
         assert!(lines.len() > 20, "{} lines", lines.len());
         assert_eq!(lines[0].1, "别惊讶", "credits were stripped");
     }

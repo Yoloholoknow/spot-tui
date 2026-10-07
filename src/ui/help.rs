@@ -64,6 +64,7 @@ pub(super) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         "Now Playing",
         &[
             ("\u{2190} / \u{2192}", "seek \u{00b1}5s"),
+            ("q", "open the Queue"),
             ("\u{2191} / \u{2193}", "volume (same as +/-)"),
             ("v", "open the currently-playing track's album"),
             ("Shift+V", "open the currently-playing track's artist"),

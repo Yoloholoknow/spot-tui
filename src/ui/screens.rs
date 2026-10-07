@@ -217,7 +217,10 @@ pub(super) fn render_queue(
             let now_playing = Line::from(vec![
                 Span::styled("now playing  ", Style::default().fg(DIM)),
                 Span::raw(match &summary.currently_playing {
-                    Some(t) => format!("{} \u{2014} {}", t.artist, t.title),
+                    Some(t) => with_recommendation_marker(
+                        format!("{} \u{2014} {}", t.artist, t.title),
+                        recommended(app, &t.uri),
+                    ),
                     None => "(nothing)".to_string(),
                 }),
             ]);
@@ -226,7 +229,12 @@ pub(super) fn render_queue(
                 render_empty_state(frame, body[1], "queue is empty", None);
                 return;
             }
-            let label = |t: &TrackResult| format!("{} \u{2014} {}", t.artist, t.title);
+            let label = |t: &TrackResult| {
+                with_recommendation_marker(
+                    format!("{} \u{2014} {}", t.artist, t.title),
+                    recommended(app, &t.uri),
+                )
+            };
             let display: Vec<(usize, &TrackResult)> = summary.queue.iter().enumerate().collect();
             render_display_list(
                 frame,

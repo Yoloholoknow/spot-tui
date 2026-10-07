@@ -472,6 +472,7 @@ impl Runtime {
     /// One connected session: every frame, background work, draw, then at
     /// most one terminal event.
     fn run_session(&mut self, conn: &mut Connection) -> std::io::Result<LoopExit> {
+        self.app.username = Some(conn.session.username());
         loop {
             if conn.task.is_finished() {
                 log::warn!("Spirc task ended, the Connect session dropped; reconnecting");

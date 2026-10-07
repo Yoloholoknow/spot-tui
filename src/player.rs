@@ -175,6 +175,34 @@ pub fn play_context(
     app.nav.goto(Screen::NowPlaying);
 }
 
+/// The context Spotify uses for the whole Liked Songs library.
+pub fn liked_songs_context_uri(username: &str) -> String {
+    format!("spotify:user:{username}:collection")
+}
+
+/// Plays a liked song *within* Liked Songs, so the queue, shuffle and smart
+/// shuffle all see the library as the context. Falls back to the bare track
+/// (a one-song context, which Spotify autoplays from) until the username is
+/// known.
+pub fn play_liked_song(app: &mut AppState, spirc: &Spirc, track_uri: String) {
+    let Some(username) = app.username.clone() else {
+        return play_context(app, spirc, track_uri, None, "Liked Songs".to_string());
+    };
+    let opts = LoadRequestOptions {
+        playing_track: Some(PlayingTrack::Uri(track_uri)),
+        ..Default::default()
+    };
+    let opts = carry_modes(app.shuffle, app.repeat, opts);
+    let _ = spirc.activate();
+    let _ = spirc.load(LoadRequest::from_context_uri(
+        liked_songs_context_uri(&username),
+        opts,
+    ));
+    let _ = spirc.play();
+    app.context_label = Some("Liked Songs".to_string());
+    app.nav.goto(Screen::NowPlaying);
+}
+
 /// `s`: off -> on -> smart -> off.
 ///
 /// Only `shuffle` is set optimistically. The smart flag is read back from
@@ -211,6 +239,19 @@ pub fn cycle_repeat(app: &mut AppState, spirc: &Spirc) {
             app.status = Some((format!("repeat {}", next.status_label()), false));
         }
         Err(e) => app.status = Some((format!("couldn't change repeat: {e}"), true)),
+    }
+}
+
+#[cfg(test)]
+mod liked_context_tests {
+    use super::*;
+
+    #[test]
+    fn liked_songs_is_the_users_collection_context() {
+        assert_eq!(
+            liked_songs_context_uri("abc"),
+            "spotify:user:abc:collection"
+        );
     }
 }
 

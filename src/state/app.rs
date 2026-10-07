@@ -16,6 +16,9 @@ pub struct AppState {
     /// context and leave it alone, so it changes only on the next
     /// deliberate play.
     pub context_label: Option<String>,
+    /// The signed-in Spotify username, once the session is up; Liked Songs is
+    /// the context `spotify:user:<username>:collection`.
+    pub username: Option<String>,
     /// Follows the player's `ShuffleChanged`/`RepeatChanged` events (also
     /// emitted at connect and when another device changes them), plus an
     /// optimistic update at the keypress so a quick second press cycles from
@@ -115,6 +118,7 @@ impl AppState {
             track_album: None,
             current_track_uri: None,
             context_label: None,
+            username: None,
             shuffle: false,
             smart_shuffle: false,
             repeat: RepeatMode::Off,

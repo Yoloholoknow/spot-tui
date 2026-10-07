@@ -16,5 +16,6 @@ mod spirc;
 mod state;
 
 pub use model::*;
+pub use smart_shuffle::is_recommended;
 pub use spirc::*;
 pub use state::*;

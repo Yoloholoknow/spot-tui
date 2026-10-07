@@ -117,6 +117,11 @@ struct SpircTask {
     update_state: bool,
 
     spirc_id: usize,
+
+    /// The playlist's own track order (and the context it belongs to),
+    /// saved when smart shuffle replaces the context with Spotify's mixed
+    /// order, so turning smart shuffle off can put it back.
+    smart_shuffle_original: Option<(String, Vec<librespot_protocol::player::ProvidedTrack>)>,
 }
 
 static SPIRC_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -271,6 +276,7 @@ impl Spirc {
             user_attributes_mutation,
             commands: Some(cmd_rx),
             self_commands: cmd_tx.clone(),
+            smart_shuffle_original: None,
             player_events: Some(player_events),
 
             context_resolver: ContextResolver::new(session.clone()),
@@ -1698,10 +1704,20 @@ impl SpircTask {
 
         smart_shuffle::record_recommendations(&order);
         let current_uri = self.connect_state.current_track(|t| t.uri.clone());
-        let new_index = {
+        let (new_index, original) = {
             let Ok(ctx) = self.connect_state.get_context_mut(ContextType::Default) else {
                 info!("smart shuffle: no default context to apply the order to, discarded");
                 return;
+            };
+            // Keep the playlist's own order for when smart shuffle turns off.
+            // Not on a re-apply to the same context: by then the list already
+            // holds the mixed order.
+            let original = if self.smart_shuffle_original.as_ref().is_some_and(|(uri, _)| *uri == context_uri) {
+                None
+            } else {
+                let mut saved = ctx.tracks.clone();
+                saved.unshuffle();
+                Some(saved.into_iter().collect::<Vec<_>>())
             };
             let mut existing: std::collections::HashMap<String, librespot_protocol::player::ProvidedTrack> =
                 ctx.tracks.drain(..).map(|t| (t.uri.clone(), t)).collect();
@@ -1728,8 +1744,11 @@ impl SpircTask {
             // `clear_next_tracks`'s own existing queue-priority logic below.
             let walk_from = smart_shuffle::resume_index(&order, new_index);
             ctx.index.track = walk_from as u32;
-            new_index
+            (new_index, original)
         };
+        if let Some(original) = original {
+            self.smart_shuffle_original = Some((context_uri.clone(), original));
+        }
         // A reused original keeps its *old* stamped context_index (its
         // position in the un-shuffled playlist); a freshly built recommendation
         // has none at all. Both are wrong for a track's *new* position, and
@@ -1763,17 +1782,43 @@ impl SpircTask {
     /// never touches the real playlist on Spotify's side.
     fn strip_smart_shuffle_recommendations(&mut self) {
         smart_shuffle::clear_recommendations();
+        let current_uri = self.connect_state.current_track(|t| t.uri.clone());
+        let context_uri = self.connect_state.context_uri().to_string();
+        let shuffling = self.connect_state.shuffling_context();
+        let saved = self
+            .smart_shuffle_original
+            .take()
+            .filter(|(uri, _)| *uri == context_uri)
+            .map(|(_, tracks)| tracks);
         let removed = {
             let Ok(ctx) = self.connect_state.get_context_mut(ContextType::Default) else {
                 return;
             };
-            let before = ctx.tracks.len();
-            ctx.tracks.retain(|t| t.provider != smart_shuffle::PROVIDER_RECOMMENDATION);
-            before - ctx.tracks.len()
+            let before: Vec<(String, bool)> = ctx
+                .tracks
+                .iter()
+                .map(|t| (t.uri.clone(), t.provider == smart_shuffle::PROVIDER_RECOMMENDATION))
+                .collect();
+            let removed = before.iter().filter(|(_, recommendation)| *recommendation).count();
+            if removed == 0 {
+                return;
+            }
+            match saved {
+                // Shuffle went off too: back to the playlist's own order.
+                Some(original) if !shuffling => {
+                    let uris: Vec<String> = original.iter().map(|t| t.uri.clone()).collect();
+                    ctx.index.track = smart_shuffle::cursor_in_order(&uris, &current_uri) as u32;
+                    ctx.tracks = original.into();
+                }
+                // Plain shuffle stays on: keep the mixed order, minus the
+                // recommendations.
+                _ => {
+                    ctx.index.track = smart_shuffle::cursor_after_strip(&before, &current_uri) as u32;
+                    ctx.tracks.retain(|t| t.provider != smart_shuffle::PROVIDER_RECOMMENDATION);
+                }
+            }
+            removed
         };
-        if removed == 0 {
-            return;
-        }
         info!("smart shuffle off: removed {removed} recommended tracks from the context");
         // Same reason as `apply_smart_shuffle_order`: removing tracks shifts
         // everyone after them to a new real position, but their stamped

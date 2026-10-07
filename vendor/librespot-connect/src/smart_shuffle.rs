@@ -185,6 +185,27 @@ pub fn resume_index(order: &[PlaybackItem], current_index: usize) -> usize {
     }
 }
 
+/// Where the upcoming-queue walk resumes once the recommendations are
+/// removed from `before` (each entry: uri, is-recommendation). Right after the
+/// current track's slot among the survivors; if the current track was itself a
+/// recommendation (and so is going away), at the first original that followed
+/// it; 0 if it isn't in the list at all. Without this the walk cursor keeps
+/// its old position in the longer list, which can be past the end of the
+/// shorter one, so the refill finds nothing and playback stops.
+pub fn cursor_after_strip(before: &[(String, bool)], current_uri: &str) -> usize {
+    let Some(position) = before.iter().position(|(uri, _)| uri == current_uri) else {
+        return 0;
+    };
+    before[..=position].iter().filter(|(_, recommendation)| !recommendation).count()
+}
+
+/// Where the walk resumes in a restored `order` (the playlist's own order):
+/// right after the current track, or 0 if it isn't there (it was a
+/// recommendation).
+pub fn cursor_in_order(order: &[String], current_uri: &str) -> usize {
+    order.iter().position(|uri| uri == current_uri).map_or(0, |position| position + 1)
+}
+
 /// What a reply looks like, for the log.
 #[derive(Debug, Default)]
 pub struct ProbeSummary {
@@ -228,6 +249,53 @@ pub fn summarize(content: &SelectedListContent) -> ProbeSummary {
         ));
     }
     summary
+}
+
+#[cfg(test)]
+mod strip_cursor_tests {
+    use super::*;
+
+    fn list(spec: &str) -> Vec<(String, bool)> {
+        // "a r1* b": a trailing * marks a recommendation
+        spec.split(' ').map(|t| (t.trim_end_matches('*').to_string(), t.ends_with('*'))).collect()
+    }
+
+    #[test]
+    fn resumes_right_after_an_original_current_track() {
+        // a r b r c: survivors are a b c; current b is slot 1, so resume at 2.
+        assert_eq!(cursor_after_strip(&list("a r* b r2* c"), "b"), 2);
+        assert_eq!(cursor_after_strip(&list("a r* b r2* c"), "a"), 1);
+    }
+
+    #[test]
+    fn a_current_recommendation_resumes_at_the_next_original() {
+        // current r2 is removed; the next original is c, survivors a b c -> 2.
+        assert_eq!(cursor_after_strip(&list("a r* b r2* c"), "r2"), 2);
+        assert_eq!(cursor_after_strip(&list("r* a"), "r"), 0);
+    }
+
+    #[test]
+    fn the_cursor_stays_inside_the_stripped_list() {
+        // The real failure: a cursor left past the end of the shorter list.
+        let before = list("a b c r* d r2*");
+        let survivors = before.iter().filter(|(_, r)| !r).count();
+        for (uri, _) in &before {
+            assert!(cursor_after_strip(&before, uri) <= survivors, "{uri}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_current_track_starts_over() {
+        assert_eq!(cursor_after_strip(&list("a b"), "zzz"), 0);
+        assert_eq!(cursor_in_order(&["a".into(), "b".into()], "zzz"), 0);
+    }
+
+    #[test]
+    fn a_restored_order_resumes_after_the_current_track() {
+        let order: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(cursor_in_order(&order, "b"), 2);
+        assert_eq!(cursor_in_order(&order, "c"), 3);
+    }
 }
 
 #[cfg(test)]

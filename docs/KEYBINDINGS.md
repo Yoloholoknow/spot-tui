@@ -31,6 +31,7 @@ typed into, except where noted.
 |-----|--------|
 | `←` / `→` | Seek 5 s |
 | `↑` / `↓` | Volume |
+| `q` | Open the Queue |
 | `a` | Add the playing track to a playlist |
 | `Shift+L` | Like the playing track |
 | `v` / `Shift+V` | Open the playing track's album / artist |

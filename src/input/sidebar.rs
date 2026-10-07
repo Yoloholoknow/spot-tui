@@ -1,6 +1,6 @@
 //! Keys while the sidebar has focus.
 
-use super::{KeyCtx, common, go_to_screen, is_shift_char};
+use super::{KeyCtx, common, go_to_screen, is_plain, is_shift_char};
 use crate::pins;
 use crate::state::{Focus, Screen, SidebarRow, sidebar_rows};
 use crossterm::event::{KeyCode, KeyEvent};
@@ -22,6 +22,10 @@ pub fn handle(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
             ctx.app.nav.focus = Focus::Main;
         }
         KeyCode::Char('/') => go_to_screen(ctx, Screen::Search),
+        // Same shortcut as the Now Playing pane, which focus often isn't on.
+        KeyCode::Char(_) if is_plain(key, 'q') && *ctx.app.nav.top() == Screen::NowPlaying => {
+            go_to_screen(ctx, Screen::Queue)
+        }
         KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'P', 'p') => {
             pin_selected_playlist(ctx)
         }

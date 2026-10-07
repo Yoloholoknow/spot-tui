@@ -1,7 +1,7 @@
 //! The Now Playing screen. "The selected track" here means the track that is
 //! playing, not a list row.
 
-use super::{KeyCtx, common, is_shift_char};
+use super::{KeyCtx, common, go_to_screen, is_plain, is_shift_char};
 use crate::services::TrackView;
 use crate::state::Screen;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -24,6 +24,7 @@ pub fn handle(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
             open_track_view(ctx, TrackView::Artist)
         }
         KeyCode::Char('v') => open_track_view(ctx, TrackView::Album),
+        KeyCode::Char(_) if is_plain(key, 'q') => go_to_screen(ctx, Screen::Queue),
         KeyCode::Char('a') => {
             if let Some(uri) = playing_uri(ctx) {
                 super::tracks::open_picker(ctx, uri);

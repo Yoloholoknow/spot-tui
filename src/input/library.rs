@@ -4,7 +4,7 @@ use super::lists::{edit_filter, filter_hotkeys, move_selection};
 use super::{KeyCtx, common, shift, tracks};
 use crate::api::library::PlaylistSummary;
 use crate::pins;
-use crate::player::play_context;
+use crate::player::play_liked_song;
 use crate::state::{AppState, ConfirmAction, LIBRARY_ENTRIES, PendingConfirm};
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -59,13 +59,7 @@ pub fn liked_songs(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
         // Enter, not Right: it plays and jumps to Now Playing.
         KeyCode::Enter => {
             if let Some(track) = ctx.app.selected_track() {
-                play_context(
-                    ctx.app,
-                    ctx.spirc,
-                    track.uri,
-                    None,
-                    "Liked Songs".to_string(),
-                );
+                play_liked_song(ctx.app, ctx.spirc, track.uri);
             }
         }
         _ => return tracks::handle(ctx, key, true),

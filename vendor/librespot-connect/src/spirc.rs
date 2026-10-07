@@ -1632,13 +1632,11 @@ impl SpircTask {
     /// touches no playback state, so a failure or a slow reply changes nothing.
     fn probe_smart_shuffle(&self) {
         let context_uri = self.connect_state.context_uri().to_string();
-        let playlist = context_uri
-            .starts_with("spotify:playlist:")
-            .then(|| SpotifyUri::from_uri(&context_uri).ok())
-            .flatten()
+        let playlist = smart_shuffle::lens_playlist_uri(&context_uri)
+            .and_then(|uri| SpotifyUri::from_uri(&uri).ok())
             .and_then(|uri| SpotifyId::try_from(&uri).ok());
         let Some(playlist) = playlist else {
-            info!("smart shuffle probe: <{context_uri}> is not a playlist, skipped");
+            info!("smart shuffle probe: <{context_uri}> has no smart shuffle source, skipped");
             return;
         };
         let session = self.session.clone();
@@ -1698,6 +1696,7 @@ impl SpircTask {
             return;
         }
 
+        smart_shuffle::record_recommendations(&order);
         let current_uri = self.connect_state.current_track(|t| t.uri.clone());
         let new_index = {
             let Ok(ctx) = self.connect_state.get_context_mut(ContextType::Default) else {
@@ -1763,6 +1762,7 @@ impl SpircTask {
     /// that added it is off. Only edits this app's own in-memory context --
     /// never touches the real playlist on Spotify's side.
     fn strip_smart_shuffle_recommendations(&mut self) {
+        smart_shuffle::clear_recommendations();
         let removed = {
             let Ok(ctx) = self.connect_state.get_context_mut(ContextType::Default) else {
                 return;

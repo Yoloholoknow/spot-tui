@@ -67,9 +67,33 @@ pub(super) fn render_status(frame: &mut Frame, app: &AppState, area: Rect) {
     frame.render_widget(Paragraph::new(text).style(Style::default().fg(DIM)), area);
 }
 
+/// Marks a track smart shuffle added, as opposed to one from the playlist
+/// itself. Only while smart shuffle is on, so a stale set never shows.
+pub(super) fn recommended(app: &AppState, uri: &str) -> bool {
+    app.smart_shuffle && librespot_connect::is_recommended(uri)
+}
+
+/// `text` with the sparkle prefix when `marked`.
+pub(super) fn with_recommendation_marker(text: String, marked: bool) -> String {
+    if marked {
+        format!("\u{2726} {text}")
+    } else {
+        text
+    }
+}
+
 pub(super) fn header(app: &AppState, max_chars: usize) -> String {
     match (&app.track_artist, &app.track_title) {
-        (Some(a), Some(t)) => truncate_ellipsis(&format!("{a} \u{2014} {t}"), max_chars),
+        (Some(a), Some(t)) => {
+            let marked = app
+                .current_track_uri
+                .as_deref()
+                .is_some_and(|u| recommended(app, u));
+            truncate_ellipsis(
+                &with_recommendation_marker(format!("{a} \u{2014} {t}"), marked),
+                max_chars,
+            )
+        }
         // The playbar renders on every screen, so during a reconnect it must not say
         // "press / to search", which is only true when idle after launch.
         _ if matches!(app.lyrics, LyricsState::SessionEnded) => "reconnecting\u{2026}".to_string(),
@@ -129,4 +153,21 @@ pub(super) fn progress_gauge_bordered(app: &AppState) -> Gauge<'static> {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(DIM)),
     )
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::*;
+
+    #[test]
+    fn a_recommendation_gets_the_sparkle_and_anything_else_is_untouched() {
+        assert_eq!(
+            with_recommendation_marker("A \u{2014} B".into(), true),
+            "\u{2726} A \u{2014} B"
+        );
+        assert_eq!(
+            with_recommendation_marker("A \u{2014} B".into(), false),
+            "A \u{2014} B"
+        );
+    }
 }

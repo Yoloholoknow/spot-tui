@@ -141,8 +141,16 @@ pub(super) fn render_now_playing_hero(
     }
 
     frame.render_widget(
-        Paragraph::new(truncate_ellipsis(title, meta_area.width as usize))
-            .style(Style::default().add_modifier(Modifier::BOLD)),
+        Paragraph::new(truncate_ellipsis(
+            &with_recommendation_marker(
+                title.to_string(),
+                app.current_track_uri
+                    .as_deref()
+                    .is_some_and(|u| recommended(app, u)),
+            ),
+            meta_area.width as usize,
+        ))
+        .style(Style::default().add_modifier(Modifier::BOLD)),
         meta_chunks[1],
     );
     let artist_album = match &app.track_album {

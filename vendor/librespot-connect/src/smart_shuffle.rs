@@ -12,7 +12,40 @@ use crate::protocol::{
 };
 use protobuf::Message;
 use std::collections::BTreeSet;
+use std::sync::Mutex;
 use uuid::Uuid;
+
+/// Uris of the recommendations currently injected into the context, for
+/// whoever draws the queue or the now-playing line. A process-global, like
+/// `smart_shuffle_active`: there is no player event to carry it.
+static RECOMMENDED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Whether `uri` is a track smart shuffle added, as opposed to one from the
+/// playlist itself. False once smart shuffle is turned off.
+pub fn is_recommended(uri: &str) -> bool {
+    RECOMMENDED.lock().is_ok_and(|set| set.contains(uri))
+}
+
+/// Replaces the recorded set with the recommendations in `order`.
+pub(crate) fn record_recommendations(order: &[PlaybackItem]) {
+    if let Ok(mut set) = RECOMMENDED.lock() {
+        *set = recommended_uris(order);
+    }
+}
+
+pub(crate) fn clear_recommendations() {
+    if let Ok(mut set) = RECOMMENDED.lock() {
+        set.clear();
+    }
+}
+
+fn recommended_uris(order: &[PlaybackItem]) -> BTreeSet<String> {
+    order
+        .iter()
+        .filter(|item| item.is_recommendation)
+        .map(|item| item.uri.clone())
+        .collect()
+}
 
 /// Marks a `ProvidedTrack` this app built for a smart-shuffle recommendation,
 /// as opposed to a real entry from the playlist itself. Not one of librespot's
@@ -32,6 +65,30 @@ pub fn recommended_track(uri: &str) -> ProvidedTrack {
         uid: Uuid::new_v4().as_simple().to_string(),
         provider: PROVIDER_RECOMMENDATION.to_string(),
         ..Default::default()
+    }
+}
+
+/// The playlist Spotify's own clients send the `enhance` signal to for Liked
+/// Songs. The web player hard-codes it (`spotify:playlist:37i9dQZF1F5p3rmiWPIYgZ`,
+/// the same for every account): the backend answers it as the asking user's
+/// Liked Songs. `getEligibility` for a collection finds no per-user playlist
+/// and falls back to this constant.
+pub const LIKED_SONGS_LENS_PLAYLIST: &str = "spotify:playlist:37i9dQZF1F5p3rmiWPIYgZ";
+
+/// Where smart shuffle recommendations come from for a playing context: the
+/// playlist itself, or the shared Liked Songs playlist for a user's
+/// collection (`spotify:user:<id>:collection`). `None` for anything else
+/// (albums, artists, single tracks), which have no smart shuffle.
+pub fn lens_playlist_uri(context_uri: &str) -> Option<String> {
+    if context_uri.starts_with("spotify:playlist:") {
+        return Some(context_uri.to_string());
+    }
+    let mut parts = context_uri.split(':');
+    match (parts.next(), parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("spotify"), Some("user"), Some(user), Some("collection"), None) if !user.is_empty() => {
+            Some(LIKED_SONGS_LENS_PLAYLIST.to_string())
+        }
+        _ => None,
     }
 }
 
@@ -171,6 +228,73 @@ pub fn summarize(content: &SelectedListContent) -> ProbeSummary {
         ));
     }
     summary
+}
+
+#[cfg(test)]
+mod lens_source_tests {
+    use super::*;
+
+    #[test]
+    fn a_playlist_is_its_own_source() {
+        assert_eq!(
+            lens_playlist_uri("spotify:playlist:3Gb1jkqu3ocILrA7TX8dHX").as_deref(),
+            Some("spotify:playlist:3Gb1jkqu3ocILrA7TX8dHX")
+        );
+    }
+
+    #[test]
+    fn liked_songs_uses_the_shared_lens_playlist() {
+        assert_eq!(
+            lens_playlist_uri("spotify:user:abc123:collection").as_deref(),
+            Some(LIKED_SONGS_LENS_PLAYLIST)
+        );
+    }
+
+    #[test]
+    fn contexts_without_smart_shuffle_have_no_source() {
+        for uri in [
+            "spotify:album:3jFA9WxhV1tIEzpg2VMxjm",
+            "spotify:track:1L0tsbU4DaOO3DCUuJZKoL",
+            "spotify:user:abc123:collection:artist:xyz",
+            "spotify:user::collection",
+            "spotify:artist:5GARimhxfjVVPvVBsplJlv",
+            "",
+        ] {
+            assert_eq!(lens_playlist_uri(uri), None, "{uri}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod recommended_tests {
+    use super::*;
+
+    fn item(uri: &str, is_recommendation: bool) -> PlaybackItem {
+        PlaybackItem {
+            uri: uri.to_string(),
+            is_recommendation,
+        }
+    }
+
+    #[test]
+    fn only_recommendations_are_recorded_never_the_playlists_own_tracks() {
+        let order = [item("a", false), item("r1", true), item("b", false), item("r2", true)];
+        let set = recommended_uris(&order);
+        assert_eq!(set.into_iter().collect::<Vec<_>>(), ["r1", "r2"]);
+    }
+
+    #[test]
+    fn recording_replaces_the_previous_set_and_clearing_empties_it() {
+        // One test owns the global, so parallel tests can't race on it.
+        record_recommendations(&[item("old", true)]);
+        assert!(is_recommended("old"));
+        record_recommendations(&[item("new", true), item("own", false)]);
+        assert!(!is_recommended("old"));
+        assert!(is_recommended("new"));
+        assert!(!is_recommended("own"));
+        clear_recommendations();
+        assert!(!is_recommended("new"));
+    }
 }
 
 #[cfg(test)]

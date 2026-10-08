@@ -189,6 +189,16 @@ pub(super) fn render_now_playing_hero(
 
     frame.render_widget(Block::default().borders(Borders::TOP), outer[1]);
     let lyrics_area = render_lyrics_credit(frame, app, outer[2], Alignment::Left);
+    if render_big_lyrics(
+        frame,
+        app,
+        images,
+        lyrics_area,
+        Anchor::Top,
+        Alignment::Left,
+    ) {
+        return;
+    }
     let lines = body_lines(app);
     let offset = top_anchored_offset(
         &lines,
@@ -381,7 +391,7 @@ pub(super) fn render_fullscreen_hero(
         width: cols[1].width.saturating_sub(2),
         ..cols[1]
     };
-    render_fullscreen_lyrics(frame, app, lyrics_area, Alignment::Left);
+    render_fullscreen_lyrics(frame, app, images, lyrics_area, Alignment::Left);
 }
 
 /// Splits off the last row of a lyrics pane for the credit line. Fewer than
@@ -424,20 +434,24 @@ pub(super) fn render_lyrics_credit(
     lyrics
 }
 
-// Lyrics are not enlarged. Block-glyph big text (`tui-big-text`, at several
-// sizes) and letter-spacing were each tried and rejected: too large, uneven, or
-// blocky rather than smooth. Bold text with a four-tier colour fade
-// (`bold_lines`, `lyric_tier_color`), centred by `center_current_line` /
-// `top_anchored_offset`, renders in the terminal's own font. Truly larger smooth
-// text would need rasterising lyrics to an image and showing it through a
-// graphics protocol, a separate piece of work.
+// Larger lyrics are an image (`big_lyrics`): block-glyph big text
+// (`tui-big-text`) and letter-spacing were each tried and rejected as too large,
+// uneven or blocky, and Ghostty has no text-sizing protocol. When that path is
+// unavailable (no graphics protocol, no font, `big_lyrics = false`) this falls
+// back to bold text with a four-tier colour fade (`bold_lines`,
+// `lyric_tier_color`), centred by `center_current_line`, in the terminal's own
+// font.
 pub(super) fn render_fullscreen_lyrics(
     frame: &mut Frame,
     app: &AppState,
+    images: &mut ImageState,
     area: Rect,
     alignment: Alignment,
 ) {
     let area = render_lyrics_credit(frame, app, area, alignment);
+    if render_big_lyrics(frame, app, images, area, Anchor::Centered, alignment) {
+        return;
+    }
     let (lines, offset) = center_current_line(
         bold_lines(body_lines(app)),
         current_body_line_row(app),
@@ -581,7 +595,7 @@ pub(super) fn render_fullscreen_hero_stacked(
     frame.render_widget(progress_gauge_bordered(app), meta_chunks[5]);
 
     frame.render_widget(Block::default().borders(Borders::TOP), outer[1]);
-    render_fullscreen_lyrics(frame, app, outer[2], Alignment::Center);
+    render_fullscreen_lyrics(frame, app, images, outer[2], Alignment::Center);
 }
 
 #[cfg(test)]

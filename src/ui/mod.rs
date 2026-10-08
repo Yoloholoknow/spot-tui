@@ -2,6 +2,7 @@
 //! fullscreen Now Playing layout.
 
 mod art;
+mod big_lyrics;
 mod help;
 mod lyrics_view;
 mod now_playing;
@@ -11,6 +12,8 @@ mod screens;
 mod theme;
 
 use self::art::*;
+pub use self::big_lyrics::BigLyrics;
+use self::big_lyrics::{Anchor, render_big_lyrics};
 use self::help::*;
 pub use self::lyrics_view::word_sweep_active;
 use self::lyrics_view::*;
@@ -89,6 +92,8 @@ pub struct ImageState {
     /// `cover_image` so a background prefetch can never replace what is on screen.
     /// Moved into `cover_image` when that track actually starts.
     pub prewarmed_cover: Option<(String, image::DynamicImage)>,
+    /// Lyrics rendered as an image; see `big_lyrics`.
+    pub big_lyrics: BigLyrics,
 }
 
 /// Delay between the first cover transmission and the one-shot retransmit; see

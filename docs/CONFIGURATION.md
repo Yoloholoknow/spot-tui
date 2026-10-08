@@ -37,6 +37,11 @@ The file can hold a secret API key, so keep it private: `chmod 600`.
 | `confirm_quit` | `true` | `Shift+Q` asks "Quit spot-tui? y/n" first. Set `false` to quit immediately. `Ctrl+C` always quits at once. |
 | `romanize_lyrics` | `false` | Start with Japanese, Chinese and Korean lyrics shown in Latin letters. `t` toggles it at any time; this only sets the starting state. |
 | `media_controls` | `true` | macOS only: show the current track in Now Playing (Control Center, Boring Notch) and accept media keys. Set `false` to turn it off. |
+| `big_lyrics` | `true` | Draw lyrics as an image so they can be larger than the terminal font. Needs a graphics-capable terminal (Kitty protocol, e.g. Ghostty) and a font on the system; otherwise the normal text is used. The word-by-word sweep still works: the current line is sent once as a green copy and a white copy, and the sweep switches between them one terminal cell at a time. A tiny image (a few KB) with a soft pixel-wide gradient is drawn over the few cells under the moving edge, so the edge glides instead of stepping. Set `false` for plain text. |
+| `lyrics_scale_fullscreen` | `2.5` | Lyric size in fullscreen, as a multiple of the terminal's text size. |
+| `lyrics_scale_compact` | `1.3` | Lyric size in the compact Now Playing pane. |
+| `lyrics_font` | none | Path to a `.ttf`/`.otf`/`.ttc` used for big lyrics before the system fonts (macOS, Linux and Windows locations are searched, with per-character fallback for CJK and Hangul). |
+| `word_sync_lead_ms` | `120` | How many milliseconds the word-by-word highlight runs ahead of playback, to offset display delay. Raise it if the highlight trails the singing, set `0` if it jumps ahead. |
 | `spicy_lyrics_key` | none | Key for the Spicy Lyrics developer API (`sl_sk_...`). Enables word-by-word synced lyrics from that source. Without it the source is skipped. |
 
 ```toml
@@ -44,6 +49,9 @@ spotify_client_id = "your_client_id"
 confirm_quit = true
 romanize_lyrics = false
 media_controls = true
+big_lyrics = true
+lyrics_scale_fullscreen = 2.5
+lyrics_scale_compact = 1.3
 spicy_lyrics_key = "sl_sk_..."
 ```
 

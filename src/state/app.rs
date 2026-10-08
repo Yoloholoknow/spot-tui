@@ -47,6 +47,10 @@ pub struct AppState {
     /// playing, `Some(false)` paused, so "broken" and "paused" look different.
     pub playing: Option<bool>,
     pub position: Duration,
+    /// How far ahead of the playback position the word sweep runs, so the
+    /// highlight meets the voice instead of trailing it (a character only lights
+    /// once its slice of the word is over, and drawing takes a few frames).
+    pub word_sync_lead: Duration,
     pub duration: Duration,
     /// Raw librespot volume (0..=u16::MAX), updated from `VolumeChanged`
     /// events -- reflects changes from any source, not just our own
@@ -130,6 +134,7 @@ impl AppState {
             fullscreen: false,
             playing: None,
             position: Duration::ZERO,
+            word_sync_lead: Duration::ZERO,
             duration: Duration::ZERO,
             volume: initial_volume,
             muted_volume: None,

@@ -9,7 +9,8 @@ same process that writes the report, never assigned by number afterwards.
     python3 scripts/graphify_build.py
 
 Scope comes from .graphifyignore (vendor/, graphify-out*/). Docs come from
-graphify's semantic cache; if any doc is uncached, run `/graphify .` once first.
+graphify's semantic cache; uncached docs are skipped with a warning (run
+`/graphify .` to add them).
 """
 import json
 import re
@@ -106,7 +107,13 @@ def main():
     docs = set(detection["files"].get("document", []))
     missing = [u for u in uncached if u in docs]
     if missing:
-        sys.exit(f"{len(missing)} doc(s) not in the semantic cache; run `/graphify .` first: {missing[:3]}")
+        # Not fatal: the code graph is rebuilt from source regardless, and the docs
+        # that are cached still contribute. Run `/graphify .` to add the rest.
+        print(
+            f"warning: {len(missing)} doc(s) not in the semantic cache, left out "
+            f"(run `/graphify .` to add them): {[Path(m).name for m in missing[:5]]}",
+            file=sys.stderr,
+        )
 
     seen = {n["id"] for n in ast["nodes"]}
     nodes = list(ast["nodes"]) + [n for n in cn if n["id"] not in seen]

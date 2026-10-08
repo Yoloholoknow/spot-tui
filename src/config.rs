@@ -71,6 +71,20 @@ pub struct Config {
     /// Publish the current track to macOS Now Playing and accept media keys
     /// (macOS only; ignored elsewhere).
     pub media_controls: bool,
+    /// Draw lyrics as an image so they can be larger than the terminal's own font
+    /// (needs a graphics-capable terminal and a system font; otherwise the normal
+    /// text is used). Set `big_lyrics = false` to always use plain text.
+    pub big_lyrics: bool,
+    /// Lyric size in multiples of the terminal's text size: fullscreen, and the
+    /// compact Now Playing pane. Only used when `big_lyrics` is on.
+    pub lyrics_scale_fullscreen: f32,
+    pub lyrics_scale_compact: f32,
+    /// Path to a `.ttf`/`.otf`/`.ttc` for big lyrics, tried before the system fonts.
+    pub lyrics_font: Option<String>,
+    /// Milliseconds the word-by-word highlight runs ahead of the playback position,
+    /// to make up for display delay. Raise it if the highlight trails the singing,
+    /// lower it (to 0) if it jumps ahead.
+    pub word_sync_lead_ms: u32,
 }
 
 impl Default for Config {
@@ -81,6 +95,11 @@ impl Default for Config {
             spotify_client_id: None,
             romanize_lyrics: false,
             media_controls: true,
+            big_lyrics: true,
+            lyrics_scale_fullscreen: 2.5,
+            lyrics_scale_compact: 1.3,
+            lyrics_font: None,
+            word_sync_lead_ms: 120,
         }
     }
 }
@@ -126,6 +145,34 @@ mod tests {
     fn empty_toml_uses_defaults() {
         let cfg: Config = toml::from_str("").unwrap();
         assert!(cfg.confirm_quit);
+    }
+
+    #[test]
+    fn big_lyrics_default_on_with_larger_fullscreen_than_compact() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.big_lyrics);
+        assert!(cfg.lyrics_scale_fullscreen > cfg.lyrics_scale_compact);
+        assert!(cfg.lyrics_scale_compact > 1.0);
+        assert!(cfg.lyrics_font.is_none());
+    }
+
+    #[test]
+    fn word_sync_lead_defaults_to_a_little_and_can_be_tuned() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.word_sync_lead_ms, 120);
+        let cfg: Config = toml::from_str("word_sync_lead_ms = 0").unwrap();
+        assert_eq!(cfg.word_sync_lead_ms, 0);
+    }
+
+    #[test]
+    fn big_lyrics_can_be_tuned_or_disabled() {
+        let cfg: Config = toml::from_str(
+            "big_lyrics = false\nlyrics_scale_fullscreen = 4.0\nlyrics_font = \"/x.ttf\"",
+        )
+        .unwrap();
+        assert!(!cfg.big_lyrics);
+        assert_eq!(cfg.lyrics_scale_fullscreen, 4.0);
+        assert_eq!(cfg.lyrics_font.as_deref(), Some("/x.ttf"));
     }
 
     #[test]

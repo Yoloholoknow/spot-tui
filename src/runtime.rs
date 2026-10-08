@@ -185,17 +185,24 @@ pub async fn run() -> std::io::Result<()> {
         None
     };
 
+    let big_lyrics = ui::BigLyrics::new(&cfg);
+    let word_sync_lead = Duration::from_millis(cfg.word_sync_lead_ms.min(1000) as u64);
     let mut rt = Runtime {
         terminal,
-        app: AppState::new(
-            cfg.romanize_lyrics,
-            pins::load("playlists"),
-            pins::load("tracks"),
-            player::INITIAL_VOLUME,
-        ),
+        app: {
+            let mut app = AppState::new(
+                cfg.romanize_lyrics,
+                pins::load("playlists"),
+                pins::load("tracks"),
+                player::INITIAL_VOLUME,
+            );
+            app.word_sync_lead = word_sync_lead;
+            app
+        },
         cfg,
         images: ui::ImageState {
             picker,
+            big_lyrics,
             ..Default::default()
         },
         scroll: ui::ScrollState::default(),
@@ -389,6 +396,8 @@ impl Runtime {
             pins::load("tracks"),
             player::INITIAL_VOLUME,
         );
+        self.app.word_sync_lead =
+            Duration::from_millis(self.cfg.word_sync_lead_ms.min(1000) as u64);
         self.svc.client = None;
         self.generation += 1;
         self.pending_lyrics = None;
@@ -503,7 +512,10 @@ impl Runtime {
                 // kitty-graphics image, and tmux gives the app no other
                 // signal. Clearing the cache forces the next render to
                 // re-encode and retransmit it.
-                Event::FocusGained => self.images.sized_covers.clear(),
+                Event::FocusGained => {
+                    self.images.sized_covers.clear();
+                    self.images.big_lyrics.invalidate();
+                }
                 Event::Key(key) => {
                     let mut ctx = KeyCtx {
                         app: &mut self.app,

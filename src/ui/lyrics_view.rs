@@ -37,6 +37,52 @@ pub(super) fn plain_display_lines(
         .collect()
 }
 
+/// Whether the current line is drawn word by word (its colours change as it is
+/// sung), as `body_lines` decides: a synced sheet whose shown line has word timing.
+pub(super) fn current_line_has_words(app: &AppState) -> bool {
+    let LyricsState::Synced(lines) = &app.lyrics else {
+        return false;
+    };
+    let current = app.current_line.unwrap_or(0);
+    let Some(line) = lines.get(current) else {
+        return false;
+    };
+    let romanized = app
+        .romanized_lines
+        .as_deref()
+        .filter(|r| r.len() == lines.len());
+    let (_, words) = display_line(
+        line,
+        romanized.and_then(|r| r[current].as_ref()),
+        app.romanize_lyrics,
+    );
+    !words.is_empty()
+}
+
+/// The voice's place along the current line (see `sweep_playhead`), shifted by the
+/// word-sync lead like the colours are. `None` when the line is not swept word by
+/// word, or its words overlap.
+pub(super) fn current_playhead(app: &AppState) -> Option<f32> {
+    let LyricsState::Synced(lines) = &app.lyrics else {
+        return None;
+    };
+    let current = app.current_line.unwrap_or(0);
+    let line = lines.get(current)?;
+    let romanized = app
+        .romanized_lines
+        .as_deref()
+        .filter(|r| r.len() == lines.len());
+    let (_, words) = display_line(
+        line,
+        romanized.and_then(|r| r[current].as_ref()),
+        app.romanize_lyrics,
+    );
+    if words.is_empty() {
+        return None;
+    }
+    sweep_playhead(words, (app.position + app.word_sync_lead).as_secs_f64())
+}
+
 pub(super) fn body_lines(app: &AppState) -> Vec<Line<'static>> {
     match &app.lyrics {
         // `header()` and the playbar's idle text already say "press / to search", so
@@ -93,7 +139,7 @@ pub(super) fn body_lines(app: &AppState) -> Vec<Line<'static>> {
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD);
                     Line::from(
-                        sweep_runs(words, app.position.as_secs_f64())
+                        sweep_runs(words, (app.position + app.word_sync_lead).as_secs_f64())
                             .into_iter()
                             .map(|(run, fill)| {
                                 Span::styled(run, if fill == Fill::Sung { sung } else { unsung })
@@ -175,6 +221,36 @@ pub fn sweep_runs(words: &[crate::lyrics::WordSeg], pos_secs: f64) -> Vec<(Strin
         }
     }
     runs
+}
+
+/// Where the voice is along the line, as a fractional character index (`k.f` means
+/// `k` characters done and a fraction `f` through the next), for a smooth edge
+/// instead of `sweep_runs`' whole characters. `None` when the words overlap in time
+/// (a background vocal sweeping on its own clock), which one edge cannot describe.
+pub fn sweep_playhead(words: &[crate::lyrics::WordSeg], pos_secs: f64) -> Option<f32> {
+    let mut offset = 0usize;
+    let mut previous_end = f64::NEG_INFINITY;
+    let mut head = None;
+    for word in words {
+        if word.start < previous_end - 1e-3 {
+            return None;
+        }
+        previous_end = previous_end.max(word.end);
+        let all = word.text.chars().count();
+        if head.is_none() {
+            if pos_secs >= word.end {
+                // Done: counts in full, trailing space included.
+            } else if pos_secs <= word.start {
+                head = Some(offset as f32);
+            } else {
+                let body = word.text.trim_end().chars().count();
+                let fraction = (pos_secs - word.start) / (word.end - word.start);
+                head = Some(offset as f32 + (fraction * body as f64) as f32);
+            }
+        }
+        offset += all;
+    }
+    Some(head.unwrap_or(offset as f32))
 }
 
 /// True while a word sweep is actually moving: playing, and the current line
@@ -469,6 +545,42 @@ mod sweep_tests {
             sweep_runs(&hi_there(), 1.7),
             vec![run("hi th", Fill::Sung), run("ere", Fill::Unsung)]
         );
+    }
+
+    #[test]
+    fn the_playhead_moves_smoothly_through_a_word_and_across_words() {
+        let words = vec![seg("hi ", 1.0, 1.4), seg("there", 1.4, 2.0)];
+        assert_eq!(sweep_playhead(&words, 0.0), Some(0.0));
+        // Halfway through "hi" (2 letters): 1.0 characters in.
+        let half = sweep_playhead(&words, 1.2).unwrap();
+        assert!((half - 1.0).abs() < 1e-4, "{half}");
+        let quarter = sweep_playhead(&words, 1.1).unwrap();
+        assert!((quarter - 0.5).abs() < 1e-4, "{quarter}");
+        // Between words, and after the last: whole words behind it.
+        assert_eq!(sweep_playhead(&words, 1.4), Some(3.0));
+        let into_there = sweep_playhead(&words, 1.7).unwrap();
+        assert!((into_there - 5.5).abs() < 1e-3, "{into_there}");
+        assert_eq!(sweep_playhead(&words, 9.0), Some(8.0));
+    }
+
+    #[test]
+    fn the_playhead_agrees_with_the_whole_characters_sweep_runs_colours() {
+        let words = vec![seg("hello ", 0.0, 1.0), seg("world", 1.0, 2.0)];
+        for t in [0.1, 0.45, 0.9, 1.0, 1.3, 1.99] {
+            let sung: usize = sweep_runs(&words, t)
+                .iter()
+                .filter(|(_, fill)| *fill == Fill::Sung)
+                .map(|(text, _)| text.chars().count())
+                .sum();
+            let head = sweep_playhead(&words, t).unwrap();
+            assert_eq!(head.floor() as usize, sung, "at {t}s the head is {head}");
+        }
+    }
+
+    #[test]
+    fn overlapping_words_have_no_single_playhead() {
+        let words = vec![seg("lead ", 0.0, 2.0), seg("echo", 1.0, 3.0)];
+        assert_eq!(sweep_playhead(&words, 1.5), None);
     }
 
     #[test]

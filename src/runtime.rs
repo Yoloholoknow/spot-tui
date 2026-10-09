@@ -645,6 +645,14 @@ impl Runtime {
         app.track_artist = (!artist.is_empty()).then(|| artist.clone());
         app.track_album = album.clone();
         app.current_track_uri = Some(uri.clone());
+        app.liked_check = None;
+        let mut ids = vec![uri.clone()];
+        if let Some(playing) = self.tracker.current_track_id()
+            && playing != uri
+        {
+            ids.push(playing.to_string());
+        }
+        self.svc.check_liked(ids);
         app.duration = Duration::from_millis(item.duration_ms as u64);
         app.lyrics = LyricsState::Loading;
         app.lyrics_credit = None;

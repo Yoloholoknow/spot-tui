@@ -11,6 +11,9 @@ pub struct AppState {
     /// Set with the three fields above. The cover cache is keyed on it,
     /// since artist and title alone can collide.
     pub current_track_uri: Option<String>,
+    /// Spotify's answer on whether the playing track is liked, as (every id it
+    /// goes by, liked).
+    pub liked_check: Option<(Vec<String>, bool)>,
     /// Where playback was started from: "Liked Songs", a playlist or album
     /// name, "Search". Display only. `n`/`p` skip within Spotify's own
     /// context and leave it alone, so it changes only on the next
@@ -121,6 +124,7 @@ impl AppState {
             track_artist: None,
             track_album: None,
             current_track_uri: None,
+            liked_check: None,
             context_label: None,
             username: None,
             shuffle: false,
@@ -161,6 +165,27 @@ impl AppState {
     // The rows each list screen shows, in display order, as
     // `(index into the fetched list, item)`; empty until loaded. Key handlers
     // read these, so they must match what the renderer shows.
+
+    /// Whether the playing track is in Liked Songs; `None` until that list has
+    /// loaded (or while nothing plays).
+    pub fn current_track_liked(&self) -> Option<bool> {
+        let uri = self.current_track_uri.as_deref()?;
+        let id = |u: &str| u.rsplit(':').next().unwrap_or_default().to_string();
+        if let Some((checked, liked)) = &self.liked_check
+            && checked.iter().any(|c| id(c) == id(uri))
+        {
+            return Some(*liked);
+        }
+        match &self.library.liked_songs {
+            // The playing uri may be a bare id or a full `spotify:track:` uri.
+            Fetch::Ready(items) => {
+                let id = |u: &str| u.rsplit(':').next().unwrap_or_default().to_string();
+                let want = id(uri);
+                Some(items.iter().any(|t| id(&t.uri) == want))
+            }
+            _ => None,
+        }
+    }
 
     pub fn liked_display(&self) -> Vec<(usize, &TrackResult)> {
         match &self.library.liked_songs {

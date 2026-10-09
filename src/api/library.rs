@@ -250,6 +250,30 @@ pub async fn like_track(client: &AuthCodeSpotify, track_uri: &str) -> Result<(),
         .map_err(|e| e.to_string())
 }
 
+/// Whether any of `track_uris` is saved. Asked of Spotify rather than matched
+/// against the Liked Songs list, and for every id the track goes by: Spotify
+/// relinks a track to a playable twin, so the id being played and the id that
+/// was saved can differ.
+pub async fn track_is_liked(
+    client: &AuthCodeSpotify,
+    track_uris: &[String],
+) -> Result<bool, String> {
+    if let Err(e) = ensure_fresh(client).await {
+        log::warn!(
+            "token refresh before track_is_liked failed, trying with existing token anyway: {e}"
+        );
+    }
+    let ids = track_uris
+        .iter()
+        .map(|u| track_id_for_library(u).map(LibraryId::Track))
+        .collect::<Result<Vec<_>, _>>()?;
+    client
+        .library_contains(ids)
+        .await
+        .map_err(|e| e.to_string())
+        .map(|v| v.contains(&true))
+}
+
 pub async fn unlike_track(client: &AuthCodeSpotify, track_uri: &str) -> Result<(), String> {
     if let Err(e) = ensure_fresh(client).await {
         log::warn!(

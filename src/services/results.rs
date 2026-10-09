@@ -34,6 +34,11 @@ pub enum LibraryFetchResult {
         result: Result<api::track::TrackIds, String>,
         view: TrackView,
     },
+    /// Whether the playing track is liked, for the heart on Now Playing.
+    NowPlayingLiked {
+        track_uris: Vec<String>,
+        result: Result<bool, String>,
+    },
 }
 
 /// Which of a track's pages to open once its ids arrive.
@@ -99,6 +104,10 @@ pub enum CrudResult {
         track_uri: String,
         result: Result<(), String>,
     },
+}
+
+fn same_track(a: &str, b: &str) -> bool {
+    a.rsplit(':').next() == b.rsplit(':').next()
 }
 
 fn into_fetch<T>(result: Result<T, String>) -> Fetch<T> {
@@ -174,6 +183,13 @@ impl Services {
                     state.detail = into_fetch(result);
                 }
             }
+            LibraryFetchResult::NowPlayingLiked { track_uris, result } => match result {
+                Ok(liked) => {
+                    log::info!("liked check {track_uris:?}: {liked}");
+                    app.liked_check = Some((track_uris, liked));
+                }
+                Err(e) => log::warn!("liked check for {track_uris:?} failed: {e}"),
+            },
             LibraryFetchResult::NowPlayingTrackIds { result, view } => match result {
                 Ok(ids) => match view {
                     TrackView::Artist => self.open_artist_detail(app, ids.artist_uri),
@@ -340,6 +356,11 @@ impl Services {
                 track_uri,
             } => {
                 log::info!("like_track[{track_uri}]: liked={liked}");
+                if let Some((ids, state)) = &mut app.liked_check
+                    && ids.iter().any(|u| same_track(u, &track_uri))
+                {
+                    *state = liked;
+                }
                 set_status(app, if liked { "liked" } else { "unliked" }, false);
                 self.refetch_liked_songs(app);
             }

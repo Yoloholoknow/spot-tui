@@ -136,7 +136,7 @@ pub(super) const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "Shift+L",
-                "like/unlike the selected (or currently playing) track -- Playlist Detail/Queue/Album Detail/Now Playing always like; Liked Songs always unlike, and confirms first (Ctrl+Up from Search, since every letter there has to reach the query box)",
+                "like/unlike the selected (or currently playing) track -- Playlist Detail/Queue/Album Detail always like; Now Playing toggles (the \u{2665} beside the shuffle/repeat icons shows the state); Liked Songs always unlike, and confirms first (Ctrl+Up from Search, since every letter there has to reach the query box)",
             ),
             (
                 "Shift+F",

@@ -17,7 +17,20 @@ pub fn handle(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> bool {
         // as lowercase plus a modifier would otherwise never reach it.
         KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'L', 'l') => {
             if let Some(uri) = playing_uri(ctx) {
-                ctx.svc.like_track(ctx.app, uri);
+                // A toggle, like the heart on the screen: unlike when already liked.
+                if ctx.app.current_track_liked() == Some(true) {
+                    // Whichever of its ids was saved.
+                    let ids = ctx
+                        .app
+                        .liked_check
+                        .as_ref()
+                        .map_or_else(|| vec![uri], |(ids, _)| ids.clone());
+                    for id in ids {
+                        ctx.svc.unlike_track(ctx.app, id);
+                    }
+                } else {
+                    ctx.svc.like_track(ctx.app, uri);
+                }
             }
         }
         KeyCode::Char(c) if is_shift_char(KeyCode::Char(c), key.modifiers, 'V', 'v') => {

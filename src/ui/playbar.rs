@@ -25,6 +25,63 @@ pub(super) fn render_playbar(frame: &mut Frame, app: &AppState, area: Rect) {
     );
 }
 
+/// Play state, time, volume and the shuffle/repeat toggles, for the Now Playing
+/// layouts (the playbar builds the same tail after its title).
+pub(super) fn status_line(app: &AppState) -> Line<'static> {
+    // Words, not the playbar's glyphs: those are a single small cell each, too
+    // easy to miss on a screen this big. On is bold accent, off is dim.
+    let [shuffle, smart, repeat] = playback_modes(app.shuffle, app.smart_shuffle, app.repeat);
+    let liked = app.current_track_liked() == Some(true);
+    let style = |on: bool| {
+        if on {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(DIM)
+        }
+    };
+    let shuffle_label = if smart.1 {
+        "shuffle \u{2726}"
+    } else {
+        "shuffle"
+    };
+    let repeat_label = if repeat.0.contains('1') {
+        "repeat 1"
+    } else {
+        "repeat"
+    };
+    Line::from(vec![
+        Span::raw(format!(
+            "{} {}   {}   ",
+            playing_icon(app),
+            time_readout(app),
+            volume_readout(app)
+        )),
+        Span::styled(shuffle_label, style(shuffle.1)),
+        Span::raw(" "),
+        Span::styled(repeat_label, style(repeat.1)),
+        Span::raw(" "),
+        Span::styled(
+            if liked {
+                "\u{2665} liked"
+            } else {
+                "\u{2661} like"
+            },
+            style(liked),
+        ),
+    ])
+}
+
+/// The playing title, with the smart-shuffle sparkle when the track was added
+/// by smart shuffle (so it is clear it is not in the playlist yet).
+pub(super) fn marked_title(app: &AppState, title: &str) -> String {
+    with_recommendation_marker(
+        title.to_string(),
+        app.current_track_uri
+            .as_deref()
+            .is_some_and(|u| recommended(app, u)),
+    )
+}
+
 pub(super) fn render_status(frame: &mut Frame, app: &AppState, area: Rect) {
     // Move mode's key hints live here, not in the one-line header, which does not
     // wrap. Checked before `app.status`: Enter and Esc clear move mode before any

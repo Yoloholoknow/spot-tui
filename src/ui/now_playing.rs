@@ -172,15 +172,7 @@ pub(super) fn render_now_playing_hero(
             meta_chunks[3],
         );
     }
-    frame.render_widget(
-        Paragraph::new(format!(
-            "{} {}   {}",
-            playing_icon(app),
-            time_readout(app),
-            volume_readout(app)
-        )),
-        meta_chunks[4],
-    );
+    frame.render_widget(Paragraph::new(status_line(app)), meta_chunks[4]);
     let gauge_area = Rect {
         width: meta_chunks[5].width.min(COMPACT_GAUGE_MAX_WIDTH),
         ..meta_chunks[5]
@@ -340,9 +332,12 @@ pub(super) fn render_fullscreen_hero(
     );
 
     frame.render_widget(
-        Paragraph::new(truncate_ellipsis(title, cols[0].width as usize))
-            .alignment(Alignment::Center)
-            .style(Style::default().add_modifier(Modifier::BOLD)),
+        Paragraph::new(truncate_ellipsis(
+            &marked_title(app, title),
+            cols[0].width as usize,
+        ))
+        .alignment(Alignment::Center)
+        .style(Style::default().add_modifier(Modifier::BOLD)),
         side_rows[3],
     );
     let artist_album = match &app.track_album {
@@ -367,13 +362,7 @@ pub(super) fn render_fullscreen_hero(
         );
     }
     frame.render_widget(
-        Paragraph::new(format!(
-            "{} {}   {}",
-            playing_icon(app),
-            time_readout(app),
-            volume_readout(app)
-        ))
-        .alignment(Alignment::Center),
+        Paragraph::new(status_line(app)).alignment(Alignment::Center),
         side_rows[6],
     );
     // The capsule is the same width as the art card, from the same `capsule_row`
@@ -556,9 +545,12 @@ pub(super) fn render_fullscreen_hero_stacked(
     }
 
     frame.render_widget(
-        Paragraph::new(truncate_ellipsis(title, meta_area.width as usize))
-            .alignment(Alignment::Center)
-            .style(Style::default().add_modifier(Modifier::BOLD)),
+        Paragraph::new(truncate_ellipsis(
+            &marked_title(app, title),
+            meta_area.width as usize,
+        ))
+        .alignment(Alignment::Center)
+        .style(Style::default().add_modifier(Modifier::BOLD)),
         meta_chunks[1],
     );
     let artist_album = match &app.track_album {
@@ -583,13 +575,7 @@ pub(super) fn render_fullscreen_hero_stacked(
         );
     }
     frame.render_widget(
-        Paragraph::new(format!(
-            "{} {}   {}",
-            playing_icon(app),
-            time_readout(app),
-            volume_readout(app)
-        ))
-        .alignment(Alignment::Center),
+        Paragraph::new(status_line(app)).alignment(Alignment::Center),
         meta_chunks[4],
     );
     frame.render_widget(progress_gauge_bordered(app), meta_chunks[5]);

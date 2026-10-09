@@ -1092,6 +1092,12 @@ pub(super) fn render_big_lyrics(
                     cols
                 ],
                 Sweep::Edge { x, row } => match overlapping {
+                    // A cell row straddling two text rows is coloured differently
+                    // above and below the edge's row, which a flat strip copy
+                    // cannot do: let the gradient image paint all of it.
+                    Some((first, last)) if first < last && first <= row && row <= last => {
+                        vec![Cell::Soft; cols]
+                    }
                     Some((first, last)) if first <= row && row <= last => (0..cols)
                         .map(|c| {
                             let (left, right) =

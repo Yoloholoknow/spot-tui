@@ -317,6 +317,22 @@ impl Services {
         app.album_detail = Some(state);
     }
 
+    /// Asks Spotify whether any of `track_uris` is liked; the answer lands in
+    /// `AppState::liked_check`.
+    pub fn check_liked(&self, track_uris: Vec<String>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        spawn_send(
+            &self.library_tx,
+            {
+                let uris = track_uris.clone();
+                async move { api::library::track_is_liked(&client, &uris).await }
+            },
+            move |result| LibraryFetchResult::NowPlayingLiked { track_uris, result },
+        );
+    }
+
     /// Looks up a playing track's artist/album, then opens `view`. Used by
     /// Now Playing, which only has the track's own URI.
     pub fn open_track_view(&self, app: &mut AppState, track_uri: &str, view: TrackView) {

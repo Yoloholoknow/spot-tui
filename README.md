@@ -41,7 +41,27 @@ to any other device.
 
 ## Install and run
 
-Set your client ID first (see Requirements), then:
+Set your client ID first (see Requirements), then pick one.
+
+**Install the `spot-tui` command** (from a clone of this repo):
+
+```sh
+cargo install --path . --locked
+```
+
+`--locked` keeps the pinned dependency versions and the vendored librespot
+patches. The binary lands in `~/.cargo/bin`. If `spot-tui` is "command not
+found", add that directory to your `PATH` (zsh shown; use `~/.bashrc` for bash):
+
+```sh
+echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Re-run the same `cargo install` command with `--force` to update after pulling.
+To uninstall: `cargo uninstall spot-tui`.
+
+**Or build and run in place:**
 
 ```sh
 cargo build --release
